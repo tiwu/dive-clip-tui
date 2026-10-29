@@ -1,0 +1,35 @@
+line-length = 100
+target-version = "py310"
+
+[lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "C4",
+    "RET",
+    "SIM",
+    "PERF",
+    "RUF",
+    "DTZ",
+    "TID",
+]
+
+ignore = [
+    "E501",
+    "B008",
+    "RET504",
+]
+
+unfixable = ["F401"]
+
+[lint.isort]
+known-first-party = ["scripts", "utils"]
+known-third-party = ["pydantic", "yaml", "requests", "anthropic", "google.generativeai"]
+
+[format]
+docstring-code-format = true
+preview = true
