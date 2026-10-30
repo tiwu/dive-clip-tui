@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-30
+
 ### Added
 - Add Rich console logging and inline updating progress bars for video scanning.
   Terminal output displays color-coded log levels, styled pipeline step banners,
