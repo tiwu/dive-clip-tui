@@ -127,6 +127,11 @@ lint, formatting, and changelog requirements.
   label/bump policy in `docs/plans/README.md`; merged PRs are released automatically.
 - **Linting/format:** `ruff` (config in `pyproject.toml` and `ruff.toml`). Line length
   `100`, target `py314`. `E501` is ignored (line length handled by formatter).
+- **GitHub Actions:** use recent action versions to avoid deprecated Node.js runner
+  warnings. When updating workflows, check external sources (GitHub API / releases)
+  to validate action versions, as internal knowledge may be outdated. Do not use
+  major-version-only tags for actions that do not publish them (e.g. use
+  `astral-sh/setup-uv@v10.3.3`, not `v10`).
 - **Data models:** Pydantic v2 in `utils/models.py` — keep manifest/detection JSON
   strictly validated.
 - **Console scripts:** registered in `pyproject.toml` `[project.scripts]`.
