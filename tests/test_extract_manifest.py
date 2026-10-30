@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 # Load scripts/01_extract_manifest.py directly
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -20,7 +17,9 @@ _manifest_spec.loader.exec_module(manifest)
 class MockClip:
     """Mock DaVinci Resolve clip object."""
 
-    def __init__(self, properties: dict[str, str], metadata: dict[str, str] | None = None, name: str = "clip"):
+    def __init__(
+        self, properties: dict[str, str], metadata: dict[str, str] | None = None, name: str = "clip"
+    ):
         self._properties = properties
         self._metadata = metadata or {}
         self._name = name
@@ -78,7 +77,7 @@ def test_resolve_property() -> None:
 def test_extract_folder_no_clips() -> None:
     """extract_folder should return empty list for folder with no clips."""
     folder = MockFolder()
-    result = manifest.extract_folder(folder, "Test Project", {"from_prefix": "", "to_prefix": ""})
+    result = manifest.extract_folder(folder)
     assert result == []
 
 
@@ -100,13 +99,12 @@ def test_extract_folder_with_clips() -> None:
         name="dive1",
     )
     folder = MockFolder(clips=[clip])
-    path_mapping = {"from_prefix": "/Volumes/ExtremeSSD/Madagascar", "to_prefix": "/media/data"}
 
-    result = manifest.extract_folder(folder, "Test Project", path_mapping)
+    result = manifest.extract_folder(folder)
 
     assert len(result) == 1
     assert result[0]["file_name"] == "dive1.mp4"
-    assert result[0]["file_path"] == "/media/data/dive1.mp4"  # path mapping applied
+    assert result[0]["file_path"] == "/Volumes/ExtremeSSD/Madagascar/dive1.mp4"
     assert result[0]["tags"] == ["turtle", "pelagic"]
     assert result[0]["fps"] == "25.0"
     assert result[0]["resolution"] == "1920x1080"
@@ -126,7 +124,7 @@ def test_extract_folder_skips_clips_without_keywords() -> None:
     )
     folder = MockFolder(clips=[clip_no_keywords, clip_with_keywords])
 
-    result = manifest.extract_folder(folder, "Test Project", {"from_prefix": "", "to_prefix": ""})
+    result = manifest.extract_folder(folder)
 
     assert len(result) == 1
     assert result[0]["file_name"] == "dive2.mp4"
@@ -142,7 +140,7 @@ def test_extract_folder_recursive() -> None:
     subfolder = MockFolder(clips=[clip])
     folder = MockFolder(subfolders=[subfolder])
 
-    result = manifest.extract_folder(folder, "Test Project", {"from_prefix": "", "to_prefix": ""})
+    result = manifest.extract_folder(folder)
 
     assert len(result) == 1
     assert result[0]["file_name"] == "deep.mp4"
@@ -179,7 +177,7 @@ def test_clip_id_hash_fallback() -> None:
         name="dive",
     )
     folder = MockFolder(clips=[clip])
-    result = manifest.extract_folder(folder, "Test Project", {"from_prefix": "", "to_prefix": ""})
+    result = manifest.extract_folder(folder)
 
     assert len(result) == 1
     assert result[0]["clip_id"] != ""  # Should have a hash-based ID

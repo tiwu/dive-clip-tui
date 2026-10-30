@@ -12,8 +12,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.models import ClipManifest, ManifestOutput
@@ -55,9 +53,7 @@ def resolve_property(clip: Any, prop: str) -> str:
         return ""
 
 
-def extract_folder(
-    folder: Any, project_name: str, path_mapping: dict[str, str]
-) -> list[dict]:
+def extract_folder(folder: Any) -> list[dict]:
     """Recursively extract clips from a Media Pool folder."""
     clips: list[dict] = []
 
@@ -78,11 +74,6 @@ def extract_folder(
                 continue
 
             file_path = resolve_path(clip)
-            # Apply path mapping for portability between macOS and Linux
-            from_prefix = path_mapping.get("from_prefix", "")
-            to_prefix = path_mapping.get("to_prefix", "")
-            if from_prefix and file_path.startswith(from_prefix):
-                file_path = to_prefix + file_path[len(from_prefix) :]
 
             width = resolve_property(clip, "Width")
             height = resolve_property(clip, "Height")
@@ -105,7 +96,7 @@ def extract_folder(
 
     for subfolder in subfolders:
         try:
-            clips.extend(extract_folder(subfolder, project_name, path_mapping))
+            clips.extend(extract_folder(subfolder))
         except Exception as exc:
             print(f"WARNING: Failed to traverse subfolder: {exc}")
             continue
@@ -115,21 +106,6 @@ def extract_folder(
 
 def main() -> None:
     """Main entry point."""
-    # Try to load config
-    config_path = Path(__file__).resolve().parent.parent / "config.yaml"
-    path_mapping = {"from_prefix": "", "to_prefix": ""}
-
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                config = yaml.safe_load(f)
-            path_mapping = (
-                config.get("general", {}).get("path_mapping", {"from_prefix": "", "to_prefix": ""})
-                or {"from_prefix": "", "to_prefix": ""}
-            )
-        except Exception:
-            pass
-
     resolve = get_resolve()
     if resolve is None:
         sys.exit(1)
@@ -146,7 +122,7 @@ def main() -> None:
         print("ERROR: No root folder in Media Pool.")
         sys.exit(1)
 
-    clips = extract_folder(root_folder, project.GetName(), path_mapping)
+    clips = extract_folder(root_folder)
 
     output = ManifestOutput(
         project_name=project.GetName(),

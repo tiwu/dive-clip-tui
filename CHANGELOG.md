@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Removed
+- Remove `general.path_mapping`, which only rewrote media paths exported by the
+  DaVinci Resolve manifest extractor (`scripts/01_extract_manifest.py`). The
+  CLI-first ingest flow records the paths it is given on the command line, so
+  the setting was dead config; the shipped value also mapped a prefix onto
+  itself.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added

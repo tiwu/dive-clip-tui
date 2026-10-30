@@ -4,9 +4,6 @@
 
 general:
   project_name: "Madagascar_Dives_2026_Subjects"
-  path_mapping:
-    from_prefix: "/Volumes/ExtremeSSD/Madagascar"
-    to_prefix: "/media/ubuntu/ExtremeSSD/Madagascar"
   output_dir: "./outputs_subjects"
 
 ollama:

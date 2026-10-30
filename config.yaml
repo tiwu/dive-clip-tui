@@ -2,10 +2,6 @@
 
 general:
   project_name: "Madagascar_Dives_2026"
-  # Path mapping: makes the script portable between macOS and Linux
-  path_mapping:
-    from_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
-    to_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
   output_dir: "/Volumes/SAMSUNG T9/dive-processing-test/out"
 
 ollama:

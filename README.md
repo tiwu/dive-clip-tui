@@ -35,9 +35,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Review `config.yaml` before scanning. In particular, set `general.output_dir`,
-the Ollama model/host, and any `general.path_mapping` needed to locate media
-across machines.
+Review `config.yaml` before scanning. In particular, set `general.output_dir`
+and the Ollama model/host.
 
 ### Using a remote Ollama
 
