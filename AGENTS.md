@@ -18,6 +18,7 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 - `README.md` — full setup, configuration, and execution guide
 - `docs/roadmap/simple_plan.md` — active simplified MVP plan (supersedes `roadmap.md`)
 - `docs/roadmap/roadmap.md` — kept for reference
+- `docs/plans/` - folder for architecture plans
 - `config.yaml` — paths, thresholds, Ollama endpoints, API keys
 - `projectplan_technische_specificatie.md` — technical specification
 
@@ -57,7 +58,9 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 │   ├── app.py                # Main TUI application
 │   └── screens/              # browse.py, pipeline.py, review.py
 ├── tests/                    # Pytest tests (+ conftest.py fixtures)
-├── docs/roadmap/             # roadmap.md, simple_plan.md
+├── docs/
+|   └── roadmap/              # roadmap.md, simple_plan.md
+|   └── plans/                # architecture plans
 └── outputs/                  # Generated outputs (manifest, detections, EDL, etc.)
 ```
 
@@ -101,72 +104,7 @@ Note: `scripts/` and `utils/` are known first-party packages for ruff/isort
 
 ## 🔁 Feature workflow (required convention)
 
-When we discuss a feature and make a plan, follow this exact workflow:
-
-### 1. Create a GitHub issue with the plan
-
-After the plan is discussed and agreed, open an issue via the `gh` CLI so the plan
-is tracked and reviewable:
-
-```bash
-gh issue create \
-  --title "<short feature title>" \
-  --body "<the full plan / design notes>" \
-  --label "feature"
-```
-
-The issue body should contain the plan: goal, files involved, definition of done, and
-any open questions. Note the issue number (e.g. `#12`).
-
-### 2. Wait for plan review
-
-Do not start implementing until the issue/plan has been reviewed and approved.
-
-### 3. Create a new branch referring to the issue
-
-Once the plan is reviewed, create a feature branch from `main` that references the
-issue:
-
-```bash
-git checkout main
-git pull
-git checkout -b feature/issue-<N>-<short-slug>
-```
-
-Example: `git checkout -b feature/issue-12-ingest-media`
-
-### 4. Do the work as per the plan
-
-- Implement the changes described in the approved plan.
-- Keep changes surgical and scoped to the issue.
-- Follow existing conventions (Pydantic models in `utils/models.py`, ruff lint config,
-  `uv run` for scripts, `pytest` for tests).
-- Add or update tests under `tests/` when behavior changes.
-- Update `README.md` and/or `docs/roadmap/simple_plan.md` if the change affects setup,
-  usage, or the plan.
-
-### 5. Verify before pushing
-
-```bash
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-```
-
-### 6. Create a PR for review
-
-Push the branch and open a pull request referring to the issue:
-
-```bash
-git push -u origin feature/issue-<N>-<short-slug>
-gh pr create \
-  --title "<feature title>" \
-  --body "Implements #<N>. <short summary of what was done and how to test>" \
-  --label "feature"
-```
-
-Request review. The PR should reference the issue it closes (e.g. `Closes #<N>` or
-`Resolves #<N>` in the body) so GitHub links them automatically.
+When we discuss a feature and make a plan, follow the workflow in `docs/plans/README.md`.
 
 ---
 
