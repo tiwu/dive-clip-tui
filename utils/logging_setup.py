@@ -12,6 +12,9 @@ import logging
 import time
 from pathlib import Path
 
+from rich.console import Console
+from rich.logging import RichHandler
+
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # Marks the handlers this module installs, so reconfiguring replaces only those
@@ -25,22 +28,38 @@ def default_log_path(output_dir: Path) -> Path:
     return Path(output_dir) / "logs" / f"run-{stamp}.log"
 
 
-def configure_logging(debug: bool = False, log_file: Path | None = None) -> Path | None:
+def configure_logging(
+    debug: bool = False,
+    log_file: Path | None = None,
+    console: Console | None = None,
+) -> Path | None:
     """Send root logging to stderr and, when given, to `log_file`.
 
-    The logfile is opened in append mode so a step that is retried within the
-    same run keeps a single transcript. Returns the resolved logfile path, or
-    None when no logfile was requested.
+    Terminal logging uses `RichHandler` for clean visual output. The logfile
+    uses standard timestamped formatting in append mode so a step that is
+    retried within the same run keeps a single transcript. Returns the resolved
+    logfile path, or None when no logfile was requested.
     """
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    active_console = console or Console(stderr=True)
+    console_handler = RichHandler(
+        console=active_console,
+        show_time=True,
+        show_path=False,
+        markup=False,
+        rich_tracebacks=True,
+    )
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    handlers: list[logging.Handler] = [console_handler]
     resolved: Path | None = None
 
     if log_file is not None:
         resolved = Path(log_file)
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(resolved, mode="a", encoding="utf-8"))
+        file_handler = logging.FileHandler(resolved, mode="a", encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        handlers.append(file_handler)
 
-    formatter = logging.Formatter(LOG_FORMAT)
     root = logging.getLogger()
 
     # Close the previous configuration's file handles before dropping them.
@@ -51,7 +70,6 @@ def configure_logging(debug: bool = False, log_file: Path | None = None) -> Path
 
     root.setLevel(logging.DEBUG if debug else logging.INFO)
     for handler in handlers:
-        handler.setFormatter(formatter)
         setattr(handler, _OWNED_ATTR, True)
         root.addHandler(handler)
 

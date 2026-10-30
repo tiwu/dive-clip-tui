@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 
 import yaml
+from rich.console import Console
+from rich.panel import Panel
+from rich.rule import Rule
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
@@ -28,7 +31,11 @@ logger = logging.getLogger(__name__)
 
 def run(cmd: list[str], description: str) -> int:
     """Run a command, streaming output to stdout/stderr. Returns exit code."""
-    logger.info("=== %s ===", description)
+    console = Console(stderr=True)
+    if console.is_terminal:
+        console.print(Rule(f"[bold cyan]{description}[/bold cyan]", style="cyan"))
+    else:
+        logger.info("=== %s ===", description)
     logger.debug("$ %s", " ".join(cmd))
     try:
         result = subprocess.run(cmd, check=False)
@@ -95,6 +102,18 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 1
 
     output_folder.mkdir(parents=True, exist_ok=True)
+
+    console = Console(stderr=True)
+    if console.is_terminal:
+        console.print(
+            Panel(
+                f"[bold white]Input:[/]  [yellow]{input_folder}[/]\n"
+                f"[bold white]Output:[/] [yellow]{output_folder}[/]\n"
+                f"[bold white]Config:[/] [yellow]{config}[/]",
+                title="[bold green]Dive Clip Curation Pipeline[/bold green]",
+                border_style="green",
+            )
+        )
 
     log_path = args.log_file or default_log_path(output_folder)
     configure_logging(debug=debug_mode, log_file=log_path)
@@ -197,6 +216,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
     else:
         logger.info("Step 3/3: Render clips (MP4 highlights) — SKIPPED (already done)")
 
+    if console.is_terminal:
+        console.print(
+            Panel(
+                f"[bold green]Pipeline complete![/bold green]\n"
+                f"[bold white]Highlights in:[/] [cyan]{output_folder}[/]",
+                border_style="green",
+            )
+        )
     logger.info("✓ Pipeline complete. Highlights in: %s", output_folder)
     return 0
 
