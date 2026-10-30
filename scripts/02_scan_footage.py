@@ -115,7 +115,7 @@ def process_clip(
     coarse_elapsed_total = 0.0
 
     for frame_index, frame in enumerate(coarse_frames, start=1):
-        logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
+        logger.info("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
 
         start_time = time.perf_counter()
         result = call_ollama(
