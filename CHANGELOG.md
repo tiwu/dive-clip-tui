@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-30
+
 ### Added
 - `dive-clip scan` now writes a timestamped transcript of each run to
   `<output>/logs/run-<YYYYmmdd-HHMMSS>.log`, alongside the usual stderr output.
