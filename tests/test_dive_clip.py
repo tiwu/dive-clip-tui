@@ -97,6 +97,7 @@ def test_cmd_scan_skips_completed_steps(tmp_path: Path) -> None:
         resume=False,
         reset=False,
         debug=False,
+        log_file=None,
     )
 
     with patch("scripts.dive_clip.subprocess.run") as mock_run:
@@ -121,6 +122,7 @@ def test_cmd_scan_runs_all_steps(tmp_path: Path) -> None:
         resume=False,
         reset=False,
         debug=False,
+        log_file=None,
     )
 
     mock_result = MagicMock(returncode=0)
@@ -154,6 +156,7 @@ def test_cmd_scan_reset_state(tmp_path: Path) -> None:
         resume=False,
         reset=True,
         debug=False,
+        log_file=None,
     )
 
     mock_result = MagicMock(returncode=0)
@@ -200,6 +203,7 @@ def _scan_args(tmp_path: Path, *, debug: bool) -> argparse.Namespace:
         resume=False,
         reset=False,
         debug=debug,
+        log_file=None,
     )
 
 
@@ -319,6 +323,7 @@ def test_cmd_scan_exits_when_paths_unresolvable(tmp_path: Path) -> None:
         resume=False,
         reset=False,
         debug=False,
+        log_file=None,
     )
 
     assert cmd_scan(args) == 2
@@ -334,3 +339,32 @@ def test_cmd_scan_passes_output_dir_to_scan_step(tmp_path: Path) -> None:
     scan_cmd = mock.call_args_list[1].args[0]
     assert "--output-dir" in scan_cmd
     assert scan_cmd[scan_cmd.index("--output-dir") + 1] == args.output
+
+
+def test_cmd_scan_writes_timestamped_logfile(tmp_path: Path) -> None:
+    """Every scan run should leave one timestamped logfile under the output dir."""
+    args = _scan_args(tmp_path, debug=False)
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
+        assert cmd_scan(args) == 0
+
+    logs = sorted((Path(args.output) / "logs").glob("run-*.log"))
+    assert len(logs) == 1
+    assert logs[0].read_text(encoding="utf-8").strip(), "logfile should not be empty"
+
+    for cmd in (call.args[0] for call in mock.call_args_list):
+        assert "--log-file" in cmd
+        assert cmd[cmd.index("--log-file") + 1] == str(logs[0])
+
+
+def test_cmd_scan_honours_explicit_log_file(tmp_path: Path) -> None:
+    """--log-file should replace the default timestamped location."""
+    args = _scan_args(tmp_path, debug=False)
+    custom = tmp_path / "nested" / "custom.log"
+    args.log_file = custom
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)):
+        assert cmd_scan(args) == 0
+
+    assert custom.exists()
+    assert not (Path(args.output) / "logs").exists()

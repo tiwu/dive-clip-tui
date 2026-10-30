@@ -120,6 +120,20 @@ Each pass ends with a summary line at info level, so a normal run (without
 detections survived deduplication. Use those numbers to adjust
 `coarse_confidence_threshold`, `coarse_fps`, and `fine_fps`.
 
+Every run also writes a transcript of its terminal output to
+`<output>/logs/run-<YYYYmmdd-HHMMSS>.log`. The file is timestamped per run and
+older runs are never deleted, so long unattended batches stay inspectable.
+Ingest, scan, and render all append to the same file. To pick the location
+yourself:
+
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights --log-file ./my-run.log
+```
+
+The individual step scripts accept `--log-file` too, so a hand-run
+`scripts/02_scan_footage.py` can log somewhere other than the default output
+folder.
+
 The pipeline writes a JSON manifest, refined detections, and rendered MP4 clips
 to the configured output location.
 

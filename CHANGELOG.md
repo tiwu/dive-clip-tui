@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- `dive-clip scan` now writes a timestamped transcript of each run to
+  `<output>/logs/run-<YYYYmmdd-HHMMSS>.log`, alongside the usual stderr output.
+  Every run gets its own file and older logs are kept. The chained ingest, scan,
+  and render steps receive the path so their log records land in the same
+  transcript. Pass `--log-file PATH` to choose a location, or to write to a
+  specific file when running the step scripts directly. Logging configuration now
+  lives in `utils/logging_setup.py` instead of being repeated per script.
+
 ## [0.6.1] - 2026-10-30
 
 ### Added
