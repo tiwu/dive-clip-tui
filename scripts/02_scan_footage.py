@@ -28,16 +28,16 @@ from rich.progress import (
     SpinnerColumn,
     TaskProgressColumn,
     TextColumn,
-    TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.table import Column
 from rich.text import Text
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.checkpoint import PipelineState
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
-from utils.logging_setup import configure_logging
+from utils.logging_setup import configure_logging, get_console
 from utils.models import DetectionsRefined, RefinedDetection
 from utils.ollama_client import OllamaClient, resolve_host
 from utils.prompt_templates import (
@@ -80,16 +80,16 @@ class StatusColumn(ProgressColumn):
 
 def create_scan_progress(console: Console | None = None) -> Progress:
     """Create a configured Rich Progress instance for video scanning."""
-    active_console = console or Console(stderr=True)
+    active_console = console or get_console()
     return Progress(
         SpinnerColumn(),
-        TextColumn("[bold cyan]{task.description}"),
-        BarColumn(),
+        TextColumn(
+            "[bold cyan]{task.description}",
+            table_column=Column(no_wrap=True, overflow="ellipsis", max_width=32),
+        ),
+        BarColumn(bar_width=16),
         TaskProgressColumn(),
         MofNCompleteColumn(),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        TextColumn("• ETA"),
         TimeRemainingColumn(),
         StatusColumn(),
         console=active_console,

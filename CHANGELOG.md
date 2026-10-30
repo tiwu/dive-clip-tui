@@ -16,6 +16,11 @@ All notable changes to this project are documented here. This changelog follows
   now streams newly detected clips to a background render worker that cuts MP4
   highlights concurrently while subsequent videos are being scanned.
 
+### Fixed
+- Fix terminal line wrapping and progress bar interleaving during video scanning
+  by sharing the process-wide Rich `Console` instance between `RichHandler` and
+  `Progress`, and constraining task columns with bounded widths and text truncation.
+
 ## [0.8.0] - 2026-10-30
 
 ### Added

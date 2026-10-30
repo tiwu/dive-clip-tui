@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from rich.logging import RichHandler
 
-from utils.logging_setup import _OWNED_ATTR, configure_logging, default_log_path
+from utils.logging_setup import _OWNED_ATTR, configure_logging, default_log_path, get_console
 
 
 def _owned_file_handlers() -> list[logging.FileHandler]:
@@ -132,3 +132,17 @@ def test_file_handler_retains_plain_format(tmp_path: Path) -> None:
 
     content = log_path.read_text(encoding="utf-8")
     assert " - test_module - INFO - plain formatted message\n" in content
+
+
+def test_get_console_returns_shared_instance() -> None:
+    """get_console should return the shared Console instance used by RichHandler."""
+    console1 = get_console()
+    console2 = get_console()
+    assert console1 is console2
+
+    configure_logging()
+    root = logging.getLogger()
+    rich_handlers = [
+        h for h in root.handlers if isinstance(h, RichHandler) and getattr(h, _OWNED_ATTR, False)
+    ]
+    assert rich_handlers[0].console is console1

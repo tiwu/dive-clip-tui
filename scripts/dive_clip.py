@@ -19,7 +19,6 @@ import threading
 from pathlib import Path
 
 import yaml
-from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 
@@ -27,14 +26,14 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
-from utils.logging_setup import configure_logging, default_log_path  # noqa: E402
+from utils.logging_setup import configure_logging, default_log_path, get_console  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 
 def run(cmd: list[str], description: str) -> int:
     """Run a command, streaming output to stdout/stderr. Returns exit code."""
-    console = Console(stderr=True)
+    console = get_console()
     if console.is_terminal:
         console.print(Rule(f"[bold cyan]{description}[/bold cyan]", style="cyan"))
     else:
@@ -142,7 +141,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    console = Console(stderr=True)
+    console = get_console()
     if console.is_terminal:
         console.print(
             Panel(

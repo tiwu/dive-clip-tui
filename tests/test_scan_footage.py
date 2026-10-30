@@ -738,6 +738,19 @@ def test_process_clip_updates_progress_tasks(tmp_path: Path) -> None:
     assert mock_progress.advance.call_count >= 2
 
 
+def test_create_scan_progress_layout() -> None:
+    """create_scan_progress should use the shared console and bounded column layout."""
+    from utils.logging_setup import get_console
+
+    progress = scan.create_scan_progress()
+    assert progress.console is get_console()
+    assert len(progress.columns) > 0
+    # Check that BarColumn has a bounded width to prevent terminal line wrapping
+    bar_cols = [c for c in progress.columns if isinstance(c, scan.BarColumn)]
+    assert len(bar_cols) == 1
+    assert bar_cols[0].bar_width is not None
+
+
 def test_process_clip_passes_scale_parameters(tmp_path: Path) -> None:
     """process_clip should pass coarse_scale and fine_scale to extract_frames."""
     video = tmp_path / "video.mp4"
