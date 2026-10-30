@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-30
+
 ### Added
 - Add frame downscaling for fast coarse scanning, atomic per-clip detection
   persistence with resume support, and concurrent highlight clip rendering.
