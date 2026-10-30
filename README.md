@@ -76,6 +76,13 @@ uv run dive-clip scan --input ./footage --output ./highlights
 
 A custom config can be selected with `--config`.
 
+> [!CAUTION]
+> Keep the input and output folders separate and non-nested. Ingestion walks the
+> input folder recursively, so an output folder placed inside it (such as
+> `./footage/highlights`) gets picked up as more footage on the next run and
+> silently inflates the manifest. Use sibling folders, for example `./footage`
+> and `./highlights`, not `./footage` and `./footage/highlights`.
+
 The command supports checkpointing and can resume completed steps:
 
 ```bash
