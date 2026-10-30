@@ -13,6 +13,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from utils.logging_setup import configure_logging
+
 logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mpg", ".mpeg"}
@@ -116,16 +120,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", default="outputs/manifest_raw.json", help="Output manifest JSON path"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Append this run's log lines to the given file",
+    )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    configure_logging(debug=args.debug, log_file=args.log_file)
 
     folder = Path(args.input)
     if not folder.exists():

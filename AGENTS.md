@@ -55,6 +55,7 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 ├── utils/                    # Shared helpers
 │   ├── checkpoint.py         # Pipeline checkpoint / resume state
 │   ├── ffmpeg_streamer.py    # Frame sampling helpers (/dev/shm & buffers)
+│   ├── logging_setup.py      # Shared stderr + per-run logfile configuration
 │   ├── models.py             # Pydantic data models (manifest, detections)
 │   ├── ollama_client.py      # Shared Ollama requests and metrics
 │   ├── prompt_templates.py   # Dynamic prompts per keyword category

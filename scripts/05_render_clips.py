@@ -21,6 +21,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.checkpoint import PipelineState
+from utils.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +107,15 @@ def main() -> None:
         default=None,
         help="Pipeline state file to heartbeat (default: not written)",
     )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Append this run's log lines to the given file",
+    )
     args = parser.parse_args()
 
-    # Configure logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    configure_logging(debug=args.debug, log_file=args.log_file)
 
     config_path = Path(args.config)
     if not config_path.exists():

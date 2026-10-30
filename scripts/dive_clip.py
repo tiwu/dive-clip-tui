@@ -21,6 +21,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
+from utils.logging_setup import configure_logging, default_log_path  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +96,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     output_folder.mkdir(parents=True, exist_ok=True)
 
-    # Configure logging based on debug flag
-    log_level = logging.DEBUG if debug_mode else logging.INFO
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        force=True,
-    )
+    log_path = args.log_file or default_log_path(output_folder)
+    configure_logging(debug=debug_mode, log_file=log_path)
+    logger.info("Logging to %s", log_path)
 
     state_path = output_folder / ".pipeline_state.json"
     state = PipelineState(state_path)
@@ -121,6 +118,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         str(input_folder),
         "--output",
         str(manifest_path),
+        "--log-file",
+        str(log_path),
     ]
     if debug_mode:
         ingest_cmd.append("--debug")
@@ -148,6 +147,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         str(output_folder),
         "--state-path",
         str(state_path),
+        "--log-file",
+        str(log_path),
     ]
     if debug_mode:
         scan_cmd.append("--debug")
@@ -177,6 +178,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         str(output_folder),
         "--state-path",
         str(state_path),
+        "--log-file",
+        str(log_path),
     ]
     if debug_mode:
         render_cmd.append("--debug")
@@ -224,6 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--reset",
         action="store_true",
         help="Reset pipeline state before starting",
+    )
+    scan_p.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Logfile path (defaults to <output>/logs/run-<timestamp>.log)",
     )
     scan_p.set_defaults(func=cmd_scan)
 
