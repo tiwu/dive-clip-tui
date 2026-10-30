@@ -37,14 +37,21 @@ def render_clip(
     start_time: float,
     end_time: float,
     output_path: Path,
+    log_to_console: bool = True,
 ) -> bool:
     """Extract a time window from a video file as an MP4 clip.
 
     Returns True on success, False on failure.
     """
+    extra = {"no_console": True} if not log_to_console else {}
     duration = end_time - start_time
     if duration <= 0:
-        logger.warning("Skipping %s: non-positive duration %s", source_path.name, duration)
+        logger.warning(
+            "Skipping %s: non-positive duration %s",
+            source_path.name,
+            duration,
+            extra=extra,
+        )
         return False
 
     cmd = [
@@ -70,17 +77,22 @@ def render_clip(
 
     try:
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Running FFmpeg command: %s", " ".join(cmd))
+            logger.debug("Running FFmpeg command: %s", " ".join(cmd), extra=extra)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        logger.warning("FFmpeg timeout rendering %s", output_path.name)
+        logger.warning("FFmpeg timeout rendering %s", output_path.name, extra=extra)
         return False
     except Exception as exc:
-        logger.warning("FFmpeg error rendering %s: %s", output_path.name, exc)
+        logger.warning("FFmpeg error rendering %s: %s", output_path.name, exc, extra=extra)
         return False
 
     if result.returncode != 0:
-        logger.warning("FFmpeg failed for %s: %s", output_path.name, result.stderr.strip()[:200])
+        logger.warning(
+            "FFmpeg failed for %s: %s",
+            output_path.name,
+            result.stderr.strip()[:200],
+            extra=extra,
+        )
         return False
 
     return True
@@ -90,6 +102,7 @@ def render_detections(
     detections: list[dict | Any],
     highlights_dir: Path,
     state: PipelineState | None = None,
+    log_to_console: bool = True,
 ) -> tuple[int, int]:
     """Render detection windows into standalone MP4 clips.
 
@@ -101,11 +114,18 @@ def render_detections(
 
     rendered = 0
     failed = 0
+    extra = {"no_console": True} if not log_to_console else {}
     for i, item in enumerate(detections, 1):
         det = item.model_dump() if hasattr(item, "model_dump") else item
         source_path = Path(det.get("file_path", ""))
         if not source_path.exists():
-            logger.warning("  [%d/%d] SKIP: source not found: %s", i, len(detections), source_path)
+            logger.warning(
+                "  [%d/%d] SKIP: source not found: %s",
+                i,
+                len(detections),
+                source_path,
+                extra=extra,
+            )
             failed += 1
             continue
 
@@ -119,24 +139,43 @@ def render_detections(
         output_path = highlights_dir / output_name
 
         if output_path.exists() and output_path.stat().st_size > 0:
-            logger.debug("  [%d/%d] SKIP: already rendered: %s", i, len(detections), output_name)
+            logger.debug(
+                "  [%d/%d] SKIP: already rendered: %s",
+                i,
+                len(detections),
+                output_name,
+                extra=extra,
+            )
             continue
 
         if state is not None:
             state.set_activity(f"render: {i}/{len(detections)} {output_name}")
 
-        logger.info(
-            "  [%d/%d] %s [%.1fs-%.1fs] -> %s",
-            i,
-            len(detections),
-            source_path.name,
-            start_time,
-            end_time,
-            output_name,
+        msg = (
+            f"  [{i}/{len(detections)}] {source_path.name} "
+            f"[{start_time:.1f}s-{end_time:.1f}s] -> {output_name}"
         )
+        if not log_to_console:
+            msg = (
+                f"  [{i}/{len(detections)}] (background) {source_path.name} "
+                f"[{start_time:.1f}s-{end_time:.1f}s] -> {output_name}"
+            )
+
+        logger.info(msg, extra=extra)
 
         clip_start = time.perf_counter()
-        if render_clip(source_path, start_time, end_time, output_path):
+        if log_to_console:
+            ok = render_clip(source_path, start_time, end_time, output_path)
+        else:
+            ok = render_clip(
+                source_path,
+                start_time,
+                end_time,
+                output_path,
+                log_to_console=False,
+            )
+
+        if ok:
             rendered += 1
             logger.debug(
                 "  [%d/%d] rendered in %.1fs: %s",
@@ -144,6 +183,7 @@ def render_detections(
                 len(detections),
                 time.perf_counter() - clip_start,
                 output_name,
+                extra=extra,
             )
         else:
             failed += 1
@@ -225,11 +265,21 @@ def main() -> None:
         state.mark_step_started("render")
 
     rendered, failed = render_detections(detections, highlights_dir, state=state)
+    concurrent_ready = len(detections) - rendered - failed
 
     if state is not None:
         state.mark_step_done("render")
 
-    logger.info("Done. %d rendered, %d failed.", rendered, failed)
+    if concurrent_ready > 0:
+        logger.info(
+            "Done. %d clips ready (%d newly rendered, %d pre-rendered during scan, %d failed).",
+            rendered + concurrent_ready,
+            rendered,
+            concurrent_ready,
+            failed,
+        )
+    else:
+        logger.info("Done. %d rendered, %d failed.", rendered, failed)
     logger.info("Output: %s", highlights_dir)
 
 

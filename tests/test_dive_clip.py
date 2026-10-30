@@ -418,3 +418,34 @@ def test_background_render_worker(tmp_path: Path) -> None:
             timer.join()
 
     assert mock_render.called
+    assert mock_render.call_args[1].get("log_to_console") is False
+
+
+def test_build_parser_version() -> None:
+    """build_parser should configure --version flag."""
+    parser = build_parser()
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["--version"])
+    assert exc.value.code == 0
+
+
+def test_cmd_scan_prints_version(tmp_path: Path) -> None:
+    """cmd_scan should include version number in startup output."""
+    from rich.panel import Panel
+
+    args = _scan_args(tmp_path, debug=False)
+    with (
+        patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)),
+        patch("scripts.dive_clip.get_console") as mock_get_console,
+    ):
+        mock_console = MagicMock()
+        mock_console.is_terminal = True
+        mock_get_console.return_value = mock_console
+        assert cmd_scan(args) == 0
+
+    panels = [
+        call.args[0]
+        for call in mock_console.print.call_args_list
+        if call.args and isinstance(call.args[0], Panel)
+    ]
+    assert any("v0.9.0" in str(p.title) or "v0.9.0" in str(p.renderable) for p in panels)

@@ -348,3 +348,34 @@ def test_render_detections_renders_new_and_skips_existing(tmp_path: Path) -> Non
     assert rendered_files == ["c2_shark_q9.mp4"]
     # Existing clip content was untouched
     assert existing_clip.read_bytes() == b"existing video content"
+
+
+def test_render_detections_quiet_mode(tmp_path: Path) -> None:
+    """render_detections(log_to_console=False) should pass extra={'no_console': True}."""
+    source_video = tmp_path / "source.mp4"
+    source_video.touch()
+    highlights_dir = tmp_path / "highlights"
+
+    detections = [
+        {
+            "clip_id": "c1",
+            "file_path": str(source_video),
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "subject": "turtle",
+            "quality_score": 8,
+        }
+    ]
+
+    with (
+        patch.object(render, "render_clip", return_value=True),
+        patch.object(render.logger, "info") as mock_info,
+    ):
+        rendered, failed = render.render_detections(
+            detections, highlights_dir, log_to_console=False
+        )
+
+    assert rendered == 1
+    assert failed == 0
+    assert mock_info.called
+    assert mock_info.call_args[1].get("extra", {}).get("no_console") is True

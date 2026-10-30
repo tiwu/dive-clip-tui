@@ -23,6 +23,13 @@ _OWNED_ATTR = "_dive_clip_owned"
 _CONSOLE: Console | None = None
 
 
+class ExcludeNoConsoleFilter(logging.Filter):
+    """Filter that suppresses log records tagged with extra={'no_console': True}."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not getattr(record, "no_console", False)
+
+
 def get_console() -> Console:
     """Return the shared stderr Console instance across logging and progress displays."""
     global _CONSOLE
@@ -58,6 +65,7 @@ def configure_logging(
         rich_tracebacks=True,
     )
     console_handler.setFormatter(logging.Formatter("%(message)s"))
+    console_handler.addFilter(ExcludeNoConsoleFilter())
 
     handlers: list[logging.Handler] = [console_handler]
     resolved: Path | None = None

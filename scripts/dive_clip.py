@@ -27,6 +27,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
 from utils.logging_setup import configure_logging, default_log_path, get_console  # noqa: E402
+from utils.version import get_version  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ def _run_background_render_worker(
                     data = json.load(f)
                 dets = data.get("detections", [])
                 if dets:
-                    render_detections(dets, highlights_dir)
+                    render_detections(dets, highlights_dir, log_to_console=False)
             except Exception as exc:
                 logger.debug("Background render check: %s", exc)
         stop_event.wait(1.0)
@@ -141,20 +142,23 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     output_folder.mkdir(parents=True, exist_ok=True)
 
+    version = get_version()
     console = get_console()
     if console.is_terminal:
         console.print(
             Panel(
-                f"[bold white]Input:[/]  [yellow]{input_folder}[/]\n"
-                f"[bold white]Output:[/] [yellow]{output_folder}[/]\n"
-                f"[bold white]Config:[/] [yellow]{config}[/]",
-                title="[bold green]Dive Clip Curation Pipeline[/bold green]",
+                f"[bold white]Version:[/] [green]v{version}[/]\n"
+                f"[bold white]Input:[/]   [yellow]{input_folder}[/]\n"
+                f"[bold white]Output:[/]  [yellow]{output_folder}[/]\n"
+                f"[bold white]Config:[/]  [yellow]{config}[/]",
+                title=f"[bold green]Dive Clip Curation Pipeline v{version}[/bold green]",
                 border_style="green",
             )
         )
 
     log_path = args.log_file or default_log_path(output_folder)
     configure_logging(debug=debug_mode, log_file=log_path)
+    logger.info("Dive Clip Curation Pipeline v%s", version)
     logger.info("Logging to %s", log_path)
 
     state_path = output_folder / ".pipeline_state.json"
@@ -282,7 +286,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    version = get_version()
     parser = argparse.ArgumentParser(description="dive-clip — Local footage curation pipeline")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"dive-clip v{version}",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     scan_p = sub.add_parser("scan", help="Run ingest → scan → render pipeline")

@@ -146,3 +146,26 @@ def test_get_console_returns_shared_instance() -> None:
         h for h in root.handlers if isinstance(h, RichHandler) and getattr(h, _OWNED_ATTR, False)
     ]
     assert rich_handlers[0].console is console1
+
+
+def test_exclude_no_console_filter(tmp_path: Path) -> None:
+    """Records with extra={'no_console': True} should be suppressed on console but written to file."""
+    from rich.console import Console
+
+    test_console = Console(record=True)
+    log_path = tmp_path / "test.log"
+    configure_logging(log_file=log_path, console=test_console)
+
+    logger = logging.getLogger("test_filter")
+    logger.info("visible to all")
+    logger.info("hidden from console", extra={"no_console": True})
+
+    # File should have both
+    content = log_path.read_text(encoding="utf-8")
+    assert "visible to all" in content
+    assert "hidden from console" in content
+
+    # Console output should only contain the non-suppressed message
+    console_output = test_console.export_text()
+    assert "visible to all" in console_output
+    assert "hidden from console" not in console_output

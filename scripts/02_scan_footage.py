@@ -84,14 +84,14 @@ def create_scan_progress(console: Console | None = None) -> Progress:
     return Progress(
         SpinnerColumn(),
         TextColumn(
-            "[bold cyan]{task.description}",
+            "{task.description}",
             table_column=Column(no_wrap=True, overflow="ellipsis", max_width=32),
         ),
         BarColumn(bar_width=16),
         TaskProgressColumn(),
         MofNCompleteColumn(),
         TimeRemainingColumn(),
-        StatusColumn(),
+        StatusColumn(table_column=Column(no_wrap=True, max_width=16)),
         console=active_console,
         disable=not active_console.is_terminal,
     )

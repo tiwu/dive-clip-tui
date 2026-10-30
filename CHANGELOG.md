@@ -6,6 +6,10 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Fixed
+- Mute background render logging on console to eliminate cursor displacement and duplicate progress bar lines during video scanning, while preserving complete logs in run logfiles.
+- Add version reporting to `dive-clip` startup banner panel, log transcripts, and new `--version` CLI flag.
+
 ## [0.9.0] - 2026-10-30
 
 ### Added
