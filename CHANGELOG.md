@@ -6,5 +6,7 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
 ### Added
 - Add Keep a Changelog, SemVer, pull-request CI, and automated GitHub releases.
