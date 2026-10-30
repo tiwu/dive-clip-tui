@@ -2,14 +2,20 @@
 
 This directory contains version-controlled architectural specifications and implementation plans.
 
-## Two-Stage Issue & Plan Lifecycle
+## Two-Stage Issue and PR Lifecycle
 
 ```text
-1. User queues issue with label 'agent:plan'
-2. Agent inspects issue -> writes docs/plans/PLAN-<id>-<slug>.md -> comments on issue, attaches plan -> sets 'agent:plan-review'
-3. User reviews plan -> sets label 'agent:approved'
-4. Agent creates branch feature/issue-<id>-<slug> -> implements with TDD (>=90% cov) -> opens PR -> sets 'agent:review-ready'
-5. User reviews PR -> merges to main -> issue closes
+Stage 1 — Plan the change
+1. User queues an issue with the 'agent:plan' label.
+2. Agent writes docs/plans/PLAN-<id>-<slug>.md, links it from the issue, and sets 'agent:plan-review'.
+3. The plan records the change category, proposed SemVer impact, and a draft changelog entry.
+4. User reviews and approves the plan by setting 'agent:approved'.
+
+Stage 2 — Implement and release
+5. Agent sets 'agent:in-progress', creates feature/issue-<id>-<slug>, implements the approved scope, and opens a linked PR.
+6. PR adds a user-facing CHANGELOG.md entry under [Unreleased] and may set one SemVer label.
+7. CI runs tests, lint, formatting, and changelog validation; agent marks passing PR 'agent:review-ready'.
+8. User reviews and merges the PR; the issue closes and the release workflow processes the merge.
 ```
 
 ### Label Taxonomy
@@ -23,6 +29,37 @@ This directory contains version-controlled architectural specifications and impl
 | `agent:review-ready` | PR opened with passing tests; awaiting human review | Agent |
 | `agent:blocked` | Agent blocked on user input or credentials | Agent |
 | `agent:manual` | Human-only task; agent ignores | Human |
+
+### Changelog and SemVer policy
+
+Follow [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/). Every
+releasable PR adds a concise, user-facing bullet under `CHANGELOG.md`'s
+`[Unreleased]` heading, using the applicable `Added`, `Changed`, `Deprecated`,
+`Removed`, `Fixed`, or `Security` category. Documentation-only or other changes
+that should not trigger a release use `semver:none` and may omit a changelog entry.
+
+Each PR may use at most one of these labels:
+
+| PR label | Version impact |
+| :--- | :--- |
+| `semver:major` | Backward-incompatible change; increments the major version |
+| `semver:minor` | Backward-compatible feature; increments the minor version |
+| `semver:patch` | Backward-compatible fix; increments the patch version |
+| `semver:none` | No release for this change |
+
+If a PR has no `semver:*` label, automation defaults to a minor bump. Conflicting
+or unknown `semver:*` labels fail validation. When multiple PRs have merged since
+the previous release, the release uses the highest applicable bump; `semver:none`
+PRs do not contribute a bump. The current `0.1.0` package version is the initial
+baseline. Releases update `pyproject.toml` and `uv.lock`, move all Unreleased
+entries into a dated version section, and create a `vX.Y.Z` tag and GitHub Release.
+
+The PR CI workflow runs `uv run python -m pytest` and Ruff lint/format checks on
+changed Python files. Releasable PRs must add a new Unreleased bullet.
+After CI is active, repository maintainers should require the CI check in branch
+protection. The release workflow needs Actions `contents: write` permission and
+branch rules that allow `github-actions[bot]` to commit version/changelog updates
+directly to `main`.
 
 ## Naming Standards
 

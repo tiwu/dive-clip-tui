@@ -149,3 +149,20 @@ outputs/                   # Generated manifests, detections, and exports
 
 For the current implementation plan and project scope, see
 [`docs/roadmap/simple_plan.md`](docs/roadmap/simple_plan.md).
+
+## Contributing changes and releases
+
+Changes follow the two-stage GitHub issue and plan workflow in
+[`docs/plans/README.md`](docs/plans/README.md): first review and approve the issue
+plan, then implement it in a linked pull request. Each releasable PR must add a
+user-facing entry under `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md). Select
+one `semver:major`, `semver:minor`, or `semver:patch` label to set the bump; an
+unlabeled PR defaults to minor. Use `semver:none` for changes that should not
+trigger a release.
+
+Pull requests run the test suite, Ruff lint and formatting checks on changed Python
+files, and changelog validation. When PRs merge to `main`, the release workflow
+groups unreleased changes, updates the package and lockfile versions, archives the
+changelog entries, and creates a `vX.Y.Z` tag and GitHub Release. Repository
+settings must allow Actions to write contents and let `github-actions[bot]` update
+`main`.
