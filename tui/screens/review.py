@@ -36,6 +36,8 @@ class ReviewScreen(Screen[None]):
         yield Button("Back", id="go-back", variant="default")
 
         self._accepted: set[int] = set()
+        self._detections: list[dict] = []
+        self._filtered: list[dict] = []
 
     def on_mount(self) -> None:
         """Set up the detections data table columns."""

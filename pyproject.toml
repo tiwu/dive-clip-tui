@@ -17,7 +17,17 @@ scan-footage = "scripts.02_scan_footage:main"
 generate-edl = "scripts.03_generate_edl:main"
 plan-storyline = "scripts.04_plan_storyline:main"
 ingest-media = "scripts.00_ingest_media:main"
+render-clips = "scripts.05_render_clips:main"
+assemble-clips = "scripts.06_assemble_video:main"
+create-aftermovie = "scripts.07_create_aftermovie:main"
 dive-clip-tui = "tui.app:main"
+dive-clip = "scripts.dive_clip:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
 
 [tool.ruff]
 line-length = 100

@@ -256,7 +256,8 @@ def main() -> None:
 
     if not manifest_path.exists():
         print(f"ERROR: manifest_raw.json not found at {manifest_path}")
-        print("Run 01_extract_manifest.py first.")
+        print("Run 00_ingest_media.py --input <folder> to generate it,")
+        print("or 01_extract_manifest.py from inside DaVinci Resolve.")
         sys.exit(1)
 
     with open(manifest_path) as f:

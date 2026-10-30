@@ -1,0 +1,33 @@
+# Configuration preset: Subject Reels
+# Optimized for per-subject highlight reels (turtle, shark, motorcycle, etc.).
+# Base config: config.yaml
+
+general:
+  project_name: "Madagascar_Dives_2026_Subjects"
+  path_mapping:
+    from_prefix: "/Volumes/ExtremeSSD/Madagascar"
+    to_prefix: "/media/ubuntu/ExtremeSSD/Madagascar"
+  output_dir: "./outputs_subjects"
+
+ollama:
+  host: "http://localhost:11434"
+  model: "qwen2.5-vl:7b"
+  timeout_seconds: 90
+
+scan_parameters:
+  coarse_fps: 0.5
+  fine_fps: 2.0
+  coarse_confidence_threshold: 0.65
+  fine_padding_seconds: 4
+  quality_threshold: 6
+  use_ramdisk: true
+
+cloud_storyline:
+  provider: "claude"
+  model: "claude-3-5-sonnet-latest"
+  target_edit_duration_minutes: 2
+
+subject:
+  subjects: ["turtle", "shark", "ray", "motorcycle", "diver"]
+  top_n_per_subject: 5          # Number of clips per subject reel
+  aspect_ratio: "16:9"          # Standard widescreen for subject reels

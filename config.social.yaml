@@ -1,0 +1,33 @@
+# Configuration preset: Social Media (9:16 vertical)
+# Optimized for Reels/TikTok/TShorts vertical video output.
+# Base config: config.yaml
+
+general:
+  project_name: "Madagascar_Dives_2026_Social"
+  path_mapping:
+    from_prefix: "/Volumes/ExtremeSSD/Madagascar"
+    to_prefix: "/media/ubuntu/ExtremeSSD/Madagascar"
+  output_dir: "./outputs_social"
+
+ollama:
+  host: "http://localhost:11434"
+  model: "qwen2.5-vl:7b"
+  timeout_seconds: 90
+
+scan_parameters:
+  coarse_fps: 0.5
+  fine_fps: 2.0
+  coarse_confidence_threshold: 0.7
+  fine_padding_seconds: 3
+  quality_threshold: 7
+  use_ramdisk: true
+
+cloud_storyline:
+  provider: "claude"
+  model: "claude-3-5-sonnet-latest"
+  target_edit_duration_minutes: 1
+
+social:
+  aspect_ratio: "9:16"          # Vertical for Reels/TikTok/Shorts
+  target_duration_seconds: 60   # Target social video length
+  top_n_clips: 8                # Fewer, high-impact clips for short format

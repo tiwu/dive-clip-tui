@@ -15,6 +15,13 @@ from pathlib import Path
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mpg", ".mpeg"}
 
 
+def slugify(text: str) -> str:
+    """Convert a string to a filesystem-safe slug."""
+    import re
+
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", text)[:40]
+
+
 def probe_video(video_path: Path) -> dict:
     """Extract duration, FPS, resolution, and codec from a video file using ffprobe."""
     cmd = [

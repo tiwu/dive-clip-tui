@@ -1,0 +1,193 @@
+# AGENTS.md
+
+This file helps AI agents (and humans) navigate, understand, and contribute to the
+**dive-clip-ai** repository. It also defines the team's feature-workflow convention.
+
+---
+
+## 🌊 Project overview
+
+**Underwater Resolve AI Curation Pipeline** — automated AI curation for underwater
+dive footage. Uses local GPU power (`Qwen2.5-VL` via Ollama) to scan footage based on
+existing DaVinci Resolve keywords, and imports the best moments back as timeline markers.
+
+A simplified MVP (`docs/roadmap/simple_plan.md`) is in progress to make the pipeline
+CLI-first and local-first (no Resolve required for the core flow): point at a folder of
+videos → AI finds the interesting bits → get back a watchable highlight video.
+
+**Key docs**
+- `README.md` — full setup, configuration, and execution guide
+- `docs/roadmap/simple_plan.md` — active simplified MVP plan (supersedes `roadmap.md`)
+- `docs/roadmap/roadmap.md` — kept for reference
+- `config.yaml` — paths, thresholds, Ollama endpoints, API keys
+- `projectplan_technische_specificatie.md` — technical specification
+
+---
+
+## 🗂️ Repository structure
+
+```
+├── README.md                 # Full setup, configuration, and execution guide
+├── config.yaml               # Paths, thresholds, Ollama endpoints, API keys
+├── config.aftermovie.yaml    # Aftermovie config preset (untracked)
+├── config.social.yaml        # Social config preset (untracked)
+├── config.subject.yaml       # Subject config preset (untracked)
+├── pyproject.toml            # Project metadata, uv config, console scripts
+├── requirements.txt          # Python dependencies
+├── uv.lock                   # Locked dependencies
+├── ruff.toml                 # Ruff linting configuration
+├── AGENTS.md                 # This file
+├── scripts/                  # Pipeline scripts (numbered in run order)
+│   ├── 00_ingest_media.py    # Folder ingestion → JSON manifest
+│   ├── 01_extract_manifest.py# DaVinci Resolve metadata export
+│   ├── 02_scan_footage.py    # Worker pipeline (FFmpeg + Ollama coarse-to-fine)
+│   ├── 03_generate_edl.py    # AI detections → CMX 3600 EDL & CSV
+│   ├── 04_plan_storyline.py  # Cloud API story architect (Claude / Gemini)
+│   ├── 05_render_clips.py    # Render each detection window as MP4
+│   ├── 06_assemble_video.py  # Assemble clips into a highlight video
+│   ├── 07_create_aftermovie.py# Create aftermovie with music/transitions
+│   └── dive_clip.py          # Single CLI entry point (ingest → scan → render)
+├── utils/                    # Shared helpers
+│   ├── checkpoint.py         # Pipeline checkpoint / resume state
+│   ├── ffmpeg_streamer.py    # Frame sampling helpers (/dev/shm & buffers)
+│   ├── models.py             # Pydantic data models (manifest, detections)
+│   ├── prompt_templates.py   # Dynamic prompts per keyword category
+│   └── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
+├── tui/                      # Textual-based terminal UI
+│   ├── app.py                # Main TUI application
+│   └── screens/              # browse.py, pipeline.py, review.py
+├── tests/                    # Pytest tests (+ conftest.py fixtures)
+├── docs/roadmap/             # roadmap.md, simple_plan.md
+└── outputs/                  # Generated outputs (manifest, detections, EDL, etc.)
+```
+
+**Entry points** (defined in `pyproject.toml` `[project.scripts]`):
+- `dive-clip scan --input <folder> --output <folder>` — full pipeline (ingest → scan → render)
+- `scan-footage`, `generate-edl`, `plan-storyline`, `ingest-media`, `render-clips`, `assemble-clips`, `create-aftermovie`, `dive-clip-tui`, `dive-clip`
+
+**Python version:** `>=3.10`. Dependency manager: **uv** (`uv sync`).
+
+---
+
+## 🚦 How to run
+
+```bash
+# Install dependencies
+uv sync
+
+# Run the full pipeline
+uv run scripts/dive_clip.py scan --input ./footage --output ./highlights --config config.yaml
+
+# Or use individual scripts
+uv run scripts/00_ingest_media.py --input ./footage --output outputs/manifest_raw.json
+uv run scripts/02_scan_footage.py --config config.yaml
+uv run scripts/03_generate_edl.py --config config.yaml
+
+# Run the TUI
+uv run tui/app.py   # or: dive-clip-tui
+
+# Run tests
+uv run pytest
+
+# Lint
+uv run ruff check .
+uv run ruff format --check .
+```
+
+Note: `scripts/` and `utils/` are known first-party packages for ruff/isort
+(`known-first-party = ["scripts", "utils"]` in `pyproject.toml`/`ruff.toml`).
+
+---
+
+## 🔁 Feature workflow (required convention)
+
+When we discuss a feature and make a plan, follow this exact workflow:
+
+### 1. Create a GitHub issue with the plan
+
+After the plan is discussed and agreed, open an issue via the `gh` CLI so the plan
+is tracked and reviewable:
+
+```bash
+gh issue create \
+  --title "<short feature title>" \
+  --body "<the full plan / design notes>" \
+  --label "feature"
+```
+
+The issue body should contain the plan: goal, files involved, definition of done, and
+any open questions. Note the issue number (e.g. `#12`).
+
+### 2. Wait for plan review
+
+Do not start implementing until the issue/plan has been reviewed and approved.
+
+### 3. Create a new branch referring to the issue
+
+Once the plan is reviewed, create a feature branch from `main` that references the
+issue:
+
+```bash
+git checkout main
+git pull
+git checkout -b feature/issue-<N>-<short-slug>
+```
+
+Example: `git checkout -b feature/issue-12-ingest-media`
+
+### 4. Do the work as per the plan
+
+- Implement the changes described in the approved plan.
+- Keep changes surgical and scoped to the issue.
+- Follow existing conventions (Pydantic models in `utils/models.py`, ruff lint config,
+  `uv run` for scripts, `pytest` for tests).
+- Add or update tests under `tests/` when behavior changes.
+- Update `README.md` and/or `docs/roadmap/simple_plan.md` if the change affects setup,
+  usage, or the plan.
+
+### 5. Verify before pushing
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+```
+
+### 6. Create a PR for review
+
+Push the branch and open a pull request referring to the issue:
+
+```bash
+git push -u origin feature/issue-<N>-<short-slug>
+gh pr create \
+  --title "<feature title>" \
+  --body "Implements #<N>. <short summary of what was done and how to test>" \
+  --label "feature"
+```
+
+Request review. The PR should reference the issue it closes (e.g. `Closes #<N>` or
+`Resolves #<N>` in the body) so GitHub links them automatically.
+
+---
+
+## 🧪 Conventions
+
+- **Tests:** `pytest`, with shared fixtures in `tests/conftest.py`
+  (`tmp_output_dir`, `sample_detections`, `sample_detections_file`, `sample_manifest`).
+- **Linting/format:** `ruff` (config in `pyproject.toml` and `ruff.toml`). Line length
+  `100`, target `py310`. `E501` is ignored (line length handled by formatter).
+- **Data models:** Pydantic v2 in `utils/models.py` — keep manifest/detection JSON
+  strictly validated.
+- **Console scripts:** registered in `pyproject.toml` `[project.scripts]`.
+- **Checkpointing:** `utils/checkpoint.py` (`PipelineState`) for resume support in
+  long-running batches.
+- **Ollama JSON mode:** all Ollama API calls use `"format": "json"` so Qwen2.5-VL
+  returns pure JSON.
+
+---
+
+## 💬 Ask before acting
+
+If anything in this file or the repo is unclear, or if you want to propose a change to
+the workflow, ask the user before making changes. Do not assume issue numbers, branch
+names, or PR details — confirm them.

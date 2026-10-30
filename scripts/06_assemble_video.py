@@ -1,0 +1,182 @@
+"""Assemble top-N detection clips into a single highlight video.
+
+Reads detections_refined.json, sorts by quality score, takes the top-N,
+and concatenates the rendered MP4 clips using FFmpeg's concat demuxer.
+This is Phase 2 Step 2.1 of the simple plan.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
+    """Concatenate MP4 clips using FFmpeg's concat demuxer.
+
+    All clips must have identical codec/resolution (they do, since they're
+    all rendered by 05_render_clips.py with the same settings).
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # FFmpeg concat demuxer requires absolute or relative paths in the list file.
+    list_path = output_path.parent / "concat_list.txt"
+    with open(list_path, "w") as f:
+        for clip in clip_paths:
+            # Escape single quotes for the concat demuxer format
+            escaped = str(clip.resolve()).replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-y",
+        str(output_path),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print(f"WARNING: FFmpeg timeout concatenating to {output_path.name}")
+        return False
+    except Exception as exc:
+        print(f"WARNING: FFmpeg error: {exc}")
+        return False
+
+    # Clean up the concat list file
+    list_path.unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        print(
+            f"WARNING: FFmpeg concat failed: {result.stderr.strip()[:200]}"
+        )
+        return False
+
+    return True
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Assemble top-N detection clips into a single highlight video"
+    )
+    parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument(
+        "--input",
+        default=None,
+        help="Path to detections_refined.json (default: outputs/detections_refined.json)",
+    )
+    parser.add_argument(
+        "--clips-dir",
+        default=None,
+        help="Folder with rendered clips (default: outputs/highlights)",
+    )
+    parser.add_argument(
+        "--output",
+        default="outputs/aftermovie.mp4",
+        help="Output video file (default: outputs/aftermovie.mp4)",
+    )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Number of top-quality clips to include (default: 10)",
+    )
+    args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        print(f"ERROR: Config not found: {config_path}")
+        sys.exit(1)
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    general = config.get("general", {})
+    output_dir = Path(general.get("output_dir", "./outputs"))
+
+    # Resolve detections input path
+    detections_path = Path(args.input) if args.input else output_dir / "detections_refined.json"
+    if not detections_path.exists():
+        alt = Path(__file__).resolve().parent.parent / "outputs" / "detections_refined.json"
+        if alt.exists():
+            detections_path = alt
+        else:
+            print(f"ERROR: detections_refined.json not found at {detections_path}")
+            print("Run 02_scan_footage.py first.")
+            sys.exit(1)
+
+    # Resolve clips directory
+    clips_dir = Path(args.clips_dir) if args.clips_dir else output_dir / "highlights"
+    if not clips_dir.exists():
+        print(f"ERROR: Clips directory not found: {clips_dir}")
+        print("Run 05_render_clips.py first to render detection clips.")
+        sys.exit(1)
+
+    with open(detections_path) as f:
+        detections_data = json.load(f)
+
+    detections = detections_data.get("detections", [])
+    if not detections:
+        print("No detections found to assemble.")
+        sys.exit(0)
+
+    # Sort by quality score (descending) and take top-N
+    sorted_dets = sorted(detections, key=lambda d: d.get("quality_score", 0), reverse=True)
+    top_dets = sorted_dets[: args.top_n]
+
+    print(f"Assembling top {len(top_dets)} of {len(detections)} detections")
+
+    # Find rendered clip files matching each detection's clip_id
+    clip_files: list[Path] = []
+    for det in top_dets:
+        clip_id = det.get("clip_id", "")
+        subject = det.get("subject", "unknown")
+        quality = det.get("quality_score", 0)
+
+        # Look for rendered clip matching this detection
+        matching = list(clips_dir.glob(f"{clip_id}_{subject}_q{quality}.mp4"))
+        if matching:
+            clip_files.append(matching[0])
+            print(f"  Using: {matching[0].name} (quality {quality}/10)")
+        else:
+            # Fallback: try any file starting with clip_id
+            fallback = list(clips_dir.glob(f"{clip_id}_*.mp4"))
+            if fallback:
+                clip_files.append(fallback[0])
+                print(f"  Using: {fallback[0].name} (quality {quality}/10, fallback match)")
+            else:
+                print(f"  SKIP: No rendered clip found for {clip_id} ({subject})")
+
+    if not clip_files:
+        print("No clip files found to concatenate.")
+        sys.exit(1)
+
+    output_path = Path(args.output)
+    if concat_clips(clip_files, output_path):
+        print(f"\n✓ Assembled {len(clip_files)} clips into: {output_path}")
+    else:
+        print("\n✗ Assembly failed.")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
