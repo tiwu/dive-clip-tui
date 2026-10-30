@@ -6,6 +6,16 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add frame downscaling for fast coarse scanning, atomic per-clip detection
+  persistence with resume support, and concurrent highlight clip rendering.
+  Coarse scanning now downscales frames (configurable `coarse_scale`, default
+  `"640:-2"`) to drastically reduce VLM vision tokens and HTTP transport latency.
+  Detections are persisted atomically to `detections_refined.json` after each
+  video completes rather than waiting for the entire batch. `dive-clip scan`
+  now streams newly detected clips to a background render worker that cuts MP4
+  highlights concurrently while subsequent videos are being scanned.
+
 ## [0.8.0] - 2026-10-30
 
 ### Added

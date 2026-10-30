@@ -10,9 +10,12 @@ This is Phase 1 Step 1.4 of the simple plan.
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import json
 import logging
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import yaml
@@ -56,6 +59,42 @@ def load_general_config(config_path: str | Path) -> dict:
     with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
     return config.get("general") or {}
+
+
+def _run_background_render_worker(
+    detections_path: Path,
+    highlights_dir: Path,
+    stop_event: threading.Event,
+) -> None:
+    """Periodically inspect detections_refined.json and render newly detected clips."""
+    try:
+        render_spec = importlib.util.spec_from_file_location(
+            "scripts_05_render_clips", SCRIPTS_DIR / "05_render_clips.py"
+        )
+        if render_spec and render_spec.loader:
+            render_mod = importlib.util.module_from_spec(render_spec)
+            render_spec.loader.exec_module(render_mod)
+            render_detections = getattr(render_mod, "render_detections", None)
+        else:
+            return
+    except Exception as exc:
+        logger.debug("Could not initialize background renderer: %s", exc)
+        return
+
+    if render_detections is None:
+        return
+
+    while not stop_event.is_set():
+        if detections_path.exists():
+            try:
+                with open(detections_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                dets = data.get("detections", [])
+                if dets:
+                    render_detections(dets, highlights_dir)
+            except Exception as exc:
+                logger.debug("Background render check: %s", exc)
+        stop_event.wait(1.0)
 
 
 def resolve_paths(args: argparse.Namespace) -> tuple[Path, Path] | None:
@@ -171,13 +210,28 @@ def cmd_scan(args: argparse.Namespace) -> int:
     ]
     if debug_mode:
         scan_cmd.append("--debug")
+    if getattr(args, "resume", False):
+        scan_cmd.append("--resume")
 
     if not state.is_step_done("scan") or not detections_path.exists():
         state.mark_step_started("scan")
-        rc = run(
-            scan_cmd,
-            "Step 2/3: Scan footage (AI detections)",
+        highlights_dir = output_folder / "highlights"
+        stop_render_event = threading.Event()
+        render_thread = threading.Thread(
+            target=_run_background_render_worker,
+            args=(detections_path, highlights_dir, stop_render_event),
+            daemon=True,
         )
+        render_thread.start()
+        try:
+            rc = run(
+                scan_cmd,
+                "Step 2/3: Scan footage (AI detections)",
+            )
+        finally:
+            stop_render_event.set()
+            render_thread.join(timeout=2.0)
+
         if rc != 0:
             logger.error("Scan failed with exit code %d. Aborting.", rc)
             return rc
