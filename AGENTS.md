@@ -16,9 +16,11 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 
 **Key docs**
 - `README.md` — full setup, configuration, and execution guide
+- `CHANGELOG.md` — unreleased changes and release history
 - `docs/roadmap/simple_plan.md` — active simplified MVP plan (supersedes `roadmap.md`)
 - `docs/roadmap/roadmap.md` — kept for reference
 - `docs/plans/` - folder for architecture plans
+- `docs/plans/README.md` — required issue, plan, PR, changelog, and release workflow
 - `config.yaml` — paths, thresholds, Ollama endpoints, API keys
 - `projectplan_technische_specificatie.md` — technical specification
 
@@ -28,6 +30,7 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 
 ```
 ├── README.md                 # Full setup, configuration, and execution guide
+├── CHANGELOG.md              # Keep a Changelog release history
 ├── config.yaml               # Paths, thresholds, Ollama endpoints, API keys
 ├── config.aftermovie.yaml    # Aftermovie config preset (untracked)
 ├── config.social.yaml        # Social config preset (untracked)
@@ -37,6 +40,7 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 ├── uv.lock                   # Locked dependencies
 ├── ruff.toml                 # Ruff linting configuration
 ├── AGENTS.md                 # This file
+├── .github/workflows/        # Pull-request CI and main-branch release automation
 ├── scripts/                  # Pipeline scripts (numbered in run order)
 │   ├── 00_ingest_media.py    # Folder ingestion → JSON manifest
 │   ├── 01_extract_manifest.py# DaVinci Resolve metadata export
@@ -46,6 +50,7 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 │   ├── 05_render_clips.py    # Render each detection window as MP4
 │   ├── 06_assemble_video.py  # Assemble clips into a highlight video
 │   ├── 07_create_aftermovie.py# Create aftermovie with music/transitions
+│   ├── release.py            # Changelog, SemVer, and release helpers
 │   └── dive_clip.py          # Single CLI entry point (ingest → scan → render)
 ├── utils/                    # Shared helpers
 │   ├── checkpoint.py         # Pipeline checkpoint / resume state
@@ -90,7 +95,7 @@ uv run scripts/03_generate_edl.py --config config.yaml
 uv run tui/app.py   # or: dive-clip-tui
 
 # Run tests
-uv run pytest
+uv run python -m pytest
 
 # Lint
 uv run ruff check .
@@ -99,12 +104,18 @@ uv run ruff format --check .
 
 Note: `scripts/` and `utils/` are known first-party packages for ruff/isort
 (`known-first-party = ["scripts", "utils"]` in `pyproject.toml`/`ruff.toml`).
+PR CI applies Ruff lint and formatting checks to changed Python files; full-repository
+checks currently include existing unrelated violations.
 
 ---
 
 ## 🔁 Feature workflow (required convention)
 
-When we discuss a feature and make a plan, follow the workflow in `docs/plans/README.md`.
+When we discuss a feature and make a plan, follow the two-stage issue and PR process
+in `docs/plans/README.md`. Include the proposed SemVer impact in the issue plan, then
+add a `CHANGELOG.md` entry under `[Unreleased]` to each releasable PR. Set one SemVer
+label to choose the bump; an unlabeled PR defaults to minor. CI enforces the tests,
+lint, formatting, and changelog requirements.
 
 ---
 
@@ -112,6 +123,8 @@ When we discuss a feature and make a plan, follow the workflow in `docs/plans/RE
 
 - **Tests:** `pytest`, with shared fixtures in `tests/conftest.py`
   (`tmp_output_dir`, `sample_detections`, `sample_detections_file`, `sample_manifest`).
+- **Changelog and releases:** use Keep a Changelog categories and follow the PR
+  label/bump policy in `docs/plans/README.md`; merged PRs are released automatically.
 - **Linting/format:** `ruff` (config in `pyproject.toml` and `ruff.toml`). Line length
   `100`, target `py310`. `E501` is ignored (line length handled by formatter).
 - **Data models:** Pydantic v2 in `utils/models.py` — keep manifest/detection JSON
