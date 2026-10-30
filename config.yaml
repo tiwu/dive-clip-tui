@@ -1,16 +1,16 @@
-# Configuration for Underwater Resolve AI Pipeline
+# Configuration for Dive Clip TUI
 
 general:
   project_name: "Madagascar_Dives_2026"
   # Path mapping: makes the script portable between macOS and Linux
   path_mapping:
-    from_prefix: "/Volumes/ExtremeSSD/Madagascar"
-    to_prefix: "/media/ubuntu/ExtremeSSD/Madagascar"
+    from_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
+    to_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
   output_dir: "./outputs"
 
 ollama:
   host: "http://localhost:11434"
-  model: "qwen2.5-vl:7b"
+  model: "qwen3-vl:4b"
   timeout_seconds: 90
 
 scan_parameters:

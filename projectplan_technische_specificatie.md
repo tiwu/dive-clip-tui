@@ -50,7 +50,7 @@ De grove selectie is reeds gedaan in DaVinci Resolve en georganiseerd met behulp
 De coding agent moet het project opbouwen volgens deze structuur:
 
 ```text
-underwater-resolve-ai/
+dive-clip-tui/
 ├── README.md                 # Volledige setup-, configuratie- en uitvoeringsgids
 ├── config.yaml               # Paden, thresholds, Ollama endpoints, API keys
 ├── requirements.txt          # Python dependencies
@@ -75,7 +75,7 @@ underwater-resolve-ai/
 ## 4. Configuratiebestand: `config.yaml`
 
 ```yaml
-# Configuration for Underwater Resolve AI Pipeline
+# Configuration for Dive Clip TUI
 
 general:
   project_name: "Madagascar_Dives_2026"
@@ -154,7 +154,7 @@ cloud_storyline:
 ## 6. Volledige `README.md` Specificatie (Voor de Gebruiker / Agent)
 
 ```markdown
-# 🌊 Underwater Resolve AI Curation Pipeline
+# 🌊 Dive Clip TUI
 
 Geautomatiseerde AI-curatie voor onderwater duikvideo's. Gebruikt lokale GPU-kracht (`Qwen2.5-VL` via Ollama) voor het scannen van beelden op basis van bestaande DaVinci Resolve keywords, en importeert de beste momenten direct terug als tijdlijnmarkers.
 
@@ -178,7 +178,7 @@ Geautomatiseerde AI-curatie voor onderwater duikvideo's. Gebruikt lokale GPU-kra
 
 1. **Clone repository en virtuele omgeving aanmaken:**
    ```bash
-   cd underwater-resolve-ai
+   cd dive-clip-tui
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt

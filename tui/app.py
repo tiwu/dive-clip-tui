@@ -54,7 +54,7 @@ class DiveClipTUI(App[None]):
     }
     """
 
-    TITLE = "Dive Clip AI — TUI"
+    TITLE = "Dive Clip TUI"
 
     SCREENS = {
         "browse": BrowseScreen,
@@ -64,7 +64,7 @@ class DiveClipTUI(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static("Dive Clip AI — Local footage curation pipeline", id="title")
+        yield Static("Dive Clip TUI — Local footage curation pipeline", id="title")
         yield Container(id="content")
         yield Horizontal(
             Button("Quit", id="quit", variant="error"),

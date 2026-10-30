@@ -1,154 +1,150 @@
-# 🌊 Underwater Resolve AI Curation Pipeline
+# 🌊 Dive Clip TUI
 
-Automated AI curation for underwater dive footage. Uses local GPU power (`Qwen2.5-VL` via Ollama) to scan footage based on existing DaVinci Resolve keywords, and imports the best moments directly back as timeline markers.
+Local-first video curation for dive and motorcycle footage. Point the pipeline
+at a folder of videos, use Ollama and FFmpeg to find interesting moments, and
+render the detections as standalone MP4 clips. DaVinci Resolve is optional:
+the existing EDL/CSV marker workflow is still available for editors who want it.
 
----
+The project is CLI-first, with an experimental Textual terminal UI (TUI) for
+browsing manifests and reviewing detections. The core scan flow does not require
+cloud uploads, a subscription, API keys, or DaVinci Resolve.
 
-## 📋 Requirements
+## Requirements
 
-### Hardware
-- **Ubuntu Machine:** Nvidia GPU with at least 12GB VRAM and 32GB RAM.
-- **Mac (optional):** M-series Mac for Resolve editing.
-- **External SSD:** Contains the raw video files.
+- Python 3.10+
+- [FFmpeg](https://ffmpeg.org/) and `ffprobe`
+- [Ollama](https://ollama.com/) with `qwen2.5-vl:7b` available locally
+- Enough memory and GPU resources for the selected vision model; a CUDA GPU
+  with 12 GB VRAM is recommended for the configured model
+- DaVinci Resolve only if you want to use the optional Resolve export/import flow
 
-### Software
-- **DaVinci Resolve Studio or Free** (with Python scripting enabled).
-- **FFmpeg:** `sudo apt install ffmpeg`
-- **Ollama:** With `qwen2.5-vl:7b` model.
-- **Python 3.10+**
+## Installation
 
----
+Install dependencies with [uv](https://docs.astral.sh/uv/):
 
-## 🗂️ Repository Structure
-
-```text
-├── README.md                 # Full setup, configuration, and execution guide
-├── config.yaml               # Paths, thresholds, Ollama endpoints, API keys
-├── requirements.txt          # Python dependencies
-├── pyproject.toml            # Project metadata and uv-compatible config
-├── ruff.toml                 # Ruff linting configuration
-├── uv.lock                   # Locked dependencies
-├── scripts/
-│   ├── 01_extract_manifest.py    # Runs in DaVinci Resolve (Mac or Ubuntu)
-│   ├── 02_scan_footage.py        # Worker pipeline (FFmpeg + Ollama coarse-to-fine)
-│   ├── 03_generate_edl.py        # Converts AI detections to CMX 3600 EDL & CSV
-│   └── 04_plan_storyline.py      # Cloud API story architect (Claude / Gemini)
-├── utils/
-│   ├── ffmpeg_streamer.py        # Frame sampling helpers (/dev/shm & buffers)
-│   ├── timecode_math.py          # Frame/FPS to SMPTE timecodes
-│   ├── prompt_templates.py       # Dynamic prompts per keyword category
-│   └── models.py                 # Pydantic data models for manifest and detections
-└── outputs/
-    ├── manifest_raw.json
-    ├── detections_refined.json
-    ├── markers_import.edl
-    ├── markers_import.csv
-    └── storyline_edit_guide.md
+```bash
+uv sync
+ollama pull qwen2.5-vl:7b
 ```
 
----
+Alternatively, install with pip:
 
-## 🛠️ Installation & Preparation
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-1. **Clone repository and install dependencies with uv:**
-   ```bash
-   cd dive-clip-ai
-   uv sync
-   ```
+Review `config.yaml` before scanning. In particular, set `general.output_dir`,
+the Ollama model/host, and any `general.path_mapping` needed to locate media
+across machines.
 
-   *Alternative (if you don't have uv):*
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
+## Quick start: scan a footage folder
 
-2. **Start Ollama and pull the model on Ubuntu:**
-   ```bash
-   ollama pull qwen2.5-vl:7b
-   ollama serve
-   ```
+The single-command CLI chains folder ingestion, AI scanning, and clip rendering:
 
-3. **Configure:**
-   Check `config.yaml` and adjust any SSD mount paths (path_mapping).
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights
+```
 
----
+The scanner reads and writes its manifest and detections under
+`general.output_dir` in the selected config. Set that directory to match the
+command's `--output` directory (for example, `./highlights`) so the pipeline
+steps use the same files. A custom config can be selected with `--config`.
 
-## 🎬 Step-by-Step Execution
+The command supports checkpointing and can resume completed steps:
 
-### Step 1: Export Metadata from DaVinci Resolve
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights --resume
+```
 
-1. Open DaVinci Resolve with the Madagascar project.
-2. Go to **Workspace -> Console** and choose **Py3**.
-3. Run the extract script:
+To start over and clear the saved pipeline state:
+
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights --reset
+```
+
+The pipeline writes a JSON manifest, refined detections, and rendered MP4 clips
+to the configured output location.
+
+## Terminal UI (experimental)
+
+Launch the Textual interface with:
+
+```bash
+uv run dive-clip-tui
+```
+
+The current TUI opens on the browse screen. Enter a footage folder containing
+`manifest_raw.json`, or use the manifest under `outputs/`, to view clip metadata.
+From there, open the review screen to load `detections_refined.json` and filter
+detections by quality score.
+
+The TUI is still a prototype and does not yet provide the full review-to-render
+workflow: accepting detections and rendering clips are placeholders, and the
+pipeline screen is not yet reachable from the main interface. Use the CLI
+workflow above to run the pipeline.
+
+## Optional: DaVinci Resolve markers
+
+The original Resolve workflow remains available for projects that use Resolve
+metadata or want timeline markers:
+
+1. In Resolve, open **Workspace → Console**, choose **Py3**, and run:
    ```python
    exec(open("scripts/01_extract_manifest.py").read())
    ```
-   *Result:* `outputs/manifest_raw.json` is created.
-
-### Step 2: Run Local Scan on Ubuntu
-
-Run the batch worker on the Ubuntu machine:
-```bash
-uv run scripts/02_scan_footage.py --config config.yaml
-```
-* The script processes all videos pass-by-pass via the RAM disk (`/dev/shm`).
-* On systems without `/dev/shm` (e.g. macOS), it falls back to a temporary directory.
-* *Result:* `outputs/detections_refined.json`.
-
-### Step 3: Generate Markers and Import into Resolve
-
-1. Generate the EDL and CSV files:
+2. Scan the exported manifest:
+   ```bash
+   uv run scripts/02_scan_footage.py --config config.yaml
+   ```
+3. Generate EDL and CSV marker files:
    ```bash
    uv run scripts/03_generate_edl.py --config config.yaml
    ```
-2. In DaVinci Resolve, go to your desired timeline.
-3. Right-click the timeline in the Media Pool:
-   **Timelines -> Import -> Timeline Markers from EDL...**
-4. Select `outputs/markers_import.edl`.
-5. All AI-identified actions and macro moments appear directly as colored markers on your timeline.
+4. Import `outputs/markers_import.edl` into the desired Resolve timeline using
+   **Timelines → Import → Timeline Markers from EDL...**.
 
-   **Color codes:**
-   * **Cyan:** Pelagics / large sea life (turtles, sharks, rays)
-   * **Yellow:** Macro (nudibranchs, shrimp, corals)
-   * **Green:** Diver action / Good composition
+You can also create the EDL/CSV files from a folder-ingested manifest; Resolve is
+not required to run the local scan and render flow.
 
-### Step 4 (Optional): Create Storyline Edit Plan
+## Repository structure
 
-Let Claude or Gemini determine a narrative order:
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-uv run scripts/04_plan_storyline.py --config config.yaml
+```text
+scripts/
+  00_ingest_media.py       # Find videos and write a metadata manifest
+  01_extract_manifest.py   # Export clip metadata from DaVinci Resolve
+  02_scan_footage.py       # Scan footage with Ollama
+  03_generate_edl.py       # Create EDL and CSV timeline markers
+  04_plan_storyline.py     # Optional story plan generation
+  05_render_clips.py       # Render detection windows as MP4 clips
+  06_assemble_video.py     # Assemble rendered clips
+  07_create_aftermovie.py  # Create an aftermovie
+  dive_clip.py             # Single-command ingest → scan → render CLI
+tui/
+  app.py                   # Textual TUI entry point
+  screens/                 # Browse, review, and pipeline screens
+utils/
+  checkpoint.py            # Pipeline resume state
+  ffmpeg_streamer.py       # Frame sampling and temporary storage
+  models.py                # Pydantic manifest and detection models
+  prompt_templates.py      # Prompts by subject/category
+  timecode_math.py         # Frame-rate and SMPTE timecode helpers
+outputs/                   # Generated manifests, detections, and exports
 ```
-Check `outputs/storyline_edit_guide.md` for the recommended shot order and music suggestions.
 
----
+## Pipeline notes
 
-## 🧩 Technical Details
+- Folder ingestion uses `ffprobe` to record video duration, frame rate,
+  resolution, and codec in `manifest_raw.json`.
+- The scanner uses Ollama's JSON response mode and writes
+  `detections_refined.json`.
+- `dive-clip scan` stores progress in `<output>/.pipeline_state.json`; use
+  `--resume` to skip completed steps or `--reset` to clear that state.
+- Frame sampling uses `/dev/shm` when available and falls back to a temporary
+  directory on systems such as macOS.
+- The optional Resolve marker export supports frame-rate-aware timecodes,
+  including 29.97 drop-frame and non-drop-frame formats.
 
-### Data Model (Pydantic)
-All JSON structures are strictly validated with Pydantic models (`utils/models.py`):
-- `ClipManifest` / `ManifestOutput` — for the Resolve metadata export
-- `RefinedDetection` / `DetectionsRefined` — for the AI scan results
-
-### Timecode Precision
-`utils/timecode_math.py` calculates timecodes exactly based on clip FPS, with support for:
-- 29.97 drop-frame and non-drop-frame
-- 30.0, 25.0, 24.0 and other frame rates
-- Conversion between seconds, frame counts, and SMPTE timecodes (HH:MM:SS:FF)
-
-### I/O Safety
-`utils/ffmpeg_streamer.py` checks if `/dev/shm` exists and falls back to `tempfile.mkdtemp()` if not available. Corrupt frames are skipped with a warning without stopping the entire batch.
-
-### Ollama JSON Mode
-All Ollama API calls use `"format": "json"` in the payload, so Qwen2.5-VL returns pure JSON without markdown filler.
-
----
-
-## ✅ Checklist
-
-- [x] **Data Model:** Use `pydantic` for strict validation of manifest and detection JSON structures.
-- [x] **I/O Safety:** Check if `/dev/shm` exists; fall back to `tempfile.mkdtemp()` if not available.
-- [x] **Error Recovery:** If a corrupt video frame crashes FFmpeg, skip the frame range and log a warning without stopping the entire batch.
-- [x] **Timecode Precision:** Ensure timecodes are calculated exactly based on clip FPS (e.g. 29.97 vs 30.0 vs 25.0).
-- [x] **Ollama JSON Mode:** Force `format: "json"` in the Ollama API payload to prevent Qwen2.5-VL from returning markdown filler instead of pure JSON.
+For the current implementation plan and project scope, see
+[`docs/roadmap/simple_plan.md`](docs/roadmap/simple_plan.md).

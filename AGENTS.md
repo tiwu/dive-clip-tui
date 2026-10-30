@@ -7,9 +7,8 @@ This file helps AI agents (and humans) navigate, understand, and contribute to t
 
 ## 🌊 Project overview
 
-**Underwater Resolve AI Curation Pipeline** — automated AI curation for underwater
-dive footage. Uses local GPU power (`Qwen2.5-VL` via Ollama) to scan footage based on
-existing DaVinci Resolve keywords, and imports the best moments back as timeline markers.
+**Dive Clip TUI** — local-first AI curation for dive and motorcycle footage, with a
+Textual terminal UI and optional DaVinci Resolve marker export.
 
 A simplified MVP (`docs/roadmap/simple_plan.md`) is in progress to make the pipeline
 CLI-first and local-first (no Resolve required for the core flow): point at a folder of

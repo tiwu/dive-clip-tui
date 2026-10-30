@@ -1,7 +1,7 @@
 [project]
-name = "underwater-resolve-ai"
+name = "dive-clip-tui"
 version = "0.1.0"
-description = "AI curation pipeline for underwater dive footage using DaVinci Resolve, Ollama Qwen2.5-VL, and CMX 3600 EDL markers"
+description = "Local-first AI video curation with a terminal UI"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.5.0",
@@ -12,16 +12,26 @@ dependencies = [
     "textual>=0.86.0",
 ]
 
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project.scripts]
-scan-footage = "scripts.02_scan_footage:main"
-generate-edl = "scripts.03_generate_edl:main"
-plan-storyline = "scripts.04_plan_storyline:main"
-ingest-media = "scripts.00_ingest_media:main"
-render-clips = "scripts.05_render_clips:main"
-assemble-clips = "scripts.06_assemble_video:main"
-create-aftermovie = "scripts.07_create_aftermovie:main"
+scan-footage = "scripts.entrypoints:scan_footage"
+generate-edl = "scripts.entrypoints:generate_edl"
+plan-storyline = "scripts.entrypoints:plan_storyline"
+ingest-media = "scripts.entrypoints:ingest_media"
+render-clips = "scripts.entrypoints:render_clips"
+assemble-clips = "scripts.entrypoints:assemble_clips"
+create-aftermovie = "scripts.entrypoints:create_aftermovie"
 dive-clip-tui = "tui.app:main"
 dive-clip = "scripts.dive_clip:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["scripts*", "tui*", "utils*"]
 
 [dependency-groups]
 dev = [

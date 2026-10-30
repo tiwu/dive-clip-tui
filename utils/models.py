@@ -1,4 +1,4 @@
-"""Shared pydantic data models for the underwater Resolve AI pipeline."""
+"""Shared Pydantic data models for Dive Clip TUI."""
 
 from __future__ import annotations
 
