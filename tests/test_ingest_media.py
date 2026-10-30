@@ -110,6 +110,7 @@ def test_ingest_folder_with_videos(tmp_path: Path) -> None:
     video_folder.mkdir()
     (video_folder / "dive1.mp4").touch()
     (video_folder / "dive2.mov").touch()
+    (video_folder / "._dive1.mp4").touch()
     (video_folder / "not_video.txt").touch()  # should be ignored
 
     def fake_probe(path: Path) -> dict:
@@ -204,4 +205,3 @@ def test_main_success(tmp_path: Path, monkeypatch) -> None:
     data = json.loads(output_path.read_text())
     assert data["total_clips"] == 1
     assert data["clips"][0]["file_name"] == "dive1.mp4"
-

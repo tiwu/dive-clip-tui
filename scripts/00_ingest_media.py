@@ -85,11 +85,13 @@ def probe_video(video_path: Path) -> dict:
 
 def ingest_folder(folder: Path) -> list[dict]:
     """Walk a folder and collect metadata for all video files."""
-    clips = []
-    for video_path in sorted(folder.rglob("*")):
-        if video_path.is_file() and video_path.suffix.lower() in VIDEO_EXTENSIONS:
-            clips.append(probe_video(video_path))
-    return clips
+    return [
+        probe_video(video_path)
+        for video_path in sorted(folder.rglob("*"))
+        if video_path.is_file()
+        and not video_path.name.startswith("._")
+        and video_path.suffix.lower() in VIDEO_EXTENSIONS
+    ]
 
 
 def main() -> None:
