@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Changed
+- Raise the minimum supported Python version from `>=3.10` to `>=3.14`, aligning
+  the Ruff and mypy targets, CI matrix, and release workflow runtime to the new
+  floor. Python 3.14 and 3.15 are the currently validated bug-fix releases.
+- Update GitHub Actions to recent versions (`checkout@v7`, `setup-python@v7`,
+  `setup-uv@v10.3.3`) to resolve Node.js 20 deprecation runner warnings.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added
