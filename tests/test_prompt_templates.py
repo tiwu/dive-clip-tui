@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from utils.prompt_templates import (
     ALL_TEMPLATES,
+    BROAD_MARINE_TEMPLATE,
+    DIVER_TEMPLATE,
     MACRO_TEMPLATE,
     PELAGICS_TEMPLATE,
-    DIVER_TEMPLATE,
     PromptTemplate,
     get_template_for_keywords,
 )
@@ -105,3 +106,48 @@ def test_get_template_for_keywords_empty() -> None:
     """get_template_for_keywords should return None for empty keyword list."""
     template = get_template_for_keywords([])
     assert template is None
+
+
+def test_broad_marine_template_exists() -> None:
+    """BROAD_MARINE_TEMPLATE should exist with correct properties."""
+    assert BROAD_MARINE_TEMPLATE.name == "broad_marine"
+    assert BROAD_MARINE_TEMPLATE.color == "Cyan"
+    assert BROAD_MARINE_TEMPLATE.keywords == []
+
+
+def test_broad_marine_template_not_in_all_templates() -> None:
+    """BROAD_MARINE_TEMPLATE should not be in ALL_TEMPLATES (fallback-only)."""
+    assert BROAD_MARINE_TEMPLATE not in ALL_TEMPLATES
+
+
+def test_broad_marine_template_has_structured_output() -> None:
+    """BROAD_MARINE_TEMPLATE user_prompt should ask for structured detection fields."""
+    prompt = BROAD_MARINE_TEMPLATE.user_prompt
+    assert "detected" in prompt
+    assert "subject" in prompt
+    assert "confidence" in prompt
+    assert "quality_score" in prompt
+    assert "description" in prompt
+    assert "timestamp" in prompt
+
+
+def test_broad_marine_template_includes_examples() -> None:
+    """BROAD_MARINE_TEMPLATE user_prompt should include representative marine life examples."""
+    examples = [
+        "corals",
+        "worms",
+        "nudibranchs",
+        "fish",
+        "octopus",
+        "moray eels",
+        "sharks",
+        "turtles",
+        "whales",
+        "frogfish",
+        "crocodilefish",
+        "seahorses",
+        "stonefish",
+    ]
+    prompt = BROAD_MARINE_TEMPLATE.user_prompt
+    for example in examples:
+        assert example in prompt, f"Expected '{example}' in prompt"
