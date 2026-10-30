@@ -612,3 +612,36 @@ def test_process_clip_updates_state_activity(tmp_path: Path) -> None:
     reloaded = PipelineState(tmp_path / ".pipeline_state.json")
     assert "video.mp4" in (reloaded.get("activity") or "")
     assert reloaded.get("activity_at")
+
+
+def test_process_clip_honours_ollama_host_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OLLAMA_HOST should override the config host when building the client."""
+    monkeypatch.setenv("OLLAMA_HOST", "plotter.local:11434")
+    video = tmp_path / "video.mp4"
+    video.touch()
+    (tmp_path / "work").mkdir()
+    clip = {
+        "file_path": str(video),
+        "file_name": "video.mp4",
+        "clip_id": "c1",
+        "fps": "25.0",
+        "tags": [],
+    }
+    config = {
+        "scan_parameters": {"coarse_fps": 0.5, "fine_fps": 2.0},
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+            "timeout_seconds": 90,
+        },
+    }
+
+    with (
+        patch.object(scan, "OllamaClient") as client_cls,
+        patch.object(scan, "extract_frames", return_value=[]),
+    ):
+        scan.process_clip(clip, config, tmp_path / "work")
+
+    assert client_cls.call_args.args[0] == "http://plotter.local:11434"

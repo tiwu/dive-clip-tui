@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 
 import requests
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from utils.ollama_client import resolve_host
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -104,13 +109,9 @@ def main() -> int:
         return 1
 
     ollama_config = config.get("ollama", {})
-    host = ollama_config.get("host", "http://localhost:11434")
+    host = resolve_host(ollama_config.get("host"))
     model = ollama_config.get("model", "qwen2.5vl:3b")
     timeout = ollama_config.get("timeout_seconds", 30)
-
-    if not host:
-        print("Error: 'ollama.host' not configured in config.yaml")
-        return 1
 
     if not model:
         print("Error: 'ollama.model' not configured in config.yaml")

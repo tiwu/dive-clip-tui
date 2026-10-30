@@ -39,6 +39,20 @@ Review `config.yaml` before scanning. In particular, set `general.output_dir`,
 the Ollama model/host, and any `general.path_mapping` needed to locate media
 across machines.
 
+### Using a remote Ollama
+
+`OLLAMA_HOST` overrides `ollama.host` from the config file, so a remote server can
+be selected per run without editing the tracked config:
+
+```bash
+export OLLAMA_HOST=plotter.local:11434
+uv run dive-clip scan --input ./footage --output ./highlights
+```
+
+Precedence is `OLLAMA_HOST`, then `ollama.host` in the config file, then
+`http://localhost:11434`. A missing `http://` scheme is added automatically, so the
+scheme-less form the Ollama CLI accepts works here too.
+
 ## Quick start: scan a footage folder
 
 The single-command CLI chains folder ingestion, AI scanning, and clip rendering:
