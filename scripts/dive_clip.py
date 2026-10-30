@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 def run(cmd: list[str], description: str) -> int:
     """Run a command, streaming output to stdout/stderr. Returns exit code."""
     logger.info("=== %s ===", description)
-    logger.info("$ %s", " ".join(cmd))
+    logger.debug("$ %s", " ".join(cmd))
     try:
         result = subprocess.run(cmd, check=False)
         return result.returncode
