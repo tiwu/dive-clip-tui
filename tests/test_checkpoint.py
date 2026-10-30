@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from utils.checkpoint import PipelineState
@@ -80,3 +79,65 @@ def test_pipeline_state_corrupt_file(tmp_path: Path) -> None:
     state = PipelineState(state_path)
     assert state.get("anything") is None
     assert state.is_step_done("ingest") is False
+
+
+def test_pipeline_state_save_stamps_updated_at(tmp_path: Path) -> None:
+    """Every save should refresh the updated_at timestamp."""
+    from datetime import datetime
+
+    state_path = tmp_path / "state.json"
+    state = PipelineState(state_path)
+    state.set("anything", 1)
+    state.save()
+
+    first = state.get("updated_at")
+    assert isinstance(first, str)
+    datetime.fromisoformat(first)  # must be a valid ISO-8601 timestamp
+
+    state.save()
+    assert state.get("updated_at") == first or state.get("updated_at") > first
+
+
+def test_pipeline_state_set_activity_records_timestamp(tmp_path: Path) -> None:
+    """set_activity should record the message, its time, and persist immediately."""
+    from datetime import datetime
+
+    state_path = tmp_path / "state.json"
+    state = PipelineState(state_path)
+    state.set_activity("scan: clip001 pass 1")
+
+    assert state.get("activity") == "scan: clip001 pass 1"
+    datetime.fromisoformat(state.get("activity_at"))
+
+    reloaded = PipelineState(state_path)
+    assert reloaded.get("activity") == "scan: clip001 pass 1"
+    assert reloaded.get("activity_at") == state.get("activity_at")
+
+
+def test_pipeline_state_step_duration_is_recorded(tmp_path: Path) -> None:
+    """mark_step_done should derive a duration from the recorded start time."""
+    state_path = tmp_path / "state.json"
+    state = PipelineState(state_path)
+    state.mark_step_started("scan")
+    assert state.get("scan_done") is False
+    assert isinstance(state.get("scan_started_at"), str)
+
+    state.mark_step_done("scan")
+    assert state.get("scan_done") is True
+    assert isinstance(state.get("scan_finished_at"), str)
+    assert state.get("scan_duration_seconds") >= 0.0
+
+
+def test_pipeline_state_save_merges_progress_from_disk(tmp_path: Path) -> None:
+    """A stale instance must not drop progress written by another process."""
+    state_path = tmp_path / "state.json"
+    parent = PipelineState(state_path)
+    parent.set_activity("parent")
+
+    child = PipelineState(state_path)
+    child.add_progress("scan", "clip001")
+
+    parent.add_progress("scan", "clip002")
+
+    reloaded = PipelineState(state_path)
+    assert reloaded.get("scan_progress") == ["clip001", "clip002"]

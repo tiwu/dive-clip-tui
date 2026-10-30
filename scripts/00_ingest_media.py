@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mpg", ".mpeg"}
 
@@ -57,7 +60,7 @@ def probe_video(video_path: Path) -> dict:
         try:
             num, den = fps_str.split("/")
             fps = round(float(num) / float(den), 2) if float(den) > 0 else 0.0
-        except (ValueError, ZeroDivisionError):
+        except ValueError, ZeroDivisionError:
             fps = 0.0
 
         return {
@@ -85,16 +88,26 @@ def probe_video(video_path: Path) -> dict:
 
 def ingest_folder(folder: Path) -> list[dict]:
     """Walk a folder and collect metadata for all video files."""
-    return [
-        probe_video(video_path)
-        for video_path in sorted(folder.rglob("*"))
-        if video_path.is_file()
-        and not video_path.name.startswith("._")
-        and video_path.suffix.lower() in VIDEO_EXTENSIONS
+    video_paths = [
+        path
+        for path in sorted(folder.rglob("*"))
+        if path.is_file()
+        and not path.name.startswith("._")
+        and path.suffix.lower() in VIDEO_EXTENSIONS
     ]
 
+    clips = []
+    for index, video_path in enumerate(video_paths, start=1):
+        logger.debug("Probing %d/%d: %s", index, len(video_paths), video_path.name)
+        meta = probe_video(video_path)
+        if "error" in meta:
+            logger.warning("Skipped %s: %s", video_path.name, meta["error"])
+        clips.append(meta)
+    return clips
 
-def main() -> None:
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
         description="Ingest a folder of videos and emit a JSON manifest"
     )
@@ -102,13 +115,24 @@ def main() -> None:
     parser.add_argument(
         "--output", default="outputs/manifest_raw.json", help="Output manifest JSON path"
     )
-    args = parser.parse_args()
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    return parser
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
     folder = Path(args.input)
     if not folder.exists():
-        print(f"ERROR: Folder does not exist: {folder}")
+        logger.error("Folder does not exist: %s", folder)
         sys.exit(1)
 
+    logger.info("Scanning %s for video files", folder)
     clips = ingest_folder(folder)
 
     output_path = Path(args.output)
@@ -123,7 +147,7 @@ def main() -> None:
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
 
-    print(f"Manifest written: {output_path} ({len(clips)} clips)")
+    logger.info("Manifest written: %s (%d clips)", output_path, len(clips))
 
 
 if __name__ == "__main__":

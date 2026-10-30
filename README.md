@@ -64,8 +64,51 @@ To start over and clear the saved pipeline state:
 uv run dive-clip scan --input ./footage --output ./highlights --reset
 ```
 
+For verbose logging during long-running AI scanning and rendering, use `--debug`:
+
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights --debug
+```
+
+This enables timestamped debug logs showing per-frame Ollama request timing,
+token counts, and full FFmpeg commands.
+
+In debug mode the scanner also logs a verdict for every frame it analyzes, which
+is the main tool for tuning the confidence thresholds:
+
+```
+[Pass 1] Analyzing frame 12 of 50
+[coarse] Ollama response in 8.4s: 4210 prompt tokens, 57 generated tokens
+[Pass 1] Frame 12 @ 24.0s: detected=True confidence=0.82 passes_threshold=True subject=shark (8.4s)
+[Pass 1] Summary clip001.mp4: 50 frames, 47 detected, 44 over threshold 0.65,
+  confidence min/avg/max = 0.05/0.78/0.95, 1 failed calls, 421.3s total
+```
+
+Each pass ends with a summary line at info level, so a normal run (without
+`--debug`) still reports how selective the coarse pass was and how many
+detections survived deduplication. Use those numbers to adjust
+`coarse_confidence_threshold`, `coarse_fps`, and `fine_fps`.
+
 The pipeline writes a JSON manifest, refined detections, and rendered MP4 clips
 to the configured output location.
+
+### Pipeline state file
+
+`dive-clip scan` records progress in `<output>/.pipeline_state.json` and saves it
+after every clip and scan window, so an interrupted run leaves an up-to-date
+checkpoint. The file also records timing:
+
+| Field | Meaning |
+| --- | --- |
+| `updated_at` | Timestamp of the most recent save |
+| `activity`, `activity_at` | What the pipeline was doing at that save, e.g. `scan: clip001.mp4 window 2/5 @30s` |
+| `<step>_done` | Whether `ingest`, `scan`, or `render` finished |
+| `<step>_started_at` / `<step>_finished_at` | Step start and end timestamps (UTC, ISO 8601) |
+| `<step>_duration_seconds` | Wall-clock duration of the completed step |
+| `<step>_progress` | Per-step list of completed clip names |
+
+Saves merge with the existing file on disk, so the orchestrator and the scan and
+render workers can share one state path without overwriting each other's work.
 
 ## Terminal UI (experimental)
 
@@ -139,9 +182,11 @@ outputs/                   # Generated manifests, detections, and exports
   resolution, and codec in `manifest_raw.json`.
 - The scanner uses Ollama's JSON response mode and writes
   `detections_refined.json`. It prints request counts, failures, elapsed time,
-  and available Ollama token/timing metrics after the scan.
-- `dive-clip scan` stores progress in `<output>/.pipeline_state.json`; use
-  `--resume` to skip completed steps or `--reset` to clear that state.
+  and available Ollama token/timing metrics after the scan. Use `--debug` for
+  per-frame verdicts, per-request timing, and token counts during the run.
+- `dive-clip scan` stores progress in `<output>/.pipeline_state.json`, updated
+  after every clip and scan window with `updated_at`, `activity`, and per-step
+  timing; use `--resume` to skip completed steps or `--reset` to clear that state.
 - Frame sampling uses `/dev/shm` when available and falls back to a temporary
   directory on systems such as macOS.
 - The optional Resolve marker export supports frame-rate-aware timecodes,

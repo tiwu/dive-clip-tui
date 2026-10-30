@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from utils.checkpoint import PipelineState
+
+logger = logging.getLogger(__name__)
 
 
 def slugify(text: str) -> str:
@@ -36,7 +42,7 @@ def render_clip(
     """
     duration = end_time - start_time
     if duration <= 0:
-        print(f"WARNING: Skipping {source_path.name}: non-positive duration {duration}")
+        logger.warning("Skipping %s: non-positive duration %s", source_path.name, duration)
         return False
 
     cmd = [
@@ -61,19 +67,18 @@ def render_clip(
     ]
 
     try:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Running FFmpeg command: %s", " ".join(cmd))
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        print(f"WARNING: FFmpeg timeout rendering {output_path.name}")
+        logger.warning("FFmpeg timeout rendering %s", output_path.name)
         return False
     except Exception as exc:
-        print(f"WARNING: FFmpeg error rendering {output_path.name}: {exc}")
+        logger.warning("FFmpeg error rendering %s: %s", output_path.name, exc)
         return False
 
     if result.returncode != 0:
-        print(
-            f"WARNING: FFmpeg failed for {output_path.name}: "
-            f"{result.stderr.strip()[:200]}"
-        )
+        logger.warning("FFmpeg failed for %s: %s", output_path.name, result.stderr.strip()[:200])
         return False
 
     return True
@@ -84,6 +89,7 @@ def main() -> None:
         description="Render AI detection windows as standalone MP4 clips"
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--input",
         default=None,
@@ -94,11 +100,24 @@ def main() -> None:
         default=None,
         help="Output highlights folder (default: outputs/highlights)",
     )
+    parser.add_argument(
+        "--state-path",
+        type=Path,
+        default=None,
+        help="Pipeline state file to heartbeat (default: not written)",
+    )
     args = parser.parse_args()
+
+    # Configure logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
     config_path = Path(args.config)
     if not config_path.exists():
-        print(f"ERROR: Config not found: {config_path}")
+        logger.error("Config not found: %s", config_path)
         sys.exit(1)
 
     with open(config_path) as f:
@@ -114,8 +133,8 @@ def main() -> None:
         if alt.exists():
             detections_path = alt
         else:
-            print(f"ERROR: detections_refined.json not found at {detections_path}")
-            print("Run 02_scan_footage.py first.")
+            logger.error("detections_refined.json not found at %s", detections_path)
+            logger.error("Run 02_scan_footage.py first.")
             sys.exit(1)
 
     # Resolve output highlights folder
@@ -127,17 +146,22 @@ def main() -> None:
 
     detections = detections_data.get("detections", [])
     if not detections:
-        print("No detections found to render.")
+        logger.info("No detections found to render.")
         sys.exit(0)
 
-    print(f"Rendering {len(detections)} detection clips to {highlights_dir}")
+    logger.info("Rendering %d detection clips to %s", len(detections), highlights_dir)
+
+    state: PipelineState | None = None
+    if args.state_path is not None:
+        state = PipelineState(args.state_path)
+        state.mark_step_started("render")
 
     rendered = 0
     failed = 0
     for i, det in enumerate(detections, 1):
         source_path = Path(det.get("file_path", ""))
         if not source_path.exists():
-            print(f"  [{i}/{len(detections)}] SKIP: source not found: {source_path}")
+            logger.warning("  [%d/%d] SKIP: source not found: %s", i, len(detections), source_path)
             failed += 1
             continue
 
@@ -150,20 +174,37 @@ def main() -> None:
         output_name = f"{clip_id}_{subject}_q{quality}.mp4"
         output_path = highlights_dir / output_name
 
-        print(
-            f"  [{i}/{len(detections)}] {source_path.name} "
-            f"[{start_time:.1f}s-{end_time:.1f}s] -> {output_name}"
+        if state is not None:
+            state.set_activity(f"render: {i}/{len(detections)} {output_name}")
+
+        logger.info(
+            "  [%d/%d] %s [%.1fs-%.1fs] -> %s",
+            i,
+            len(detections),
+            source_path.name,
+            start_time,
+            end_time,
+            output_name,
         )
 
+        clip_start = time.perf_counter()
         if render_clip(source_path, start_time, end_time, output_path):
             rendered += 1
+            logger.debug(
+                "  [%d/%d] rendered in %.1fs: %s",
+                i,
+                len(detections),
+                time.perf_counter() - clip_start,
+                output_name,
+            )
         else:
             failed += 1
 
-    print(
-        f"\nDone. {rendered} rendered, {failed} failed."
-        f"\nOutput: {highlights_dir}"
-    )
+    if state is not None:
+        state.mark_step_done("render")
+
+    logger.info("Done. %d rendered, %d failed.", rendered, failed)
+    logger.info("Output: %s", highlights_dir)
 
 
 if __name__ == "__main__":
