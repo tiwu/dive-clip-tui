@@ -50,6 +50,7 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 │   ├── checkpoint.py         # Pipeline checkpoint / resume state
 │   ├── ffmpeg_streamer.py    # Frame sampling helpers (/dev/shm & buffers)
 │   ├── models.py             # Pydantic data models (manifest, detections)
+│   ├── ollama_client.py      # Shared Ollama requests and metrics
 │   ├── prompt_templates.py   # Dynamic prompts per keyword category
 │   └── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
 ├── tui/                      # Textual-based terminal UI
@@ -182,6 +183,8 @@ Request review. The PR should reference the issue it closes (e.g. `Closes #<N>` 
   long-running batches.
 - **Ollama JSON mode:** all Ollama API calls use `"format": "json"` so Qwen2.5-VL
   returns pure JSON.
+- **Ollama requests:** use `utils/ollama_client.py` for shared request handling
+  and metrics rather than calling the API directly from scripts.
 
 ---
 

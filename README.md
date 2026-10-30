@@ -138,7 +138,8 @@ outputs/                   # Generated manifests, detections, and exports
 - Folder ingestion uses `ffprobe` to record video duration, frame rate,
   resolution, and codec in `manifest_raw.json`.
 - The scanner uses Ollama's JSON response mode and writes
-  `detections_refined.json`.
+  `detections_refined.json`. It prints request counts, failures, elapsed time,
+  and available Ollama token/timing metrics after the scan.
 - `dive-clip scan` stores progress in `<output>/.pipeline_state.json`; use
   `--resume` to skip completed steps or `--reset` to clear that state.
 - Frame sampling uses `/dev/shm` when available and falls back to a temporary

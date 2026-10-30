@@ -6,12 +6,12 @@ general:
   path_mapping:
     from_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
     to_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
-  output_dir: "./outputs"
+  output_dir: "/Volumes/SAMSUNG T9/dive-processing-test/out"
 
 ollama:
   host: "http://localhost:11434"
-  model: "qwen3-vl:4b"
-  timeout_seconds: 90
+  model: "qwen2.5vl:3b"
+  timeout_seconds: 120
 
 scan_parameters:
   coarse_fps: 0.5                   # 1 frame per 2 seconds

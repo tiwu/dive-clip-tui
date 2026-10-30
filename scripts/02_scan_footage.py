@@ -9,19 +9,19 @@ Includes error recovery for corrupt frames.
 from __future__ import annotations
 
 import argparse
-import base64
+import hashlib
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
-import requests
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
 from utils.models import DetectionsRefined, RefinedDetection
+from utils.ollama_client import OllamaClient
 from utils.prompt_templates import ALL_TEMPLATES, get_template_for_keywords
 
 
@@ -31,48 +31,20 @@ def call_ollama(
     image_path: str,
     prompt: str,
     timeout: int = 90,
+    *,
+    client: OllamaClient | None = None,
+    phase: str = "unspecified",
 ) -> dict[str, Any] | None:
-    """Send a single frame to Ollama Qwen2.5-VL with JSON mode.
-
-    Forces format: "json" so Qwen returns pure JSON without markdown babbles.
-    """
-    try:
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
-    except Exception as exc:
-        print(f"WARNING: Cannot read image {image_path}: {exc}")
-        return None
-
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "images": [image_b64],
-        "format": "json",
-        "stream": False,
-    }
-
-    try:
-        resp = requests.post(
-            f"{host}/api/generate",
-            json=payload,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        raw = result.get("response", "{}")
-        return json.loads(raw)
-    except requests.exceptions.RequestException as exc:
-        print(f"WARNING: Ollama request failed: {exc}")
-        return None
-    except json.JSONDecodeError as exc:
-        print(f"WARNING: Ollama returned invalid JSON: {exc}")
-        return None
+    """Compatibility wrapper around the shared Ollama client."""
+    request_client = client or OllamaClient(host, model, timeout)
+    return request_client.generate(image_path, prompt, phase)
 
 
 def process_clip(
     clip: dict,
     config: dict,
     work_dir: Path,
+    ollama_client: OllamaClient | None = None,
 ) -> list[RefinedDetection]:
     """Process a single clip through coarse-to-fine scanning.
 
@@ -83,7 +55,9 @@ def process_clip(
         print(f"WARNING: File not found: {file_path}")
         return []
 
-    clip_id = clip["clip_id"]
+    clip_id = clip.get("clip_id") or (
+        f"clip_{hashlib.sha256(file_path.encode('utf-8')).hexdigest()[:16]}"
+    )
     clip_work_dir = work_dir / clip_id
     clip_work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -98,6 +72,7 @@ def process_clip(
     ollama_host = ollama_cfg.get("host", "http://localhost:11434")
     ollama_model = ollama_cfg.get("model", "qwen2.5-vl:7b")
     ollama_timeout = ollama_cfg.get("timeout_seconds", 90)
+    client = ollama_client or OllamaClient(ollama_host, ollama_model, ollama_timeout)
 
     tags = clip.get("tags", [])
 
@@ -110,12 +85,22 @@ def process_clip(
     )
 
     candidate_windows: list[tuple[float, float]] = []
-    for frame in coarse_frames:
+    for frame_index, frame in enumerate(coarse_frames, start=1):
+        print(
+            f"  [Pass 1] Analyzing frame {frame_index} of {len(coarse_frames)}",
+            flush=True,
+        )
         template = get_template_for_keywords(tags)
         prompt_template = template.user_prompt if template else ALL_TEMPLATES[0].user_prompt
 
         result = call_ollama(
-            ollama_host, ollama_model, frame["frame_path"], prompt_template, ollama_timeout
+            ollama_host,
+            ollama_model,
+            frame["frame_path"],
+            prompt_template,
+            ollama_timeout,
+            client=client,
+            phase="coarse",
         )
         if result is None:
             continue
@@ -157,7 +142,7 @@ def process_clip(
         )
         color = "Green"
 
-    for win_start, win_end in merged:
+    for window_index, (win_start, win_end) in enumerate(merged, start=1):
         duration = win_end - win_start
         win_dir = clip_work_dir / "fine" / f"win_{int(win_start)}_{int(win_end)}"
         fine_frames = extract_frames(
@@ -168,13 +153,20 @@ def process_clip(
             duration_seconds=duration,
         )
 
-        for frame in fine_frames:
+        for frame_index, frame in enumerate(fine_frames, start=1):
+            print(
+                f"  [Pass 2] Window {window_index} of {len(merged)}: "
+                f"analyzing frame {frame_index} of {len(fine_frames)}",
+                flush=True,
+            )
             result = call_ollama(
                 ollama_host,
                 ollama_model,
                 frame["frame_path"],
                 prompt_template,
                 ollama_timeout,
+                client=client,
+                phase="fine",
             )
             if result is None:
                 continue
@@ -186,7 +178,7 @@ def process_clip(
                             clip_id=clip_id,
                             file_name=clip["file_name"],
                             file_path=file_path,
-                            fps=clip.get("fps", "25.0"),
+                            fps=str(clip.get("fps") or "25.0"),
                             start_time=max(0, frame["timestamp"] - 1),
                             end_time=frame["timestamp"] + 1,
                             subject=result.get("subject", "unknown"),
@@ -266,11 +258,17 @@ def main() -> None:
     work_dir = get_work_dir()
     print(f"Using work directory: {work_dir}")
 
+    ollama_cfg = config.get("ollama", {})
+    ollama_client = OllamaClient(
+        ollama_cfg.get("host", "http://localhost:11434"),
+        ollama_cfg.get("model", "qwen2.5-vl:7b"),
+        ollama_cfg.get("timeout_seconds", 90),
+    )
     refined = DetectionsRefined(total_clips=0, total_detections=0, detections=[])
 
     for clip in manifest.get("clips", []):
         print(f"Processing: {clip.get('file_name', 'unknown')}")
-        detections = process_clip(clip, config, work_dir)
+        detections = process_clip(clip, config, work_dir, ollama_client)
         refined.detections.extend(detections)
         refined.total_detections += len(detections)
         refined.total_clips += 1
@@ -289,6 +287,7 @@ def main() -> None:
         f"\nDone. {refined.total_detections} detections across "
         f"{refined.total_clips} clips."
     )
+    print(ollama_client.metrics.format_summary())
     print(f"Output: {output_path}")
 
 

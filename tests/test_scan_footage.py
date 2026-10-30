@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from utils import ollama_client
 
 # Load scripts/02_scan_footage.py directly (name starts with a digit)
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -67,7 +70,7 @@ def test_call_ollama_success(tmp_path: Path) -> None:
     mock_response = MagicMock()
     mock_response.json.return_value = {"response": '{"detected": true, "subject": "turtle"}'}
 
-    with patch.object(scan.requests, "post", return_value=mock_response):
+    with patch.object(ollama_client.requests, "post", return_value=mock_response):
         result = scan.call_ollama("http://localhost:11434", "qwen2.5-vl:7b", str(image_path), "prompt")
 
     assert result is not None
@@ -83,7 +86,9 @@ def test_call_ollama_request_failure(tmp_path: Path) -> None:
     image_path.write_bytes(b"fake image data")
 
     with patch.object(
-        scan.requests, "post", side_effect=requests.exceptions.RequestException("connection error")
+        ollama_client.requests,
+        "post",
+        side_effect=requests.exceptions.RequestException("connection error"),
     ):
         result = scan.call_ollama("http://localhost:11434", "qwen2.5-vl:7b", str(image_path), "prompt")
 
@@ -98,7 +103,7 @@ def test_call_ollama_invalid_json(tmp_path: Path) -> None:
     mock_response = MagicMock()
     mock_response.json.return_value = {"response": "not json"}
 
-    with patch.object(scan.requests, "post", return_value=mock_response):
+    with patch.object(ollama_client.requests, "post", return_value=mock_response):
         result = scan.call_ollama("http://localhost:11434", "qwen2.5-vl:7b", str(image_path), "prompt")
 
     assert result is None
@@ -135,7 +140,7 @@ def test_process_clip_no_candidates(tmp_path: Path) -> None:
     assert result == []
 
 
-def test_process_clip_with_candidates(tmp_path: Path) -> None:
+def test_process_clip_with_candidates(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """process_clip should run coarse-to-fine scan and return detections."""
     video = tmp_path / "video.mp4"
     video.touch()
@@ -143,9 +148,7 @@ def test_process_clip_with_candidates(tmp_path: Path) -> None:
     clip = {
         "file_path": str(video),
         "file_name": "video.mp4",
-        "clip_id": "c1",
-        "fps": "25.0",
-        "tags": ["turtle"],
+        "fps": 25.0,
     }
     config = {
         "scan_parameters": {
@@ -190,10 +193,22 @@ def test_process_clip_with_candidates(tmp_path: Path) -> None:
         "description": "Sea turtle",
     }
 
-    with patch.object(scan, "extract_frames", side_effect=mock_extract_frames):
-        with patch.object(scan, "call_ollama", return_value=mock_ollama_result):
-            result = scan.process_clip(clip, config, tmp_path / "work")
+    response = MagicMock()
+    response.json.return_value = {"response": json.dumps(mock_ollama_result)}
+    client = ollama_client.OllamaClient("http://localhost:11434", "qwen2.5-vl:7b", 90)
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract_frames),
+        patch.object(ollama_client.requests, "post", return_value=response),
+    ):
+        result = scan.process_clip(clip, config, tmp_path / "work", client)
 
     assert len(result) > 0
     assert result[0].subject == "turtle"
     assert result[0].quality_score == 8
+    assert result[0].clip_id.startswith("clip_")
+    assert result[0].fps == "25.0"
+    output = capsys.readouterr().out
+    assert "[Pass 1] Analyzing frame 1 of 1" in output
+    assert "[Pass 2] Window 1 of 1: analyzing frame 1 of 1" in output
+    assert client.metrics.by_phase["coarse"].calls == 1
+    assert client.metrics.by_phase["fine"].calls == 1
