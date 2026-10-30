@@ -91,3 +91,39 @@ def test_metrics_summary_for_no_calls() -> None:
     assert ollama_client.OllamaMetrics().format_summary() == (
         "Ollama request metrics: no requests made."
     )
+
+
+def test_resolve_host_prefers_env_over_configured(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_HOST", "http://plotter.local:11434")
+    assert ollama_client.resolve_host("http://localhost:11434") == "http://plotter.local:11434"
+
+
+def test_resolve_host_adds_missing_scheme(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_HOST", "plotter.local:11434")
+    assert ollama_client.resolve_host(None) == "http://plotter.local:11434"
+
+
+def test_resolve_host_strips_trailing_slash(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_HOST", "plotter.local:11434/")
+    assert ollama_client.resolve_host(None) == "http://plotter.local:11434"
+
+
+def test_resolve_host_ignores_blank_env(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_HOST", "   ")
+    assert ollama_client.resolve_host("http://remote:11434") == "http://remote:11434"
+
+
+def test_resolve_host_falls_back_to_configured(monkeypatch) -> None:
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    assert ollama_client.resolve_host("http://remote:11434") == "http://remote:11434"
+
+
+def test_resolve_host_normalizes_configured_host(monkeypatch) -> None:
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    assert ollama_client.resolve_host("remote:11434/") == "http://remote:11434"
+
+
+def test_resolve_host_defaults_to_localhost(monkeypatch) -> None:
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    assert ollama_client.resolve_host(None) == ollama_client.DEFAULT_OLLAMA_HOST
+    assert ollama_client.resolve_host("") == ollama_client.DEFAULT_OLLAMA_HOST

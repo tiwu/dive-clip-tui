@@ -5,11 +5,15 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import requests
+
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_HOST_ENV_VAR = "OLLAMA_HOST"
 
 _SERVER_METRIC_FIELDS = (
     "prompt_eval_count",
@@ -21,6 +25,36 @@ _SERVER_METRIC_FIELDS = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_host(host: str) -> str:
+    """Trim whitespace and trailing slashes, adding http:// when no scheme is given.
+
+    The Ollama CLI accepts bare ``host:port`` values (e.g.
+    ``plotter.local:11434``), but ``requests`` raises ``MissingSchema`` on
+    them, so a scheme is prepended.
+    """
+    cleaned = host.strip().rstrip("/")
+    if cleaned and "://" not in cleaned:
+        cleaned = f"http://{cleaned}"
+    return cleaned
+
+
+def resolve_host(configured_host: str | None = None) -> str:
+    """Resolve the Ollama base URL.
+
+    ``OLLAMA_HOST`` wins so a remote server can be selected at runtime
+    without editing the tracked config file. Otherwise the configured host is
+    used, falling back to localhost.
+    """
+    env_host = os.environ.get(OLLAMA_HOST_ENV_VAR, "").strip()
+    if env_host:
+        resolved = normalize_host(env_host)
+        logger.debug("Using %s override: %s", OLLAMA_HOST_ENV_VAR, resolved)
+        return resolved
+    if configured_host and configured_host.strip():
+        return normalize_host(configured_host)
+    return DEFAULT_OLLAMA_HOST
 
 
 @dataclass

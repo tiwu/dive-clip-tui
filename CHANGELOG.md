@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Honour the `OLLAMA_HOST` environment variable, which now takes precedence over
+  `ollama.host` in the config file. A remote Ollama can be selected at runtime
+  with `export OLLAMA_HOST=plotter.local:11434` instead of maintaining an
+  untracked config file. Scheme-less values are normalised to `http://`, since
+  the Ollama CLI accepts them but `requests` rejects them.
+
 ## [0.5.0] - 2026-10-30
 
 ### Added

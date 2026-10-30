@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
 from utils.models import DetectionsRefined, RefinedDetection
-from utils.ollama_client import OllamaClient
+from utils.ollama_client import OllamaClient, resolve_host
 from utils.prompt_templates import (
     BROAD_MARINE_TEMPLATE,
     get_template_for_keywords,
@@ -85,7 +85,7 @@ def process_clip(
     quality_threshold = scan_params.get("quality_threshold", 7)
 
     ollama_cfg = config.get("ollama", {})
-    ollama_host = ollama_cfg.get("host", "http://localhost:11434")
+    ollama_host = resolve_host(ollama_cfg.get("host"))
     ollama_model = ollama_cfg.get("model", "qwen2.5-vl:7b")
     ollama_timeout = ollama_cfg.get("timeout_seconds", 90)
     client = ollama_client or OllamaClient(ollama_host, ollama_model, ollama_timeout)
@@ -404,7 +404,7 @@ def main() -> None:
 
     ollama_cfg = config.get("ollama", {})
     ollama_client = OllamaClient(
-        ollama_cfg.get("host", "http://localhost:11434"),
+        resolve_host(ollama_cfg.get("host")),
         ollama_cfg.get("model", "qwen2.5-vl:7b"),
         ollama_cfg.get("timeout_seconds", 90),
     )
