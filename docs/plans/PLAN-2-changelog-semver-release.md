@@ -47,7 +47,7 @@ with the existing issue-plan and implementation-PR stages.
 ## 5. Verification & Rollout Checklist
 
 - [x] Tests cover SemVer labels and release/changelog transformations.
-- [ ] PR CI passes tests, changed-file lint/format checks, and changelog validation.
+- [x] PR CI passes tests, changed-file lint/format checks, and changelog validation.
 - [ ] Release workflow updates versions, changelog, tag, and GitHub Release.
 - [ ] Repository settings allow Actions `contents: write` and bot updates to `main`.
 - [ ] PR merged and release workflow observed.
