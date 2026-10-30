@@ -645,3 +645,32 @@ def test_process_clip_honours_ollama_host_env(
         scan.process_clip(clip, config, tmp_path / "work")
 
     assert client_cls.call_args.args[0] == "http://plotter.local:11434"
+
+
+def test_main_output_dir_override_beats_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--output-dir must take effect instead of general.output_dir."""
+    config_dir = tmp_path / "config_out"
+    config_dir.mkdir()
+    (config_dir / "manifest_raw.json").write_text(
+        json.dumps({"project_name": "t", "total_clips": 0, "clips": []})
+    )
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f'general:\n  output_dir: "{config_dir}"\n')
+
+    override_dir = tmp_path / "override_out"
+    override_dir.mkdir()
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["02_scan_footage.py", "--config", str(config_path), "--output-dir", str(override_dir)],
+    )
+
+    # The config folder holds a manifest, the override folder does not, so an
+    # ignored override would scan successfully and never exit with code 1.
+    with pytest.raises(SystemExit) as exc_info:
+        scan.main()
+
+    assert exc_info.value.code == 1

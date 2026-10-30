@@ -6,6 +6,18 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add optional `general.input_dir` to the config. When set, `dive-clip scan` can
+  run without `--input`, mirroring how `general.output_dir` already supplied the
+  output folder. Explicit flags still win.
+
+### Fixed
+- `dive-clip scan` now passes the resolved output folder to
+  `scripts/02_scan_footage.py` via a new `--output-dir` flag. The scan step
+  previously re-derived its input and output paths from `general.output_dir`, so
+  a `--output` that differed from the config silently read a manifest from a
+  different folder and wrote detections where the render step did not look.
+
 ### Removed
 - Remove `general.path_mapping`, which only rewrote media paths exported by the
   DaVinci Resolve manifest extractor (`scripts/01_extract_manifest.py`). The

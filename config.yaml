@@ -2,6 +2,8 @@
 
 general:
   project_name: "Madagascar_Dives_2026"
+  # Footage folder used when `dive-clip scan` is run without --input.
+  # input_dir: "/Volumes/SAMSUNG T9/dive-processing-test/footage"
   output_dir: "/Volumes/SAMSUNG T9/dive-processing-test/out"
 
 ollama:

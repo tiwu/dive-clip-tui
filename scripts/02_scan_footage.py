@@ -362,6 +362,12 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Override general.output_dir for manifest input and detections output",
+    )
+    parser.add_argument(
         "--state-path",
         type=Path,
         default=None,
@@ -384,10 +390,14 @@ def main() -> None:
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
-    output_dir = Path(config.get("general", {}).get("output_dir", "./outputs"))
+    if args.output_dir is not None:
+        output_dir = args.output_dir
+    else:
+        output_dir = Path(config.get("general", {}).get("output_dir", "./outputs"))
     manifest_path = output_dir / "manifest_raw.json"
 
-    if not manifest_path.exists():
+    if not manifest_path.exists() and args.output_dir is None:
+        # Legacy fallback for manifests written before output_dir was configured.
         manifest_path = Path(__file__).resolve().parent.parent / "outputs" / "manifest_raw.json"
 
     if not manifest_path.exists():
