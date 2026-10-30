@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.dive_clip import build_parser, cmd_scan, main, run
+from scripts.dive_clip import build_parser, cmd_scan, main, resolve_paths, run
 
 
 def test_run_success() -> None:
@@ -259,3 +259,78 @@ def test_cmd_scan_writes_step_timestamps(tmp_path: Path) -> None:
         assert f"{step}_started_at" in state
         assert f"{step}_finished_at" in state
         assert state[f"{step}_duration_seconds"] >= 0
+
+
+def test_resolve_paths_prefers_cli_over_config(tmp_path: Path) -> None:
+    """Explicit flags must win over general.input_dir / general.output_dir."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "general:\n  input_dir: /from-config/in\n  output_dir: /from-config/out\n"
+    )
+    args = argparse.Namespace(input="/from-cli/in", output="/from-cli/out", config=str(config_path))
+
+    assert resolve_paths(args) == (Path("/from-cli/in"), Path("/from-cli/out"))
+
+
+def test_resolve_paths_falls_back_to_config(tmp_path: Path) -> None:
+    """Omitting the flags should fall back to the config general section."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "general:\n  input_dir: /from-config/in\n  output_dir: /from-config/out\n"
+    )
+    args = argparse.Namespace(input=None, output=None, config=str(config_path))
+
+    assert resolve_paths(args) == (Path("/from-config/in"), Path("/from-config/out"))
+
+
+def test_resolve_paths_requires_input(tmp_path: Path) -> None:
+    """A config carrying only output_dir is not enough to locate footage."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("general:\n  output_dir: /from-config/out\n")
+    args = argparse.Namespace(input=None, output=None, config=str(config_path))
+
+    assert resolve_paths(args) is None
+
+
+def test_resolve_paths_requires_output(tmp_path: Path) -> None:
+    """A config carrying only input_dir is not enough to place outputs."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("general:\n  input_dir: /from-config/in\n")
+    args = argparse.Namespace(input=None, output=None, config=str(config_path))
+
+    assert resolve_paths(args) is None
+
+
+def test_resolve_paths_tolerates_missing_config(tmp_path: Path) -> None:
+    """A missing config must not crash path resolution when flags are given."""
+    args = argparse.Namespace(
+        input="/cli/in", output="/cli/out", config=str(tmp_path / "gone.yaml")
+    )
+
+    assert resolve_paths(args) == (Path("/cli/in"), Path("/cli/out"))
+
+
+def test_cmd_scan_exits_when_paths_unresolvable(tmp_path: Path) -> None:
+    """cmd_scan should bail out with code 2 when no input folder is available."""
+    args = argparse.Namespace(
+        input=None,
+        output=None,
+        config=str(tmp_path / "config.yaml"),
+        resume=False,
+        reset=False,
+        debug=False,
+    )
+
+    assert cmd_scan(args) == 2
+
+
+def test_cmd_scan_passes_output_dir_to_scan_step(tmp_path: Path) -> None:
+    """The scan step must use the resolved output folder, not the config one."""
+    args = _scan_args(tmp_path, debug=False)
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
+        assert cmd_scan(args) == 0
+
+    scan_cmd = mock.call_args_list[1].args[0]
+    assert "--output-dir" in scan_cmd
+    assert scan_cmd[scan_cmd.index("--output-dir") + 1] == args.output

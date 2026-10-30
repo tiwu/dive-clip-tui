@@ -35,9 +35,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Review `config.yaml` before scanning. In particular, set `general.output_dir`,
-the Ollama model/host, and any `general.path_mapping` needed to locate media
-across machines.
+Review `config.yaml` before scanning. In particular, set `general.output_dir`
+and the Ollama model/host. Optionally set `general.input_dir` to the footage
+folder so `dive-clip scan` can run without `--input`.
 
 ### Using a remote Ollama
 
@@ -61,10 +61,27 @@ The single-command CLI chains folder ingestion, AI scanning, and clip rendering:
 uv run dive-clip scan --input ./footage --output ./highlights
 ```
 
-The scanner reads and writes its manifest and detections under
-`general.output_dir` in the selected config. Set that directory to match the
-command's `--output` directory (for example, `./highlights`) so the pipeline
-steps use the same files. A custom config can be selected with `--config`.
+The scanner reads and writes its manifest and detections under the resolved
+output folder. `--output` takes precedence over `general.output_dir`, and the
+resolved folder is passed to every pipeline step, so the two can no longer drift
+apart. Likewise `--input` takes precedence over `general.input_dir`:
+
+```bash
+# Footage and output folders both come from config.yaml
+uv run dive-clip scan
+
+# Flags still override the config values
+uv run dive-clip scan --input ./footage --output ./highlights
+```
+
+A custom config can be selected with `--config`.
+
+> [!CAUTION]
+> Keep the input and output folders separate and non-nested. Ingestion walks the
+> input folder recursively, so an output folder placed inside it (such as
+> `./footage/highlights`) gets picked up as more footage on the next run and
+> silently inflates the manifest. Use sibling folders, for example `./footage`
+> and `./highlights`, not `./footage` and `./footage/highlights`.
 
 The command supports checkpointing and can resume completed steps:
 

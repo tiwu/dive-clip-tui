@@ -2,10 +2,10 @@
 
 general:
   project_name: "Madagascar_Dives_2026"
-  # Path mapping: makes the script portable between macOS and Linux
-  path_mapping:
-    from_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
-    to_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
+  # Footage folder used when `dive-clip scan` is run without --input.
+  # Keep input_dir and output_dir as separate folders that do not nest: ingest
+  # walks the input tree recursively and would also pick up its own output.
+  # input_dir: "/Volumes/SAMSUNG T9/dive-processing-test/footage"
   output_dir: "/Volumes/SAMSUNG T9/dive-processing-test/out"
 
 ollama:
