@@ -20,6 +20,15 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 # Marks the handlers this module installs, so reconfiguring replaces only those
 # and leaves handlers owned by an embedding application (or pytest) untouched.
 _OWNED_ATTR = "_dive_clip_owned"
+_CONSOLE: Console | None = None
+
+
+def get_console() -> Console:
+    """Return the shared stderr Console instance across logging and progress displays."""
+    global _CONSOLE
+    if _CONSOLE is None:
+        _CONSOLE = Console(stderr=True)
+    return _CONSOLE
 
 
 def default_log_path(output_dir: Path) -> Path:
@@ -40,7 +49,7 @@ def configure_logging(
     retried within the same run keeps a single transcript. Returns the resolved
     logfile path, or None when no logfile was requested.
     """
-    active_console = console or Console(stderr=True)
+    active_console = console or get_console()
     console_handler = RichHandler(
         console=active_console,
         show_time=True,

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -83,6 +84,71 @@ def render_clip(
         return False
 
     return True
+
+
+def render_detections(
+    detections: list[dict | Any],
+    highlights_dir: Path,
+    state: PipelineState | None = None,
+) -> tuple[int, int]:
+    """Render detection windows into standalone MP4 clips.
+
+    Skips clips whose destination files already exist with non-zero size.
+    Returns (rendered_count, failed_count).
+    """
+    highlights_dir = Path(highlights_dir)
+    highlights_dir.mkdir(parents=True, exist_ok=True)
+
+    rendered = 0
+    failed = 0
+    for i, item in enumerate(detections, 1):
+        det = item.model_dump() if hasattr(item, "model_dump") else item
+        source_path = Path(det.get("file_path", ""))
+        if not source_path.exists():
+            logger.warning("  [%d/%d] SKIP: source not found: %s", i, len(detections), source_path)
+            failed += 1
+            continue
+
+        start_time = float(det.get("start_time", 0))
+        end_time = float(det.get("end_time", start_time + 5))
+        subject = slugify(det.get("subject", "unknown"))
+        quality = det.get("quality_score", 0)
+        clip_id = det.get("clip_id", f"clip{i}")
+
+        output_name = f"{clip_id}_{subject}_q{quality}.mp4"
+        output_path = highlights_dir / output_name
+
+        if output_path.exists() and output_path.stat().st_size > 0:
+            logger.debug("  [%d/%d] SKIP: already rendered: %s", i, len(detections), output_name)
+            continue
+
+        if state is not None:
+            state.set_activity(f"render: {i}/{len(detections)} {output_name}")
+
+        logger.info(
+            "  [%d/%d] %s [%.1fs-%.1fs] -> %s",
+            i,
+            len(detections),
+            source_path.name,
+            start_time,
+            end_time,
+            output_name,
+        )
+
+        clip_start = time.perf_counter()
+        if render_clip(source_path, start_time, end_time, output_path):
+            rendered += 1
+            logger.debug(
+                "  [%d/%d] rendered in %.1fs: %s",
+                i,
+                len(detections),
+                time.perf_counter() - clip_start,
+                output_name,
+            )
+        else:
+            failed += 1
+
+    return rendered, failed
 
 
 def main() -> None:
@@ -158,49 +224,7 @@ def main() -> None:
         state = PipelineState(args.state_path)
         state.mark_step_started("render")
 
-    rendered = 0
-    failed = 0
-    for i, det in enumerate(detections, 1):
-        source_path = Path(det.get("file_path", ""))
-        if not source_path.exists():
-            logger.warning("  [%d/%d] SKIP: source not found: %s", i, len(detections), source_path)
-            failed += 1
-            continue
-
-        start_time = float(det.get("start_time", 0))
-        end_time = float(det.get("end_time", start_time + 5))
-        subject = slugify(det.get("subject", "unknown"))
-        quality = det.get("quality_score", 0)
-        clip_id = det.get("clip_id", f"clip{i}")
-
-        output_name = f"{clip_id}_{subject}_q{quality}.mp4"
-        output_path = highlights_dir / output_name
-
-        if state is not None:
-            state.set_activity(f"render: {i}/{len(detections)} {output_name}")
-
-        logger.info(
-            "  [%d/%d] %s [%.1fs-%.1fs] -> %s",
-            i,
-            len(detections),
-            source_path.name,
-            start_time,
-            end_time,
-            output_name,
-        )
-
-        clip_start = time.perf_counter()
-        if render_clip(source_path, start_time, end_time, output_path):
-            rendered += 1
-            logger.debug(
-                "  [%d/%d] rendered in %.1fs: %s",
-                i,
-                len(detections),
-                time.perf_counter() - clip_start,
-                output_name,
-            )
-        else:
-            failed += 1
+    rendered, failed = render_detections(detections, highlights_dir, state=state)
 
     if state is not None:
         state.mark_step_done("render")

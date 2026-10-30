@@ -300,3 +300,51 @@ def test_main_logs_per_clip_progress_at_info(
     assert "render_started_at" in state
     assert "render_finished_at" in state
     assert "updated_at" in state
+
+
+def test_render_detections_renders_new_and_skips_existing(tmp_path: Path) -> None:
+    """render_detections should render new clips and skip existing clips with non-zero size."""
+    source_video = tmp_path / "source.mp4"
+    source_video.touch()
+    highlights_dir = tmp_path / "highlights"
+    highlights_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-create the first highlight clip to simulate existing file
+    existing_clip = highlights_dir / "c1_turtle_q8.mp4"
+    existing_clip.write_bytes(b"existing video content")
+
+    detections = [
+        {
+            "clip_id": "c1",
+            "file_path": str(source_video),
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "subject": "turtle",
+            "quality_score": 8,
+        },
+        {
+            "clip_id": "c2",
+            "file_path": str(source_video),
+            "start_time": 10.0,
+            "end_time": 15.0,
+            "subject": "shark",
+            "quality_score": 9,
+        },
+    ]
+
+    rendered_files = []
+
+    def mock_render_clip(source, start, end, out):
+        rendered_files.append(out.name)
+        out.write_bytes(b"newly rendered")
+        return True
+
+    with patch.object(render, "render_clip", side_effect=mock_render_clip):
+        rendered_count, failed_count = render.render_detections(detections, highlights_dir)
+
+    assert rendered_count == 1
+    assert failed_count == 0
+    # c1_turtle_q8.mp4 was skipped, only c2_shark_q9.mp4 was rendered
+    assert rendered_files == ["c2_shark_q9.mp4"]
+    # Existing clip content was untouched
+    assert existing_clip.read_bytes() == b"existing video content"

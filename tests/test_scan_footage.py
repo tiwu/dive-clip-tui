@@ -736,3 +736,212 @@ def test_process_clip_updates_progress_tasks(tmp_path: Path) -> None:
     assert len(result) == 1
     assert mock_progress.add_task.call_count >= 2  # coarse task + fine window task
     assert mock_progress.advance.call_count >= 2
+
+
+def test_create_scan_progress_layout() -> None:
+    """create_scan_progress should use the shared console and bounded column layout."""
+    from utils.logging_setup import get_console
+
+    progress = scan.create_scan_progress()
+    assert progress.console is get_console()
+    assert len(progress.columns) > 0
+    # Check that BarColumn has a bounded width to prevent terminal line wrapping
+    bar_cols = [c for c in progress.columns if isinstance(c, scan.BarColumn)]
+    assert len(bar_cols) == 1
+    assert bar_cols[0].bar_width is not None
+
+
+def test_process_clip_passes_scale_parameters(tmp_path: Path) -> None:
+    """process_clip should pass coarse_scale and fine_scale to extract_frames."""
+    video = tmp_path / "video.mp4"
+    video.touch()
+    clip = {
+        "file_path": str(video),
+        "file_name": "video.mp4",
+        "fps": 25.0,
+    }
+    config = {
+        "scan_parameters": {
+            "coarse_fps": 0.5,
+            "coarse_scale": "640:-2",
+            "fine_fps": 2.0,
+            "fine_scale": "1280:-2",
+            "coarse_confidence_threshold": 0.5,
+            "fine_padding_seconds": 2,
+            "quality_threshold": 5,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+    extracted_scales = []
+
+    def mock_extract(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        extracted_scales.append(scale)
+        frame = tmp_path / f"f_{len(extracted_scales)}.jpg"
+        frame.touch()
+        return [{"frame_path": str(frame), "timestamp": 1.0, "frame_number": 1}]
+
+    mock_ollama_result = {
+        "detected": True,
+        "subject": "turtle",
+        "confidence": 0.9,
+        "quality_score": 8,
+        "description": "Sea turtle",
+    }
+    response = MagicMock()
+    response.json.return_value = {"response": json.dumps(mock_ollama_result)}
+    client = ollama_client.OllamaClient("http://localhost:11434", "qwen2.5-vl:7b", 90)
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(ollama_client.requests, "post", return_value=response),
+    ):
+        result = scan.process_clip(clip, config, tmp_path / "work", client)
+
+    assert len(result) == 1
+    # First call (coarse) used coarse_scale, second call (fine) used fine_scale
+    assert extracted_scales[0] == "640:-2"
+    assert extracted_scales[1] == "1280:-2"
+
+
+def test_save_detections_atomic(tmp_path: Path) -> None:
+    """save_detections_atomic should write detections cleanly and atomically."""
+    from utils.models import DetectionsRefined, RefinedDetection
+
+    det = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=0.0,
+        end_time=5.0,
+        subject="turtle",
+        confidence=0.9,
+        quality_score=8,
+        description="test",
+    )
+    refined = DetectionsRefined(total_clips=1, total_detections=1, detections=[det])
+    out_file = tmp_path / "detections_refined.json"
+
+    scan.save_detections_atomic(out_file, refined)
+
+    assert out_file.exists()
+    loaded = json.loads(out_file.read_text(encoding="utf-8"))
+    assert loaded["total_clips"] == 1
+    assert loaded["total_detections"] == 1
+    assert loaded["detections"][0]["subject"] == "turtle"
+
+
+def test_scan_main_incremental_and_resume(tmp_path: Path) -> None:
+    """main should save detections after each clip and skip done clips on resume."""
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = output_dir / "manifest_raw.json"
+    manifest_data = {
+        "clips": [
+            {"file_name": "clip1.mp4", "file_path": str(tmp_path / "clip1.mp4"), "fps": 25.0},
+            {"file_name": "clip2.mp4", "file_path": str(tmp_path / "clip2.mp4"), "fps": 25.0},
+        ]
+    }
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+    (tmp_path / "clip1.mp4").touch()
+    (tmp_path / "clip2.mp4").touch()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("general:\n  output_dir: " + str(output_dir) + "\n", encoding="utf-8")
+
+    state_path = output_dir / ".pipeline_state.json"
+
+    from utils.models import RefinedDetection
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="clip1.mp4",
+        file_path=str(tmp_path / "clip1.mp4"),
+        start_time=0.0,
+        end_time=2.0,
+        subject="turtle",
+        confidence=0.9,
+        quality_score=8,
+        description="turtle",
+    )
+    det2 = RefinedDetection(
+        clip_id="c2",
+        file_name="clip2.mp4",
+        file_path=str(tmp_path / "clip2.mp4"),
+        start_time=0.0,
+        end_time=3.0,
+        subject="shark",
+        confidence=0.95,
+        quality_score=9,
+        description="shark",
+    )
+
+    saved_states = []
+
+    def mock_save_atomic(path, refined):
+        saved_states.append(list(refined.detections))
+        # actually write it
+        path.write_text(json.dumps(refined.model_dump()), encoding="utf-8")
+
+    call_count = 0
+
+    def mock_process_clip(clip, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return [det1] if clip["file_name"] == "clip1.mp4" else [det2]
+
+    # Run pass 1: both clips processed
+    with (
+        patch.object(scan, "process_clip", side_effect=mock_process_clip),
+        patch.object(scan, "save_detections_atomic", side_effect=mock_save_atomic),
+        patch(
+            "sys.argv",
+            [
+                "02_scan_footage.py",
+                "--config",
+                str(config_path),
+                "--output-dir",
+                str(output_dir),
+                "--state-path",
+                str(state_path),
+            ],
+        ),
+    ):
+        scan.main()
+
+    # Detections saved after each clip
+    assert len(saved_states) >= 2
+    assert len(saved_states[0]) == 1  # after clip1
+    assert len(saved_states[1]) == 2  # after clip2
+    assert call_count == 2
+
+    # Run pass 2 with --resume: clip1 and clip2 should be skipped
+    call_count = 0
+    with (
+        patch.object(scan, "process_clip", side_effect=mock_process_clip),
+        patch(
+            "sys.argv",
+            [
+                "02_scan_footage.py",
+                "--config",
+                str(config_path),
+                "--output-dir",
+                str(output_dir),
+                "--state-path",
+                str(state_path),
+                "--resume",
+            ],
+        ),
+    ):
+        scan.main()
+
+    # No new clips processed because both were completed
+    assert call_count == 0
+    # Final file still contains both detections
+    final_data = json.loads((output_dir / "detections_refined.json").read_text(encoding="utf-8"))
+    assert len(final_data["detections"]) == 2

@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -27,16 +28,16 @@ from rich.progress import (
     SpinnerColumn,
     TaskProgressColumn,
     TextColumn,
-    TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.table import Column
 from rich.text import Text
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.checkpoint import PipelineState
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
-from utils.logging_setup import configure_logging
+from utils.logging_setup import configure_logging, get_console
 from utils.models import DetectionsRefined, RefinedDetection
 from utils.ollama_client import OllamaClient, resolve_host
 from utils.prompt_templates import (
@@ -79,16 +80,16 @@ class StatusColumn(ProgressColumn):
 
 def create_scan_progress(console: Console | None = None) -> Progress:
     """Create a configured Rich Progress instance for video scanning."""
-    active_console = console or Console(stderr=True)
+    active_console = console or get_console()
     return Progress(
         SpinnerColumn(),
-        TextColumn("[bold cyan]{task.description}"),
-        BarColumn(),
+        TextColumn(
+            "[bold cyan]{task.description}",
+            table_column=Column(no_wrap=True, overflow="ellipsis", max_width=32),
+        ),
+        BarColumn(bar_width=16),
         TaskProgressColumn(),
         MofNCompleteColumn(),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        TextColumn("• ETA"),
         TimeRemainingColumn(),
         StatusColumn(),
         console=active_console,
@@ -121,7 +122,9 @@ def process_clip(
 
     scan_params = config.get("scan_parameters", {})
     coarse_fps = scan_params.get("coarse_fps", 0.5)
+    coarse_scale = scan_params.get("coarse_scale", "640:-2")
     fine_fps = scan_params.get("fine_fps", 2.0)
+    fine_scale = scan_params.get("fine_scale")
     coarse_threshold = scan_params.get("coarse_confidence_threshold", 0.65)
     fine_padding = scan_params.get("fine_padding_seconds", 4)
     quality_threshold = scan_params.get("quality_threshold", 7)
@@ -143,6 +146,7 @@ def process_clip(
         video_path=file_path,
         output_dir=clip_work_dir / "coarse",
         fps=coarse_fps,
+        scale=coarse_scale,
     )
     logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
 
@@ -285,6 +289,7 @@ def process_clip(
             video_path=file_path,
             output_dir=win_dir,
             fps=fine_fps,
+            scale=fine_scale,
             start_seconds=win_start,
             duration_seconds=duration,
         )
@@ -433,6 +438,20 @@ def _deduplicate_detections(
     return kept
 
 
+def save_detections_atomic(output_path: Path, refined: DetectionsRefined) -> None:
+    """Atomically write detections to disk using a temporary file."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.name}.tmp.{os.getpid()}")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(refined.model_dump(), f, indent=2, ensure_ascii=False)
+        temp_path.replace(output_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Coarse-to-fine VLM scanner for underwater footage"
@@ -456,6 +475,11 @@ def main() -> None:
         type=Path,
         default=None,
         help="Append this run's log lines to the given file",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume scanning from last saved state, skipping completed clips",
     )
     args = parser.parse_args()
 
@@ -497,14 +521,41 @@ def main() -> None:
         ollama_cfg.get("model", "qwen2.5-vl:7b"),
         ollama_cfg.get("timeout_seconds", 90),
     )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "detections_refined.json"
+
     refined = DetectionsRefined(total_clips=0, total_detections=0, detections=[])
+    completed_clips: set[str] = set()
 
     state: PipelineState | None = None
     if args.state_path is not None:
         state = PipelineState(args.state_path)
         state.mark_step_started("scan")
 
+    if args.resume and output_path.exists():
+        try:
+            with open(output_path, encoding="utf-8") as f:
+                loaded_data = json.load(f)
+            loaded_refined = DetectionsRefined.model_validate(loaded_data)
+            refined = loaded_refined
+            for det in refined.detections:
+                completed_clips.add(det.file_name)
+            logger.info(
+                "Resumed from %s with %d existing detections across %d clips",
+                output_path,
+                refined.total_detections,
+                refined.total_clips,
+            )
+        except Exception as exc:
+            logger.warning("Could not load existing detections from %s: %s", output_path, exc)
+
     clips = manifest.get("clips", [])
+    if args.resume and state is not None:
+        for clip in clips:
+            cname = clip.get("file_name", "unknown")
+            if state.is_item_done("scan", cname):
+                completed_clips.add(cname)
+
     with create_scan_progress() as progress:
         overall_task = (
             progress.add_task("[bold white]Overall clips[/]", total=len(clips), status="")
@@ -513,6 +564,14 @@ def main() -> None:
         )
         for index, clip in enumerate(clips, start=1):
             clip_name = clip.get("file_name", "unknown")
+            if args.resume and clip_name in completed_clips:
+                logger.info(
+                    "Skipping already processed clip: %s (%d/%d)", clip_name, index, len(clips)
+                )
+                if overall_task is not None:
+                    progress.advance(overall_task)
+                continue
+
             logger.info("Processing %d/%d: %s", index, len(clips), clip_name)
             if state is not None:
                 state.set_activity(f"scan: starting {clip_name} ({index}/{len(clips)})")
@@ -527,16 +586,14 @@ def main() -> None:
             refined.detections.extend(detections)
             refined.total_detections += len(detections)
             refined.total_clips += 1
+            save_detections_atomic(output_path, refined)
             if overall_task is not None:
                 progress.advance(overall_task)
             if state is not None:
                 state.add_progress("scan", clip_name)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "detections_refined.json"
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(refined.model_dump(), f, indent=2, ensure_ascii=False)
+    # Final atomic write to ensure complete sync
+    save_detections_atomic(output_path, refined)
 
     # Clean up the top-level work directory (only removes mkdtemp dirs on macOS;
     # /dev/shm/dive_worker_tmp on Linux is intentionally skipped)

@@ -368,3 +368,53 @@ def test_cmd_scan_honours_explicit_log_file(tmp_path: Path) -> None:
 
     assert custom.exists()
     assert not (Path(args.output) / "logs").exists()
+
+
+def test_cmd_scan_threads_resume_flag(tmp_path: Path) -> None:
+    """cmd_scan(resume=True) should pass --resume to scan child script."""
+    args = _scan_args(tmp_path, debug=False)
+    args.resume = True
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
+        assert cmd_scan(args) == 0
+
+    cmds = [call.args[0] for call in mock.call_args_list]
+    scan_cmd = cmds[1]
+    assert "--resume" in scan_cmd
+
+
+def test_background_render_worker(tmp_path: Path) -> None:
+    """_run_background_render_worker should read detections and invoke render_detections."""
+    import json
+    import threading
+
+    from scripts.dive_clip import _run_background_render_worker
+
+    detections_file = tmp_path / "detections_refined.json"
+    highlights_dir = tmp_path / "highlights"
+    detections_file.write_text(
+        json.dumps({
+            "total_clips": 1,
+            "total_detections": 1,
+            "detections": [{"file_path": "a.mp4", "subject": "turtle"}],
+        })
+    )
+
+    stop_event = threading.Event()
+    # Mock render_detections
+    mock_render = MagicMock()
+    with patch("scripts.dive_clip.importlib.util.spec_from_file_location") as mock_spec:
+        mock_mod = MagicMock()
+        mock_mod.render_detections = mock_render
+        mock_spec.return_value.loader.exec_module = lambda mod: None
+        with patch("scripts.dive_clip.importlib.util.module_from_spec", return_value=mock_mod):
+            # Run one cycle and stop
+            def stop_soon():
+                stop_event.set()
+
+            timer = threading.Timer(0.1, stop_soon)
+            timer.start()
+            _run_background_render_worker(detections_file, highlights_dir, stop_event)
+            timer.join()
+
+    assert mock_render.called
