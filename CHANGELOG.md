@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-30
+
 ### Changed
 - Raise the minimum supported Python version from `>=3.10` to `>=3.14`, aligning
   the Ruff and mypy targets, CI matrix, and release workflow runtime to the new
