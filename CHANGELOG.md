@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-30
+
 ### Added
 - Add `--debug` flag to `dive-clip scan`, `scripts/00_ingest_media.py`,
   `scripts/02_scan_footage.py`, and `scripts/05_render_clips.py` to enable
