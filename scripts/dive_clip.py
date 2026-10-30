@@ -25,16 +25,16 @@ logger = logging.getLogger(__name__)
 
 def run(cmd: list[str], description: str) -> int:
     """Run a command, streaming output to stdout/stderr. Returns exit code."""
-    print(f"\n=== {description} ===")
-    print(f"$ {' '.join(cmd)}")
+    logger.info("=== %s ===", description)
+    logger.info("$ %s", " ".join(cmd))
     try:
         result = subprocess.run(cmd, check=False)
         return result.returncode
     except FileNotFoundError:
-        print(f"ERROR: Command not found: {cmd[0]}")
+        logger.error("Command not found: %s", cmd[0])
         return 127
     except KeyboardInterrupt:
-        print("\nInterrupted by user.")
+        logger.warning("Interrupted by user.")
         return 130
 
 
@@ -60,6 +60,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,
     )
 
     state_path = output_folder / ".pipeline_state.json"
@@ -85,6 +86,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         ingest_cmd.append("--debug")
 
     if not state.is_step_done("ingest") or not manifest_path.exists():
+        state.mark_step_started("ingest")
         rc = run(
             ingest_cmd,
             "Step 1/3: Ingest media (manifest)",
@@ -102,11 +104,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
         str(SCRIPTS_DIR / "02_scan_footage.py"),
         "--config",
         config,
+        "--state-path",
+        str(state_path),
     ]
     if debug_mode:
         scan_cmd.append("--debug")
 
     if not state.is_step_done("scan") or not detections_path.exists():
+        state.mark_step_started("scan")
         rc = run(
             scan_cmd,
             "Step 2/3: Scan footage (AI detections)",
@@ -128,11 +133,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
         str(detections_path),
         "--output",
         str(output_folder),
+        "--state-path",
+        str(state_path),
     ]
     if debug_mode:
         render_cmd.append("--debug")
 
     if not state.is_step_done("render"):
+        state.mark_step_started("render")
         rc = run(
             render_cmd,
             "Step 3/3: Render clips (MP4 highlights)",
@@ -144,7 +152,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     else:
         logger.info("Step 3/3: Render clips (MP4 highlights) — SKIPPED (already done)")
 
-    print(f"\n✓ Pipeline complete. Highlights in: {output_folder}")
+    logger.info("✓ Pipeline complete. Highlights in: %s", output_folder)
     return 0
 
 

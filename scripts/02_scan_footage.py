@@ -21,6 +21,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from utils.checkpoint import PipelineState
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
 from utils.models import DetectionsRefined, RefinedDetection
 from utils.ollama_client import OllamaClient
@@ -47,11 +48,19 @@ def call_ollama(
     return request_client.generate(image_path, prompt, phase)
 
 
+def _summarize_scores(scores: list[float]) -> str:
+    """Format min/avg/max of confidence scores for log output."""
+    if not scores:
+        return "n/a"
+    return f"{min(scores):.2f}/{sum(scores) / len(scores):.2f}/{max(scores):.2f}"
+
+
 def process_clip(
     clip: dict,
     config: dict,
     work_dir: Path,
     ollama_client: OllamaClient | None = None,
+    state: PipelineState | None = None,
 ) -> list[RefinedDetection]:
     """Process a single clip through coarse-to-fine scanning.
 
@@ -59,7 +68,7 @@ def process_clip(
     """
     file_path = clip["file_path"]
     if not Path(file_path).exists():
-        print(f"WARNING: File not found: {file_path}")
+        logger.warning("File not found: %s", file_path)
         return []
 
     clip_id = clip.get("clip_id") or (
@@ -85,18 +94,27 @@ def process_clip(
 
     # ---------- Pass 1: Coarse scan ----------
     logger.info("[Pass 1] Coarse scan @ %.1f FPS: %s", coarse_fps, clip["file_name"])
+    if state is not None:
+        state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
+
     coarse_frames = extract_frames(
         video_path=file_path,
         output_dir=clip_work_dir / "coarse",
         fps=coarse_fps,
     )
+    logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
+
+    template = get_template_for_keywords(tags)
+    prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
 
     candidate_windows: list[tuple[float, float]] = []
+    coarse_confidences: list[float] = []
+    coarse_detected = 0
+    coarse_failures = 0
+    coarse_elapsed_total = 0.0
+
     for frame_index, frame in enumerate(coarse_frames, start=1):
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
-        template = get_template_for_keywords(tags)
-        prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
+        logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
 
         start_time = time.perf_counter()
         result = call_ollama(
@@ -109,21 +127,53 @@ def process_clip(
             phase="coarse",
         )
         elapsed = time.perf_counter() - start_time
-
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "[Pass 1] Ollama frame %d: %.1fs, result=%s",
-                frame_index,
-                elapsed,
-                "OK" if result else "None",
-            )
+        coarse_elapsed_total += elapsed
 
         if result is None:
+            coarse_failures += 1
+            logger.debug(
+                "[Pass 1] Frame %d @ %.1fs: no result (%.1fs)",
+                frame_index,
+                frame["timestamp"],
+                elapsed,
+            )
             continue
 
-        if result.get("detected") and result.get("confidence", 0) >= coarse_threshold:
+        detected = bool(result.get("detected"))
+        confidence = float(result.get("confidence", 0.0) or 0.0)
+        coarse_confidences.append(confidence)
+        if detected:
+            coarse_detected += 1
+
+        frame_passes = detected and confidence >= coarse_threshold
+        if frame_passes:
             ts = frame["timestamp"]
             candidate_windows.append((max(0, ts - fine_padding), ts + fine_padding))
+
+        logger.debug(
+            "[Pass 1] Frame %d @ %.1fs: detected=%s confidence=%.2f passes_threshold=%s "
+            "subject=%s (%.1fs)",
+            frame_index,
+            frame["timestamp"],
+            detected,
+            confidence,
+            frame_passes,
+            result.get("subject", "-"),
+            elapsed,
+        )
+
+    logger.info(
+        "[Pass 1] Summary %s: %d frames, %d detected, %d over threshold %.2f, "
+        "confidence min/avg/max = %s, %d failed calls, %.1fs total",
+        clip["file_name"],
+        len(coarse_frames),
+        coarse_detected,
+        len(candidate_windows),
+        coarse_threshold,
+        _summarize_scores(coarse_confidences),
+        coarse_failures,
+        coarse_elapsed_total,
+    )
 
     if not candidate_windows:
         logger.info("[Pass 1] No candidates found for %s", clip["file_name"])
@@ -144,6 +194,11 @@ def process_clip(
         "[Pass 2] Fine scan @ %.1f FPS: %s (%d windows)", fine_fps, clip["file_name"], len(merged)
     )
     all_detections: list[RefinedDetection] = []
+    fine_frames_analyzed = 0
+    fine_passed = 0
+    fine_failures = 0
+    fine_elapsed_total = 0.0
+    fine_confidences: list[float] = []
 
     template = get_template_for_keywords(tags)
     prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
@@ -152,6 +207,20 @@ def process_clip(
     for window_index, (win_start, win_end) in enumerate(merged, start=1):
         duration = win_end - win_start
         win_dir = clip_work_dir / "fine" / f"win_{int(win_start)}_{int(win_end)}"
+        logger.info(
+            "[Pass 2] Window %d of %d: %.1fs-%.1fs (%.1fs) @ %.1f FPS",
+            window_index,
+            len(merged),
+            win_start,
+            win_end,
+            duration,
+            fine_fps,
+        )
+        if state is not None:
+            state.set_activity(
+                f"scan: {clip['file_name']} window {window_index}/{len(merged)} @{win_start:.0f}s"
+            )
+
         fine_frames = extract_frames(
             video_path=file_path,
             output_dir=win_dir,
@@ -159,6 +228,13 @@ def process_clip(
             start_seconds=win_start,
             duration_seconds=duration,
         )
+        logger.info(
+            "[Pass 2] Window %d of %d: extracted %d frames",
+            window_index,
+            len(merged),
+            len(fine_frames),
+        )
+        fine_frames_analyzed += len(fine_frames)
 
         for frame_index, frame in enumerate(fine_frames, start=1):
             logger.debug(
@@ -168,6 +244,7 @@ def process_clip(
                 frame_index,
                 len(fine_frames),
             )
+            start_time = time.perf_counter()
             result = call_ollama(
                 ollama_host,
                 ollama_model,
@@ -177,33 +254,77 @@ def process_clip(
                 client=client,
                 phase="fine",
             )
+            elapsed = time.perf_counter() - start_time
+            fine_elapsed_total += elapsed
+
             if result is None:
+                fine_failures += 1
+                logger.debug(
+                    "[Pass 2] Frame @ %.2fs: no result (%.1fs)", frame["timestamp"], elapsed
+                )
                 continue
 
-            if result.get("detected") and result.get("quality_score", 0) >= quality_threshold:
-                try:
-                    all_detections.append(
-                        RefinedDetection(
-                            clip_id=clip_id,
-                            file_name=clip["file_name"],
-                            file_path=file_path,
-                            fps=str(clip.get("fps") or "25.0"),
-                            start_time=max(0, frame["timestamp"] - 1),
-                            end_time=frame["timestamp"] + 1,
-                            subject=result.get("subject", "unknown"),
-                            confidence=float(result.get("confidence", 0.0)),
-                            quality_score=int(result.get("quality_score", 0)),
-                            description=result.get("description", ""),
-                            color=color,
-                            template=template.name if template else "generic",
-                        )
+            detected = bool(result.get("detected"))
+            confidence = float(result.get("confidence", 0.0) or 0.0)
+            quality_score = int(result.get("quality_score", 0) or 0)
+            frame_passes = detected and quality_score >= quality_threshold
+            fine_confidences.append(confidence)
+            if frame_passes:
+                fine_passed += 1
+
+            logger.debug(
+                "[Pass 2] Frame @ %.2fs: detected=%s confidence=%.2f quality=%d "
+                "passes_threshold=%s subject=%s (%.1fs)",
+                frame["timestamp"],
+                detected,
+                confidence,
+                quality_score,
+                frame_passes,
+                result.get("subject", "-"),
+                elapsed,
+            )
+
+            if not frame_passes:
+                continue
+
+            try:
+                all_detections.append(
+                    RefinedDetection(
+                        clip_id=clip_id,
+                        file_name=clip["file_name"],
+                        file_path=file_path,
+                        fps=str(clip.get("fps") or "25.0"),
+                        start_time=max(0, frame["timestamp"] - 1),
+                        end_time=frame["timestamp"] + 1,
+                        subject=result.get("subject", "unknown"),
+                        confidence=confidence,
+                        quality_score=quality_score,
+                        description=result.get("description", ""),
+                        color=color,
+                        template=template.name if template else "generic",
                     )
-                except (ValueError, TypeError) as exc:
-                    logger.warning("Skipping invalid detection: %s", exc)
-                    continue
+                )
+            except (ValueError, TypeError) as exc:
+                logger.warning("Skipping invalid detection: %s", exc)
+                continue
 
     # Deduplicate overlapping detections (keep highest quality_score)
+    before_dedup = len(all_detections)
     all_detections = _deduplicate_detections(all_detections)
+    logger.info(
+        "[Pass 2] Summary %s: %d windows, %d frames analyzed, %d passed quality>=%d "
+        "(conf %s), %d failed calls, %d -> %d detections after dedup, %.1fs total",
+        clip["file_name"],
+        len(merged),
+        fine_frames_analyzed,
+        fine_passed,
+        quality_threshold,
+        _summarize_scores(fine_confidences),
+        fine_failures,
+        before_dedup,
+        len(all_detections),
+        fine_elapsed_total,
+    )
 
     cleanup_work_dir(clip_work_dir)
     return all_detections
@@ -240,6 +361,12 @@ def main() -> None:
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--state-path",
+        type=Path,
+        default=None,
+        help="Pipeline state file to heartbeat (default: ./outputs/.pipeline_state.json)",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -283,13 +410,23 @@ def main() -> None:
     )
     refined = DetectionsRefined(total_clips=0, total_detections=0, detections=[])
 
-    for clip in manifest.get("clips", []):
+    state: PipelineState | None = None
+    if args.state_path is not None:
+        state = PipelineState(args.state_path)
+        state.mark_step_started("scan")
+
+    clips = manifest.get("clips", [])
+    for index, clip in enumerate(clips, start=1):
         clip_name = clip.get("file_name", "unknown")
-        logger.info("Processing: %s", clip_name)
-        detections = process_clip(clip, config, work_dir, ollama_client)
+        logger.info("Processing %d/%d: %s", index, len(clips), clip_name)
+        if state is not None:
+            state.set_activity(f"scan: starting {clip_name} ({index}/{len(clips)})")
+        detections = process_clip(clip, config, work_dir, ollama_client, state=state)
         refined.detections.extend(detections)
         refined.total_detections += len(detections)
         refined.total_clips += 1
+        if state is not None:
+            state.add_progress("scan", clip_name)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "detections_refined.json"
@@ -301,7 +438,6 @@ def main() -> None:
     # /dev/shm/dive_worker_tmp on Linux is intentionally skipped)
     cleanup_work_dir(work_dir)
 
-    logger.info("")
     logger.info(
         "Done. %d detections across %d clips.", refined.total_detections, refined.total_clips
     )

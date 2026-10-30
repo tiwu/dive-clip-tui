@@ -13,12 +13,14 @@ import logging
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from utils.checkpoint import PipelineState
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,12 @@ def main() -> None:
         default=None,
         help="Output highlights folder (default: outputs/highlights)",
     )
+    parser.add_argument(
+        "--state-path",
+        type=Path,
+        default=None,
+        help="Pipeline state file to heartbeat (default: not written)",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -109,7 +117,7 @@ def main() -> None:
 
     config_path = Path(args.config)
     if not config_path.exists():
-        print(f"ERROR: Config not found: {config_path}")
+        logger.error("Config not found: %s", config_path)
         sys.exit(1)
 
     with open(config_path) as f:
@@ -125,8 +133,8 @@ def main() -> None:
         if alt.exists():
             detections_path = alt
         else:
-            print(f"ERROR: detections_refined.json not found at {detections_path}")
-            print("Run 02_scan_footage.py first.")
+            logger.error("detections_refined.json not found at %s", detections_path)
+            logger.error("Run 02_scan_footage.py first.")
             sys.exit(1)
 
     # Resolve output highlights folder
@@ -142,6 +150,11 @@ def main() -> None:
         sys.exit(0)
 
     logger.info("Rendering %d detection clips to %s", len(detections), highlights_dir)
+
+    state: PipelineState | None = None
+    if args.state_path is not None:
+        state = PipelineState(args.state_path)
+        state.mark_step_started("render")
 
     rendered = 0
     failed = 0
@@ -161,21 +174,35 @@ def main() -> None:
         output_name = f"{clip_id}_{subject}_q{quality}.mp4"
         output_path = highlights_dir / output_name
 
-        logger.debug(
-            "  [%d/%d] %s [%s] -> %s",
+        if state is not None:
+            state.set_activity(f"render: {i}/{len(detections)} {output_name}")
+
+        logger.info(
+            "  [%d/%d] %s [%.1fs-%.1fs] -> %s",
             i,
             len(detections),
             source_path.name,
-            f"[{start_time:.1f}s-{end_time:.1f}s]",
+            start_time,
+            end_time,
             output_name,
         )
 
+        clip_start = time.perf_counter()
         if render_clip(source_path, start_time, end_time, output_path):
             rendered += 1
+            logger.debug(
+                "  [%d/%d] rendered in %.1fs: %s",
+                i,
+                len(detections),
+                time.perf_counter() - clip_start,
+                output_name,
+            )
         else:
             failed += 1
 
-    logger.info("")
+    if state is not None:
+        state.mark_step_done("render")
+
     logger.info("Done. %d rendered, %d failed.", rendered, failed)
     logger.info("Output: %s", highlights_dir)
 

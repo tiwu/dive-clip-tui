@@ -251,6 +251,18 @@ def test_process_clip_with_candidates(tmp_path: Path, caplog: pytest.LogCaptureF
     assert result[0].fps == "25.0"
     assert "[Pass 1] Analyzing frame 1 of 1" in caplog.text
     assert "[Pass 2] Window 1 of 1: analyzing frame 1 of 1" in caplog.text
+    # Frame-matching observability: thresholds must be tunable from the log alone.
+    assert "[Pass 1] Summary video.mp4" in caplog.text
+    assert "confidence min/avg/max" in caplog.text
+    assert (
+        "[Pass 1] Frame 1 @ 2.0s: detected=True confidence=0.80 passes_threshold=True"
+        in caplog.text
+    )
+    assert "[Pass 2] Window 1 of 1: 0.0s-" in caplog.text
+    assert "[Pass 2] Window 1 of 1: extracted 1 frames" in caplog.text
+    assert "detected=True" in caplog.text and "quality=" in caplog.text
+    assert "[Pass 2] Summary video.mp4" in caplog.text
+    assert "after dedup" in caplog.text
     assert client.metrics.by_phase["coarse"].calls == 1
     assert client.metrics.by_phase["fine"].calls == 1
 
@@ -531,3 +543,72 @@ def test_matched_template_preserves_macro(tmp_path: Path) -> None:
         f"Expected macro template prompt, got: {prompt_used[:80]}..."
     )
     assert len(result) > 0
+
+
+def test_process_clip_updates_state_activity(tmp_path: Path) -> None:
+    """process_clip should heartbeat progress into the shared state file."""
+    from utils.checkpoint import PipelineState
+
+    video = tmp_path / "video.mp4"
+    video.touch()
+
+    clip = {
+        "file_path": str(video),
+        "file_name": "video.mp4",
+        "fps": 25.0,
+    }
+    config = {
+        "scan_parameters": {
+            "coarse_fps": 0.5,
+            "fine_fps": 2.0,
+            "coarse_confidence_threshold": 0.65,
+            "fine_padding_seconds": 4,
+            "quality_threshold": 7,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+            "timeout_seconds": 90,
+        },
+    }
+
+    coarse_frames = [
+        {"frame_path": str(tmp_path / "frame_000001.jpg"), "timestamp": 2.0, "frame_number": 1},
+    ]
+    fine_frames = [
+        {
+            "frame_path": str(tmp_path / "fine_frame_000001.jpg"),
+            "timestamp": 3.0,
+            "frame_number": 1,
+        },
+    ]
+
+    def mock_extract_frames(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return fine_frames if start_seconds is not None else coarse_frames
+
+    mock_ollama_result = {
+        "detected": True,
+        "subject": "turtle",
+        "confidence": 0.8,
+        "quality_score": 8,
+        "description": "Sea turtle",
+    }
+    response = MagicMock()
+    response.json.return_value = {"response": json.dumps(mock_ollama_result)}
+    client = ollama_client.OllamaClient("http://localhost:11434", "qwen2.5-vl:7b", 90)
+
+    state = PipelineState(tmp_path / ".pipeline_state.json")
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract_frames),
+        patch.object(ollama_client.requests, "post", return_value=response),
+    ):
+        scan.process_clip(clip, config, tmp_path / "work", client, state=state)
+
+    # Activity should describe the clip rather than a generic placeholder.
+    assert "video.mp4" in (state.get("activity") or "")
+    reloaded = PipelineState(tmp_path / ".pipeline_state.json")
+    assert "video.mp4" in (reloaded.get("activity") or "")
+    assert reloaded.get("activity_at")

@@ -119,8 +119,7 @@ class OllamaClient:
         """Analyze one image, preserving Ollama's JSON-mode response contract."""
         started = time.perf_counter()
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Starting Ollama generate for phase: %s", phase)
+        logger.debug("Starting Ollama generate for phase: %s", phase)
 
         try:
             with open(image_path, "rb") as image_file:
@@ -130,8 +129,7 @@ class OllamaClient:
             self.metrics.record(phase, time.perf_counter() - started, False)
             return None
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Payload size: %d bytes", len(image_b64))
+        logger.debug("Payload size: %d bytes", len(image_b64))
 
         payload = {
             "model": self.model,
@@ -142,8 +140,7 @@ class OllamaClient:
         }
 
         try:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Sending Ollama request to %s", self.host)
+            logger.debug("Sending Ollama request to %s", self.host)
             response = requests.post(
                 f"{self.host}/api/generate",
                 json=payload,
@@ -169,15 +166,15 @@ class OllamaClient:
             response=result,
         )
 
-        if logger.isEnabledFor(logging.DEBUG):
-            elapsed = time.perf_counter() - started
-            prompt_eval = result.get("prompt_eval_count", 0)
-            eval_count = result.get("eval_count", 0)
-            logger.debug(
-                "Ollama response in %.1fs: %d prompt tokens, %d generated tokens",
-                elapsed,
-                prompt_eval,
-                eval_count,
-            )
+        elapsed = time.perf_counter() - started
+        prompt_eval = result.get("prompt_eval_count", 0)
+        eval_count = result.get("eval_count", 0)
+        logger.debug(
+            "[%s] Ollama response in %.1fs: %d prompt tokens, %d generated tokens",
+            phase,
+            elapsed,
+            prompt_eval,
+            eval_count,
+        )
 
         return parsed

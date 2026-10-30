@@ -7,12 +7,45 @@ All notable changes to this project are documented here. This changelog follows
 ## [Unreleased]
 
 ### Added
-- Add `--debug` flag to `dive-clip scan`, `scripts/02_scan_footage.py`, and
-  `scripts/05_render_clips.py` to enable verbose logging with timestamps. In
-  debug mode, every Ollama request is logged with its phase, elapsed time,
-  and token counts (prompt and generated), and FFmpeg commands are shown in
-  full. This makes the long waits during AI frame analysis and clip rendering
-  observable in real time.
+- Add `--debug` flag to `dive-clip scan`, `scripts/00_ingest_media.py`,
+  `scripts/02_scan_footage.py`, and `scripts/05_render_clips.py` to enable
+  verbose logging with timestamps. In debug mode, every Ollama request is logged
+  with its phase, elapsed time, and token counts (prompt and generated), and
+  FFmpeg commands are shown in full. This makes the long waits during AI frame
+  analysis and clip rendering observable in real time.
+- Log every frame analyzed in debug mode with the full VLM verdict
+  (`detected`, `confidence`, `passes_threshold`, `subject`/`quality`) and the
+  per-frame elapsed time, so confidence thresholds can be tuned from real data
+  instead of guesswork.
+- Log per-pass summaries at info level: coarse pass frame counts, detections,
+  over-threshold count, confidence min/avg/max, failed calls, and total seconds;
+  fine pass per-window ranges, frame counts, pass/fail totals, and detection
+  counts before and after deduplication.
+- Log per-clip progress at info level for both scanning and rendering, so long
+  runs stay observable without `--debug`.
+- Record timestamps and progress in `.pipeline_state.json`: `updated_at` on every
+  save, `activity`/`activity_at` heartbeats, and per-step
+  `{step}_started_at`/`{step}_finished_at`/`{step}_duration_seconds`.
+- Share one `--state-path` between the pipeline orchestrator and the scan/render
+  workers so a single state file reflects all steps.
+- Add `scripts/check_ollama_connection.py` to verify Ollama reachability and model
+  loading before a long run.
+
+### Changed
+- Save `.pipeline_state.json` after every clip and window rather than only at step
+  boundaries, so an interrupted run leaves an up-to-date checkpoint.
+
+### Fixed
+- Fix `dive-clip scan` crashing with `unrecognized arguments: --debug` when the
+  ingest step actually ran; `scripts/00_ingest_media.py` now accepts `--debug`.
+- Fix concurrent writes to the pipeline state file losing data: saves now merge
+  the on-disk state with in-memory changes instead of overwriting the whole file,
+  so the orchestrator no longer clobbers progress written by its workers.
+- Fix `logging.basicConfig` being a no-op on repeated in-process runs (for example
+  from the TUI or tests) by passing `force=True`.
+- Remove a leftover debug-only setting from `config.yaml` and restore
+  `ollama.host` to `http://localhost:11434`; use an untracked config file for
+  machine-specific hosts.
 
 ## [0.4.0] - 2026-10-30
 

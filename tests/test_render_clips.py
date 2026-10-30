@@ -106,15 +106,15 @@ def test_render_clip_end_before_start(tmp_path: Path) -> None:
 
 def test_main_no_detections(tmp_path: Path, monkeypatch) -> None:
     """main should exit gracefully when no detections found."""
-    import sys as sys_module
     import os
+    import sys as sys_module
 
     detections_path = tmp_path / "detections_refined.json"
     detections_path.write_text('{"detections": []}')
 
     # Create a minimal config.yaml
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("general:\n  output_dir: \"./outputs\"\n")
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
 
     original_argv = sys_module.argv
     original_exit = sys_module.exit
@@ -149,9 +149,9 @@ def test_main_no_detections(tmp_path: Path, monkeypatch) -> None:
 
 def test_main_renders_clips(tmp_path: Path, monkeypatch) -> None:
     """main should render clips from detections."""
-    import sys as sys_module
-    import os
     import json
+    import os
+    import sys as sys_module
 
     # Create detections file
     detections = {
@@ -178,7 +178,7 @@ def test_main_renders_clips(tmp_path: Path, monkeypatch) -> None:
 
     # Create a minimal config.yaml
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("general:\n  output_dir: \"./outputs\"\n")
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
 
     # Mock subprocess.run to return success
     mock_result = MagicMock()
@@ -217,3 +217,86 @@ def test_main_renders_clips(tmp_path: Path, monkeypatch) -> None:
 
     assert exit_code is None or exit_code == 0
 
+
+def test_main_logs_per_clip_progress_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Per-clip render progress must be visible without --debug."""
+    import json
+    import logging as logging_module
+    import os
+    import sys as sys_module
+
+    caplog.set_level(logging_module.INFO)
+
+    detections = {
+        "detections": [
+            {
+                "clip_id": "clip001",
+                "file_name": "dive1.mp4",
+                "file_path": str(tmp_path / "source1.mp4"),
+                "start_time": 10.0,
+                "end_time": 15.0,
+                "subject": "turtle",
+                "quality_score": 8,
+                "confidence": 0.9,
+                "description": "test",
+            }
+        ]
+    }
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(json.dumps(detections))
+    (tmp_path / "source1.mp4").touch()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
+
+    state_path = tmp_path / ".pipeline_state.json"
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stderr = ""
+
+    original_argv = sys_module.argv
+    original_exit = sys_module.exit
+    original_cwd = Path.cwd()
+
+    exit_code = None
+
+    def fake_exit(code: int = 0) -> None:
+        nonlocal exit_code
+        exit_code = code
+
+    try:
+        sys_module.argv = [
+            "05_render_clips.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "highlights"),
+            "--config",
+            str(config_path),
+            "--state-path",
+            str(state_path),
+        ]
+        sys_module.exit = fake_exit
+        os.chdir(tmp_path)
+        with patch.object(render.subprocess, "run", return_value=mock_result):
+            render.main()
+    finally:
+        sys_module.argv = original_argv
+        sys_module.exit = original_exit
+        os.chdir(original_cwd)
+
+    assert exit_code in (None, 0)
+    assert "[1/1]" in caplog.text
+    assert "source1.mp4" in caplog.text
+    info_records = [r for r in caplog.records if "[1/1]" in r.getMessage()]
+    assert info_records, "per-clip progress was not logged"
+    assert all(r.levelno <= logging_module.INFO for r in info_records)
+
+    state = json.loads(state_path.read_text())
+    assert state["render_done"] is True
+    assert "render_started_at" in state
+    assert "render_finished_at" in state
+    assert "updated_at" in state

@@ -7,10 +7,9 @@ general:
     from_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
     to_prefix: "/Volumes/SAMSUNG T9/dive-processing-test"
   output_dir: "/Volumes/SAMSUNG T9/dive-processing-test/out"
-  debug: false  # Enable debug logging
 
 ollama:
-  host: "http://plotter.local:11434"
+  host: "http://localhost:11434"
   model: "qwen2.5vl:3b"
   timeout_seconds: 120
 

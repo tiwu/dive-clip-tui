@@ -186,3 +186,76 @@ def test_main_scan_command(capsys, tmp_path: Path) -> None:
         with pytest.raises(SystemExit) as exc_info:
             main(["scan", "--input", str(input_folder), "--output", str(output_folder)])
         assert exc_info.value.code == 0
+
+
+def _scan_args(tmp_path: Path, *, debug: bool) -> argparse.Namespace:
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir(exist_ok=True)
+    output_folder = tmp_path / "highlights"
+    output_folder.mkdir(exist_ok=True)
+    return argparse.Namespace(
+        input=str(input_folder),
+        output=str(output_folder),
+        config="config.yaml",
+        resume=False,
+        reset=False,
+        debug=debug,
+    )
+
+
+def test_cmd_scan_debug_threads_flag_to_children(tmp_path: Path) -> None:
+    """cmd_scan(--debug) should pass --debug to every child script."""
+    args = _scan_args(tmp_path, debug=True)
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
+        assert cmd_scan(args) == 0
+
+    cmds = [call.args[0] for call in mock.call_args_list]
+    assert len(cmds) == 3
+    for cmd in cmds:
+        assert "--debug" in cmd
+
+
+def test_cmd_scan_without_debug_omits_flag(tmp_path: Path) -> None:
+    """cmd_scan(debug=False) should not pass --debug to any child script."""
+    args = _scan_args(tmp_path, debug=False)
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
+        assert cmd_scan(args) == 0
+
+    for call in mock.call_args_list:
+        assert "--debug" not in call.args[0]
+
+
+def test_cmd_scan_threads_state_path_to_workers(tmp_path: Path) -> None:
+    """Scan and render workers should heartbeat the shared state file."""
+    args = _scan_args(tmp_path, debug=False)
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
+        assert cmd_scan(args) == 0
+
+    state_path = str(Path(args.output) / ".pipeline_state.json")
+    cmds = [call.args[0] for call in mock.call_args_list]
+    assert len(cmds) == 3
+
+    for cmd in cmds[1:]:
+        assert "--state-path" in cmd
+        assert cmd[cmd.index("--state-path") + 1] == state_path
+
+
+def test_cmd_scan_writes_step_timestamps(tmp_path: Path) -> None:
+    """Completed steps should record start, finish, and duration timestamps."""
+    import json
+
+    args = _scan_args(tmp_path, debug=False)
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)):
+        assert cmd_scan(args) == 0
+
+    state = json.loads((Path(args.output) / ".pipeline_state.json").read_text())
+    assert "updated_at" in state
+    for step in ("ingest", "scan", "render"):
+        assert state[f"{step}_done"] is True
+        assert f"{step}_started_at" in state
+        assert f"{step}_finished_at" in state
+        assert state[f"{step}_duration_seconds"] >= 0

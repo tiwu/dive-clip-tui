@@ -8,8 +8,6 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # Load scripts/00_ingest_media.py directly (name starts with a digit)
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 _ingest_spec = importlib.util.spec_from_file_location(
@@ -148,8 +146,8 @@ def test_probe_video_invalid_fps(tmp_path: Path) -> None:
 
 def test_main_success(tmp_path: Path, monkeypatch) -> None:
     """main should ingest folder and write manifest."""
-    import sys as sys_module
     import os
+    import sys as sys_module
 
     # Create a fake video file
     video_folder = tmp_path / "footage"
@@ -159,7 +157,7 @@ def test_main_success(tmp_path: Path, monkeypatch) -> None:
     output_path = tmp_path / "outputs" / "manifest_raw.json"
 
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("general:\n  output_dir: \"./outputs\"\n")
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
 
     mock_result = MagicMock()
     mock_result.returncode = 0
@@ -205,3 +203,73 @@ def test_main_success(tmp_path: Path, monkeypatch) -> None:
     data = json.loads(output_path.read_text())
     assert data["total_clips"] == 1
     assert data["clips"][0]["file_name"] == "dive1.mp4"
+
+
+def test_main_accepts_debug_flag(tmp_path: Path) -> None:
+    """main should accept --debug so dive-clip can thread the flag through."""
+    csv_path = tmp_path / "manifest.json"
+    parser = ingest.build_parser()
+    args = parser.parse_args([
+        "--input",
+        str(tmp_path),
+        "--output",
+        str(csv_path),
+        "--debug",
+    ])
+    assert args.debug is True
+
+    default_args = parser.parse_args(["--input", str(tmp_path), "--output", str(csv_path)])
+    assert default_args.debug is False
+
+
+def test_main_debug_flag_runs_end_to_end(tmp_path: Path) -> None:
+    """--debug must not break the ingest run."""
+    import os
+
+    (tmp_path / "footage").mkdir()
+    fake_video = tmp_path / "footage" / "dive1.mp4"
+    fake_video.touch()
+    output_path = tmp_path / "manifest_raw.json"
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = json.dumps({
+        "streams": [{"width": 1920, "height": 1080, "r_frame_rate": "25/1", "codec_name": "h264"}],
+        "format": {"duration": "10.0"},
+    })
+    mock_result.stderr = ""
+
+    original_argv = sys.argv
+    sys_module = sys
+    original_exit = sys_module.exit
+    original_cwd = Path.cwd()
+    exit_code = None
+
+    def fake_exit(code: int = 0) -> None:
+        nonlocal exit_code
+        exit_code = code
+        raise SystemExit(code)
+
+    try:
+        sys_module.argv = [
+            "00_ingest_media.py",
+            "--input",
+            str(tmp_path / "footage"),
+            "--output",
+            str(output_path),
+            "--debug",
+        ]
+        sys_module.exit = fake_exit
+        os.chdir(tmp_path)
+
+        with patch.object(ingest.subprocess, "run", return_value=mock_result):
+            ingest.main()
+    except SystemExit:
+        pass
+    finally:
+        sys_module.argv = original_argv
+        sys_module.exit = original_exit
+        os.chdir(original_cwd)
+
+    assert exit_code is None or exit_code == 0
+    assert output_path.exists()
