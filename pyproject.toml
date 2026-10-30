@@ -2,7 +2,7 @@
 name = "dive-clip-tui"
 version = "0.2.0"
 description = "Local-first AI video curation with a terminal UI"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 dependencies = [
     "pydantic>=2.5.0",
     "pyyaml>=6.0",
@@ -42,7 +42,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py314"
 select = [
     "E",    # Pyflakes errors
     "W",    # Pycodestyle warnings
@@ -79,7 +79,7 @@ known-first-party = ["scripts", "utils"]
 known-third-party = ["pydantic", "yaml", "requests", "anthropic", "google.generativeai"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true

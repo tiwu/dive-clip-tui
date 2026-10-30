@@ -11,7 +11,7 @@ cloud uploads, a subscription, API keys, or DaVinci Resolve.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.14+
 - [FFmpeg](https://ffmpeg.org/) and `ffprobe`
 - [Ollama](https://ollama.com/) with `qwen2.5-vl:7b` available locally
 - Enough memory and GPU resources for the selected vision model; a CUDA GPU
