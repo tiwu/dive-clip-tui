@@ -22,7 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
 from utils.models import DetectionsRefined, RefinedDetection
 from utils.ollama_client import OllamaClient
-from utils.prompt_templates import ALL_TEMPLATES, get_template_for_keywords
+from utils.prompt_templates import (
+    BROAD_MARINE_TEMPLATE,
+    get_template_for_keywords,
+)
 
 
 def call_ollama(
@@ -91,7 +94,7 @@ def process_clip(
             flush=True,
         )
         template = get_template_for_keywords(tags)
-        prompt_template = template.user_prompt if template else ALL_TEMPLATES[0].user_prompt
+        prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
 
         result = call_ollama(
             ollama_host,
@@ -124,23 +127,12 @@ def process_clip(
             merged.append((start, end))
 
     # ---------- Pass 2: Fine scan ----------
-    print(
-        f"  [Pass 2] Fine scan @ {fine_fps} FPS: {clip['file_name']} "
-        f"({len(merged)} windows)"
-    )
+    print(f"  [Pass 2] Fine scan @ {fine_fps} FPS: {clip['file_name']} ({len(merged)} windows)")
     all_detections: list[RefinedDetection] = []
 
     template = get_template_for_keywords(tags)
-    color = template.color if template else ""
-    if template:
-        prompt_template = template.user_prompt
-    else:
-        prompt_template = (
-            "Analyze this underwater frame. Describe what you see: subject, "
-            "action, sharpness and composition. Return a JSON object with detected, "
-            "subject, confidence, quality_score, description and timestamp."
-        )
-        color = "Green"
+    prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
+    color = template.color if template else BROAD_MARINE_TEMPLATE.color
 
     for window_index, (win_start, win_end) in enumerate(merged, start=1):
         duration = win_end - win_start
@@ -283,10 +275,7 @@ def main() -> None:
     # /dev/shm/dive_worker_tmp on Linux is intentionally skipped)
     cleanup_work_dir(work_dir)
 
-    print(
-        f"\nDone. {refined.total_detections} detections across "
-        f"{refined.total_clips} clips."
-    )
+    print(f"\nDone. {refined.total_detections} detections across {refined.total_clips} clips.")
     print(ollama_client.metrics.format_summary())
     print(f"Output: {output_path}")
 

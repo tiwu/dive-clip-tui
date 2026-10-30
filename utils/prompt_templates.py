@@ -28,9 +28,7 @@ PELAGICS_TEMPLATE = PromptTemplate(
         "pelagisch",
         "manta",
     ],
-    system_prompt=(
-        "You are an underwater video analyst specializing in large sea life."
-    ),
+    system_prompt=("You are an underwater video analyst specializing in large sea life."),
     user_prompt=(
         "Analyze this underwater frame. Look for pelagic species: "
         "turtles, sharks, rays, mantas.\n"
@@ -59,9 +57,7 @@ MACRO_TEMPLATE = PromptTemplate(
         "small",
         "klein",
     ],
-    system_prompt=(
-        "You are an underwater video analyst specializing in macro underwater life."
-    ),
+    system_prompt=("You are an underwater video analyst specializing in macro underwater life."),
     user_prompt=(
         "Analyze this underwater frame for macro subjects: nudibranchs, "
         "shrimp, corals, small sea creatures.\n"
@@ -91,8 +87,7 @@ DIVER_TEMPLATE = PromptTemplate(
         "mensen",
     ],
     system_prompt=(
-        "You are an underwater video analyst specializing in diver action "
-        "and composition."
+        "You are an underwater video analyst specializing in diver action and composition."
     ),
     user_prompt=(
         "Analyze this underwater frame for diver action and good composition.\n"
@@ -107,6 +102,29 @@ DIVER_TEMPLATE = PromptTemplate(
     color="Green",
 )
 
+# Cyan: Broad marine-life fallback (corals, worms, nudibranchs, fish, octopus, moray eels, sharks, turtles, whales, frogfish, crocodilefish, seahorses, stonefish)
+# Fallback-only template: not in ALL_TEMPLATES so it is never keyword-matched.
+BROAD_MARINE_TEMPLATE = PromptTemplate(
+    name="broad_marine",
+    keywords=[],
+    system_prompt=(
+        "You are an underwater video analyst specializing in comprehensive "
+        "marine life identification."
+    ),
+    user_prompt=(
+        "Analyze this underwater frame. Look for any marine life: corals, worms, "
+        "nudibranchs, fish, octopus, moray eels, sharks, turtles, whales, "
+        "frogfish, crocodilefish, seahorses, stonefish, and other sea creatures.\n"
+        "Return a JSON object with:\n"
+        "- detected: boolean (is anything relevant?)\n"
+        "- subject: string (species or 'unknown')\n"
+        "- confidence: float (0-1)\n"
+        "- quality_score: int (1-10, sharpness and composition)\n"
+        "- description: string (short description of the action or behavior)\n"
+        "- timestamp: float (seconds in the clip)\n"
+    ),
+    color="Cyan",
+)
 
 ALL_TEMPLATES = [PELAGICS_TEMPLATE, MACRO_TEMPLATE, DIVER_TEMPLATE]
 
