@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +19,8 @@ _SERVER_METRIC_FIELDS = (
     "load_duration",
     "total_duration",
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,13 +118,20 @@ class OllamaClient:
     ) -> dict[str, Any] | None:
         """Analyze one image, preserving Ollama's JSON-mode response contract."""
         started = time.perf_counter()
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Starting Ollama generate for phase: %s", phase)
+
         try:
             with open(image_path, "rb") as image_file:
                 image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
         except Exception as exc:
-            print(f"WARNING: Cannot read image {image_path}: {exc}")
+            logger.warning("Cannot read image %s: %s", image_path, exc)
             self.metrics.record(phase, time.perf_counter() - started, False)
             return None
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Payload size: %d bytes", len(image_b64))
 
         payload = {
             "model": self.model,
@@ -132,6 +142,8 @@ class OllamaClient:
         }
 
         try:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Sending Ollama request to %s", self.host)
             response = requests.post(
                 f"{self.host}/api/generate",
                 json=payload,
@@ -142,11 +154,11 @@ class OllamaClient:
             raw = result.get("response", "{}")
             parsed = json.loads(raw)
         except requests.exceptions.RequestException as exc:
-            print(f"WARNING: Ollama request failed: {exc}")
+            logger.warning("Ollama request failed: %s", exc)
             self.metrics.record(phase, time.perf_counter() - started, False)
             return None
         except json.JSONDecodeError as exc:
-            print(f"WARNING: Ollama returned invalid JSON: {exc}")
+            logger.warning("Ollama returned invalid JSON: %s", exc)
             self.metrics.record(phase, time.perf_counter() - started, False)
             return None
 
@@ -156,4 +168,16 @@ class OllamaClient:
             True,
             response=result,
         )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            elapsed = time.perf_counter() - started
+            prompt_eval = result.get("prompt_eval_count", 0)
+            eval_count = result.get("eval_count", 0)
+            logger.debug(
+                "Ollama response in %.1fs: %d prompt tokens, %d generated tokens",
+                elapsed,
+                prompt_eval,
+                eval_count,
+            )
+
         return parsed

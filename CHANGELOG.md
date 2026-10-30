@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add `--debug` flag to `dive-clip scan`, `scripts/02_scan_footage.py`, and
+  `scripts/05_render_clips.py` to enable verbose logging with timestamps. In
+  debug mode, every Ollama request is logged with its phase, elapsed time,
+  and token counts (prompt and generated), and FFmpeg commands are shown in
+  full. This makes the long waits during AI frame analysis and clip rendering
+  observable in real time.
+
 ## [0.4.0] - 2026-10-30
 
 ### Added

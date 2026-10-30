@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from scripts.dive_clip import run, cmd_scan, build_parser, main
+from scripts.dive_clip import build_parser, cmd_scan, main, run
 
 
 def test_run_success() -> None:
@@ -54,16 +54,25 @@ def test_build_parser() -> None:
     assert args.config == "config.yaml"
     assert args.resume is False
     assert args.reset is False
+    assert args.debug is False
 
 
 def test_build_parser_with_flags() -> None:
-    """build_parser should parse resume and reset flags."""
+    """build_parser should parse resume, reset, and debug flags."""
     parser = build_parser()
-    args = parser.parse_args(
-        ["scan", "--input", "/tmp/footage", "--output", "/tmp/highlights", "--resume", "--reset"]
-    )
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        "/tmp/footage",
+        "--output",
+        "/tmp/highlights",
+        "--resume",
+        "--reset",
+        "--debug",
+    ])
     assert args.resume is True
     assert args.reset is True
+    assert args.debug is True
 
 
 def test_cmd_scan_skips_completed_steps(tmp_path: Path) -> None:
@@ -87,6 +96,7 @@ def test_cmd_scan_skips_completed_steps(tmp_path: Path) -> None:
         config="config.yaml",
         resume=False,
         reset=False,
+        debug=False,
     )
 
     with patch("scripts.dive_clip.subprocess.run") as mock_run:
@@ -110,6 +120,7 @@ def test_cmd_scan_runs_all_steps(tmp_path: Path) -> None:
         config="config.yaml",
         resume=False,
         reset=False,
+        debug=False,
     )
 
     mock_result = MagicMock(returncode=0)
@@ -142,6 +153,7 @@ def test_cmd_scan_reset_state(tmp_path: Path) -> None:
         config="config.yaml",
         resume=False,
         reset=True,
+        debug=False,
     )
 
     mock_result = MagicMock(returncode=0)

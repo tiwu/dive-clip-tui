@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -175,8 +176,9 @@ def test_process_clip_no_candidates(tmp_path: Path) -> None:
     assert result == []
 
 
-def test_process_clip_with_candidates(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_process_clip_with_candidates(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """process_clip should run coarse-to-fine scan and return detections."""
+    caplog.set_level(logging.DEBUG)
     video = tmp_path / "video.mp4"
     video.touch()
 
@@ -247,9 +249,8 @@ def test_process_clip_with_candidates(tmp_path: Path, capsys: pytest.CaptureFixt
     assert result[0].quality_score == 8
     assert result[0].clip_id.startswith("clip_")
     assert result[0].fps == "25.0"
-    output = capsys.readouterr().out
-    assert "[Pass 1] Analyzing frame 1 of 1" in output
-    assert "[Pass 2] Window 1 of 1: analyzing frame 1 of 1" in output
+    assert "[Pass 1] Analyzing frame 1 of 1" in caplog.text
+    assert "[Pass 2] Window 1 of 1: analyzing frame 1 of 1" in caplog.text
     assert client.metrics.by_phase["coarse"].calls == 1
     assert client.metrics.by_phase["fine"].calls == 1
 

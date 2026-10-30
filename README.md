@@ -64,6 +64,15 @@ To start over and clear the saved pipeline state:
 uv run dive-clip scan --input ./footage --output ./highlights --reset
 ```
 
+For verbose logging during long-running AI scanning and rendering, use `--debug`:
+
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights --debug
+```
+
+This enables timestamped debug logs showing per-frame Ollama request timing,
+token counts, and full FFmpeg commands.
+
 The pipeline writes a JSON manifest, refined detections, and rendered MP4 clips
 to the configured output location.
 
@@ -139,7 +148,8 @@ outputs/                   # Generated manifests, detections, and exports
   resolution, and codec in `manifest_raw.json`.
 - The scanner uses Ollama's JSON response mode and writes
   `detections_refined.json`. It prints request counts, failures, elapsed time,
-  and available Ollama token/timing metrics after the scan.
+  and available Ollama token/timing metrics after the scan. Use `--debug` for
+  per-request timing and token counts during the run.
 - `dive-clip scan` stores progress in `<output>/.pipeline_state.json`; use
   `--resume` to skip completed steps or `--reset` to clear that state.
 - Frame sampling uses `/dev/shm` when available and falls back to a temporary

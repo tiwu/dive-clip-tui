@@ -10,6 +10,7 @@ This is Phase 1 Step 1.4 of the simple plan.
 from __future__ import annotations
 
 import argparse
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 def run(cmd: list[str], description: str) -> int:
@@ -44,99 +47,116 @@ def cmd_scan(args: argparse.Namespace) -> int:
     input_folder = Path(args.input)
     output_folder = Path(args.output)
     config = args.config
+    debug_mode = args.debug
 
     if not input_folder.exists():
-        print(f"ERROR: Input folder does not exist: {input_folder}")
+        logger.error("Input folder does not exist: %s", input_folder)
         return 1
 
     output_folder.mkdir(parents=True, exist_ok=True)
+
+    # Configure logging based on debug flag
+    log_level = logging.DEBUG if debug_mode else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
     state_path = output_folder / ".pipeline_state.json"
     state = PipelineState(state_path)
 
     if args.reset:
         state.reset()
-        print("Pipeline state reset.")
+        logger.info("Pipeline state reset.")
 
     manifest_path = output_folder / "manifest_raw.json"
     detections_path = output_folder / "detections_refined.json"
 
     # Step 1: Ingest
+    ingest_cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / "00_ingest_media.py"),
+        "--input",
+        str(input_folder),
+        "--output",
+        str(manifest_path),
+    ]
+    if debug_mode:
+        ingest_cmd.append("--debug")
+
     if not state.is_step_done("ingest") or not manifest_path.exists():
         rc = run(
-            [
-                sys.executable,
-                str(SCRIPTS_DIR / "00_ingest_media.py"),
-                "--input",
-                str(input_folder),
-                "--output",
-                str(manifest_path),
-            ],
+            ingest_cmd,
             "Step 1/3: Ingest media (manifest)",
         )
         if rc != 0:
-            print(f"\nIngest failed with exit code {rc}. Aborting.")
+            logger.error("Ingest failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("ingest")
     else:
-        print("\n=== Step 1/3: Ingest media (manifest) — SKIPPED (already done) ===")
+        logger.info("Step 1/3: Ingest media (manifest) — SKIPPED (already done)")
 
     # Step 2: Scan
+    scan_cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / "02_scan_footage.py"),
+        "--config",
+        config,
+    ]
+    if debug_mode:
+        scan_cmd.append("--debug")
+
     if not state.is_step_done("scan") or not detections_path.exists():
         rc = run(
-            [
-                sys.executable,
-                str(SCRIPTS_DIR / "02_scan_footage.py"),
-                "--config",
-                config,
-            ],
+            scan_cmd,
             "Step 2/3: Scan footage (AI detections)",
         )
         if rc != 0:
-            print(f"\nScan failed with exit code {rc}. Aborting.")
+            logger.error("Scan failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("scan")
     else:
-        print("\n=== Step 2/3: Scan footage (AI detections) — SKIPPED (already done) ===")
+        logger.info("Step 2/3: Scan footage (AI detections) — SKIPPED (already done)")
 
     # Step 3: Render
+    render_cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / "05_render_clips.py"),
+        "--config",
+        config,
+        "--input",
+        str(detections_path),
+        "--output",
+        str(output_folder),
+    ]
+    if debug_mode:
+        render_cmd.append("--debug")
+
     if not state.is_step_done("render"):
         rc = run(
-            [
-                sys.executable,
-                str(SCRIPTS_DIR / "05_render_clips.py"),
-                "--config",
-                config,
-                "--input",
-                str(detections_path),
-                "--output",
-                str(output_folder),
-            ],
+            render_cmd,
             "Step 3/3: Render clips (MP4 highlights)",
         )
         if rc != 0:
-            print(f"\nRender failed with exit code {rc}. Aborting.")
+            logger.error("Render failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("render")
     else:
-        print("\n=== Step 3/3: Render clips (MP4 highlights) — SKIPPED (already done) ===")
+        logger.info("Step 3/3: Render clips (MP4 highlights) — SKIPPED (already done)")
 
     print(f"\n✓ Pipeline complete. Highlights in: {output_folder}")
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="dive-clip — Local footage curation pipeline"
-    )
+    parser = argparse.ArgumentParser(description="dive-clip — Local footage curation pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
 
     scan_p = sub.add_parser("scan", help="Run ingest → scan → render pipeline")
     scan_p.add_argument("--input", required=True, help="Path to footage folder")
     scan_p.add_argument("--output", required=True, help="Output folder for highlights")
-    scan_p.add_argument(
-        "--config", default="config.yaml", help="Path to config.yaml"
-    )
+    scan_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    scan_p.add_argument("--debug", action="store_true", help="Enable debug logging")
     scan_p.add_argument(
         "--resume",
         action="store_true",

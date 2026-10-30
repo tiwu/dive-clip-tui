@@ -11,7 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,8 @@ from utils.prompt_templates import (
     BROAD_MARINE_TEMPLATE,
     get_template_for_keywords,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def call_ollama(
@@ -80,7 +84,7 @@ def process_clip(
     tags = clip.get("tags", [])
 
     # ---------- Pass 1: Coarse scan ----------
-    print(f"  [Pass 1] Coarse scan @ {coarse_fps} FPS: {clip['file_name']}")
+    logger.info("[Pass 1] Coarse scan @ %.1f FPS: %s", coarse_fps, clip["file_name"])
     coarse_frames = extract_frames(
         video_path=file_path,
         output_dir=clip_work_dir / "coarse",
@@ -89,13 +93,12 @@ def process_clip(
 
     candidate_windows: list[tuple[float, float]] = []
     for frame_index, frame in enumerate(coarse_frames, start=1):
-        print(
-            f"  [Pass 1] Analyzing frame {frame_index} of {len(coarse_frames)}",
-            flush=True,
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
         template = get_template_for_keywords(tags)
         prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
 
+        start_time = time.perf_counter()
         result = call_ollama(
             ollama_host,
             ollama_model,
@@ -105,6 +108,16 @@ def process_clip(
             client=client,
             phase="coarse",
         )
+        elapsed = time.perf_counter() - start_time
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[Pass 1] Ollama frame %d: %.1fs, result=%s",
+                frame_index,
+                elapsed,
+                "OK" if result else "None",
+            )
+
         if result is None:
             continue
 
@@ -113,7 +126,7 @@ def process_clip(
             candidate_windows.append((max(0, ts - fine_padding), ts + fine_padding))
 
     if not candidate_windows:
-        print(f"  [Pass 1] No candidates found for {clip['file_name']}")
+        logger.info("[Pass 1] No candidates found for %s", clip["file_name"])
         cleanup_work_dir(clip_work_dir)
         return []
 
@@ -127,7 +140,9 @@ def process_clip(
             merged.append((start, end))
 
     # ---------- Pass 2: Fine scan ----------
-    print(f"  [Pass 2] Fine scan @ {fine_fps} FPS: {clip['file_name']} ({len(merged)} windows)")
+    logger.info(
+        "[Pass 2] Fine scan @ %.1f FPS: %s (%d windows)", fine_fps, clip["file_name"], len(merged)
+    )
     all_detections: list[RefinedDetection] = []
 
     template = get_template_for_keywords(tags)
@@ -146,10 +161,12 @@ def process_clip(
         )
 
         for frame_index, frame in enumerate(fine_frames, start=1):
-            print(
-                f"  [Pass 2] Window {window_index} of {len(merged)}: "
-                f"analyzing frame {frame_index} of {len(fine_frames)}",
-                flush=True,
+            logger.debug(
+                "[Pass 2] Window %d of %d: analyzing frame %d of %d",
+                window_index,
+                len(merged),
+                frame_index,
+                len(fine_frames),
             )
             result = call_ollama(
                 ollama_host,
@@ -182,7 +199,7 @@ def process_clip(
                         )
                     )
                 except (ValueError, TypeError) as exc:
-                    print(f"WARNING: Skipping invalid detection: {exc}")
+                    logger.warning("Skipping invalid detection: %s", exc)
                     continue
 
     # Deduplicate overlapping detections (keep highest quality_score)
@@ -222,11 +239,19 @@ def main() -> None:
         description="Coarse-to-fine VLM scanner for underwater footage"
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
+
+    # Configure logging
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
     config_path = Path(args.config)
     if not config_path.exists():
-        print(f"ERROR: Config not found: {config_path}")
+        logger.error("Config not found: %s", config_path)
         sys.exit(1)
 
     with open(config_path) as f:
@@ -239,16 +264,16 @@ def main() -> None:
         manifest_path = Path(__file__).resolve().parent.parent / "outputs" / "manifest_raw.json"
 
     if not manifest_path.exists():
-        print(f"ERROR: manifest_raw.json not found at {manifest_path}")
-        print("Run 00_ingest_media.py --input <folder> to generate it,")
-        print("or 01_extract_manifest.py from inside DaVinci Resolve.")
+        logger.error("manifest_raw.json not found at %s", manifest_path)
+        logger.error("Run 00_ingest_media.py --input <folder> to generate it,")
+        logger.error("or 01_extract_manifest.py from inside DaVinci Resolve.")
         sys.exit(1)
 
     with open(manifest_path) as f:
         manifest = json.load(f)
 
     work_dir = get_work_dir()
-    print(f"Using work directory: {work_dir}")
+    logger.info("Using work directory: %s", work_dir)
 
     ollama_cfg = config.get("ollama", {})
     ollama_client = OllamaClient(
@@ -259,7 +284,8 @@ def main() -> None:
     refined = DetectionsRefined(total_clips=0, total_detections=0, detections=[])
 
     for clip in manifest.get("clips", []):
-        print(f"Processing: {clip.get('file_name', 'unknown')}")
+        clip_name = clip.get("file_name", "unknown")
+        logger.info("Processing: %s", clip_name)
         detections = process_clip(clip, config, work_dir, ollama_client)
         refined.detections.extend(detections)
         refined.total_detections += len(detections)
@@ -275,9 +301,12 @@ def main() -> None:
     # /dev/shm/dive_worker_tmp on Linux is intentionally skipped)
     cleanup_work_dir(work_dir)
 
-    print(f"\nDone. {refined.total_detections} detections across {refined.total_clips} clips.")
-    print(ollama_client.metrics.format_summary())
-    print(f"Output: {output_path}")
+    logger.info("")
+    logger.info(
+        "Done. %d detections across %d clips.", refined.total_detections, refined.total_clips
+    )
+    logger.info(ollama_client.metrics.format_summary())
+    logger.info("Output: %s", output_path)
 
 
 if __name__ == "__main__":
