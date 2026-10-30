@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-30
+
 ### Added
 - Add optional `general.input_dir` to the config. When set, `dive-clip scan` can
   run without `--input`, mirroring how `general.output_dir` already supplied the
