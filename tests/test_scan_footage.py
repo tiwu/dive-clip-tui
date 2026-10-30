@@ -674,3 +674,65 @@ def test_main_output_dir_override_beats_config(
         scan.main()
 
     assert exc_info.value.code == 1
+
+
+def test_process_clip_updates_progress_tasks(tmp_path: Path) -> None:
+    """process_clip should create and advance progress tasks for coarse and fine passes."""
+    video = tmp_path / "video.mp4"
+    video.touch()
+    clip = {
+        "file_path": str(video),
+        "file_name": "video.mp4",
+        "fps": 25.0,
+    }
+    config = {
+        "scan_parameters": {
+            "coarse_fps": 0.5,
+            "fine_fps": 2.0,
+            "coarse_confidence_threshold": 0.5,
+            "fine_padding_seconds": 2,
+            "quality_threshold": 5,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+            "timeout_seconds": 90,
+        },
+    }
+    coarse_frames = [
+        {"frame_path": str(tmp_path / "c1.jpg"), "timestamp": 1.0, "frame_number": 1},
+    ]
+    fine_frames = [
+        {"frame_path": str(tmp_path / "f1.jpg"), "timestamp": 1.0, "frame_number": 1},
+    ]
+    (tmp_path / "c1.jpg").touch()
+    (tmp_path / "f1.jpg").touch()
+
+    def mock_extract(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        return fine_frames if start_seconds is not None else coarse_frames
+
+    mock_ollama_result = {
+        "detected": True,
+        "subject": "shark",
+        "confidence": 0.9,
+        "quality_score": 8,
+        "description": "Reef shark",
+    }
+    mock_progress = MagicMock()
+    mock_progress.add_task.return_value = 1
+
+    response = MagicMock()
+    response.json.return_value = {"response": json.dumps(mock_ollama_result)}
+    client = ollama_client.OllamaClient("http://localhost:11434", "qwen2.5-vl:7b", 90)
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(ollama_client.requests, "post", return_value=response),
+    ):
+        result = scan.process_clip(clip, config, tmp_path / "work", client, progress=mock_progress)
+
+    assert len(result) == 1
+    assert mock_progress.add_task.call_count >= 2  # coarse task + fine window task
+    assert mock_progress.advance.call_count >= 2

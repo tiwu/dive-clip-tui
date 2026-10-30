@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import pytest
+from rich.logging import RichHandler
 
 from utils.logging_setup import _OWNED_ATTR, configure_logging, default_log_path
 
@@ -109,3 +110,25 @@ def test_configure_logging_debug_level(tmp_path: Path) -> None:
     configure_logging(debug=True)
 
     assert logging.getLogger().level == logging.DEBUG
+
+
+def test_configure_logging_installs_rich_handler() -> None:
+    """Terminal logging should use RichHandler for formatted console output."""
+    configure_logging()
+    root = logging.getLogger()
+    rich_handlers = [
+        h for h in root.handlers if isinstance(h, RichHandler) and getattr(h, _OWNED_ATTR, False)
+    ]
+    assert len(rich_handlers) == 1
+
+
+def test_file_handler_retains_plain_format(tmp_path: Path) -> None:
+    """File logging should preserve the standard timestamp and logger prefix."""
+    log_path = default_log_path(tmp_path)
+    configure_logging(log_file=log_path)
+
+    test_logger = logging.getLogger("test_module")
+    test_logger.info("plain formatted message")
+
+    content = log_path.read_text(encoding="utf-8")
+    assert " - test_module - INFO - plain formatted message\n" in content

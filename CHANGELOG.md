@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add Rich console logging and inline updating progress bars for video scanning.
+  Terminal output displays color-coded log levels, styled pipeline step banners,
+  and real-time inline progress during coarse and fine scanning passes with frame
+  counters, detection hits, and ETA indicators. File transcripts keep plain text
+  formatting.
+
 ## [0.7.0] - 2026-10-30
 
 ### Added
