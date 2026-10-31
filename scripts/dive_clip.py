@@ -28,6 +28,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
 from utils.logging_setup import configure_logging, default_log_path, get_console  # noqa: E402
+from utils.run_archive import (  # noqa: E402
+    archive_file,
+    archive_run_artifacts,
+    get_run_dir,
+)
 from utils.version import get_version  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -158,6 +163,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         )
 
     log_path = args.log_file or default_log_path(output_folder)
+    run_dir = get_run_dir(output_folder) if args.log_file else log_path.parent
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     configure_logging(debug=debug_mode, log_file=log_path)
     logger.info("Dive Clip Curation Pipeline v%s", version)
     logger.info("Logging to %s", log_path)
@@ -199,8 +207,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
             logger.error("Ingest failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("ingest")
+        if manifest_path.exists():
+            archive_file(manifest_path, run_dir, "manifest_raw.json")
     else:
         logger.info("Step 1/3: Ingest media (manifest) — SKIPPED (already done)")
+        if manifest_path.exists() and not (run_dir / "manifest_raw.json").exists():
+            archive_file(manifest_path, run_dir, "manifest_raw.json")
 
     # Step 2: Scan
     scan_cmd = [
@@ -210,6 +222,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         config,
         "--output-dir",
         str(output_folder),
+        "--run-dir",
+        str(run_dir),
         "--state-path",
         str(state_path),
         "--log-file",
@@ -246,8 +260,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
             logger.error("Scan failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("scan")
+        if detections_path.exists():
+            archive_file(detections_path, run_dir, "detections_refined.json")
     else:
         logger.info("Step 2/3: Scan footage (AI detections) — SKIPPED (already done)")
+        if detections_path.exists() and not (run_dir / "detections_refined.json").exists():
+            archive_file(detections_path, run_dir, "detections_refined.json")
 
     # Step 3: Render
     render_cmd = [
@@ -283,15 +301,24 @@ def cmd_scan(args: argparse.Namespace) -> int:
     else:
         logger.info("Step 3/3: Render clips (MP4 highlights) — SKIPPED (already done)")
 
+    archive_run_artifacts(
+        run_dir,
+        manifest_path=manifest_path,
+        detections_path=detections_path,
+        log_file=log_path,
+    )
+
     if console.is_terminal:
         console.print(
             Panel(
                 f"[bold green]Pipeline complete![/bold green]\n"
-                f"[bold white]Highlights in:[/] [cyan]{output_folder}[/]",
+                f"[bold white]Highlights in:[/] [cyan]{output_folder}[/]\n"
+                f"[bold white]Run archive:[/]   [cyan]{run_dir}[/]",
                 border_style="green",
             )
         )
     logger.info("✓ Pipeline complete. Highlights in: %s", output_folder)
+    logger.info("Run artifacts archived in: %s", run_dir)
     return 0
 
 
@@ -332,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--log-file",
         type=Path,
         default=None,
-        help="Logfile path (defaults to <output>/logs/run-<timestamp>.log)",
+        help="Logfile path (defaults to <output>/runs/run-<timestamp>/run.log)",
     )
     scan_p.set_defaults(func=cmd_scan)
 

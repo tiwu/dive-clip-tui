@@ -37,11 +37,12 @@ def restore_root_logging():
 
 
 def test_default_log_path_is_timestamped(tmp_path: Path) -> None:
-    """The default logfile lives in <output>/logs and carries a timestamp."""
+    """The default logfile lives in <output>/runs/run-<stamp>/run.log."""
     log_path = default_log_path(tmp_path)
 
-    assert log_path.parent == tmp_path / "logs"
-    assert re.fullmatch(r"run-\d{8}-\d{6}\.log", log_path.name)
+    assert log_path.parent.parent == tmp_path / "runs"
+    assert re.fullmatch(r"run-\d{8}-\d{6}", log_path.parent.name)
+    assert log_path.name == "run.log"
 
 
 def test_configure_logging_without_logfile_returns_none() -> None:

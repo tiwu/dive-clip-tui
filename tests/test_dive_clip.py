@@ -368,13 +368,13 @@ def test_cmd_scan_passes_output_dir_to_scan_step(tmp_path: Path) -> None:
 
 
 def test_cmd_scan_writes_timestamped_logfile(tmp_path: Path) -> None:
-    """Every scan run should leave one timestamped logfile under the output dir."""
+    """Every scan run should leave one logfile under runs/run-<timestamp>/."""
     args = _scan_args(tmp_path, debug=False)
 
     with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
         assert cmd_scan(args) == 0
 
-    logs = sorted((Path(args.output) / "logs").glob("run-*.log"))
+    logs = sorted((Path(args.output) / "runs").glob("run-*/run.log"))
     assert len(logs) == 1
     assert logs[0].read_text(encoding="utf-8").strip(), "logfile should not be empty"
 
@@ -393,7 +393,7 @@ def test_cmd_scan_honours_explicit_log_file(tmp_path: Path) -> None:
         assert cmd_scan(args) == 0
 
     assert custom.exists()
-    assert not (Path(args.output) / "logs").exists()
+    assert (Path(args.output) / "runs").exists()
 
 
 def test_cmd_scan_threads_resume_flag(tmp_path: Path) -> None:
@@ -478,3 +478,44 @@ def test_cmd_scan_prints_version(tmp_path: Path) -> None:
 
     version = get_version()
     assert any(f"v{version}" in str(p.title) or f"v{version}" in str(p.renderable) for p in panels)
+
+
+def test_cmd_scan_archives_run_artifacts(tmp_path: Path) -> None:
+    """cmd_scan should archive manifest_raw.json and detections_refined.json under runs/run-<timestamp>/."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "highlights"
+    output_folder.mkdir()
+
+    manifest_path = output_folder / "manifest_raw.json"
+    detections_path = output_folder / "detections_refined.json"
+
+    def side_effect(cmd, *a, **kw):
+        if "00_ingest_media.py" in cmd[1]:
+            manifest_path.write_text('{"clips": []}', encoding="utf-8")
+        elif "02_scan_footage.py" in cmd[1]:
+            detections_path.write_text('{"detections": []}', encoding="utf-8")
+        return MagicMock(returncode=0)
+
+    args = argparse.Namespace(
+        input=str(input_folder),
+        output=str(output_folder),
+        config="config.yaml",
+        resume=False,
+        reset=False,
+        debug=False,
+        log_file=None,
+    )
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=side_effect):
+        assert cmd_scan(args) == 0
+
+    runs_dir = output_folder / "runs"
+    assert runs_dir.exists()
+    run_folders = list(runs_dir.iterdir())
+    assert len(run_folders) == 1
+    run_folder = run_folders[0]
+    assert run_folder.name.startswith("run-")
+    assert (run_folder / "run.log").exists()
+    assert (run_folder / "manifest_raw.json").exists()
+    assert (run_folder / "detections_refined.json").exists()

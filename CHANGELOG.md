@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add per-run artifact archiving under `<output>/runs/run-<timestamp>/`, storing snapshots of the run log, `manifest_raw.json`, and `detections_refined.json` while maintaining latest files in the output directory.
+
 ## [0.10.1] - 2026-10-31
 
 ### Security

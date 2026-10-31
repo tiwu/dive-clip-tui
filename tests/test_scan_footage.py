@@ -1129,3 +1129,72 @@ def test_coarse_scan_accepts_good_orientation_frame(tmp_path: Path) -> None:
 
     assert len(result) > 0
     assert result[0].subject == "turtle"
+
+
+def test_scan_main_archives_to_run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--run-dir should archive detections and manifest into specified folder."""
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = output_dir / "manifest_raw.json"
+    manifest_path.write_text(json.dumps({"clips": []}), encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"general:\n  output_dir: {output_dir}\n", encoding="utf-8")
+
+    run_dir = tmp_path / "custom_run"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "02_scan_footage.py",
+            "--config",
+            str(config_path),
+            "--output-dir",
+            str(output_dir),
+            "--run-dir",
+            str(run_dir),
+        ],
+    )
+
+    scan.main()
+
+    assert (output_dir / "detections_refined.json").exists()
+    assert (run_dir / "detections_refined.json").exists()
+    assert (run_dir / "manifest_raw.json").exists()
+
+
+def test_scan_main_archives_with_archive_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--archive flag should create timestamped directory under <output>/runs/run-<stamp>/."""
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = output_dir / "manifest_raw.json"
+    manifest_path.write_text(json.dumps({"clips": []}), encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"general:\n  output_dir: {output_dir}\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "02_scan_footage.py",
+            "--config",
+            str(config_path),
+            "--output-dir",
+            str(output_dir),
+            "--archive",
+        ],
+    )
+
+    scan.main()
+
+    runs_dir = output_dir / "runs"
+    assert runs_dir.exists()
+    run_dirs = list(runs_dir.iterdir())
+    assert len(run_dirs) == 1
+    assert run_dirs[0].name.startswith("run-")
+    assert (run_dirs[0] / "detections_refined.json").exists()
+    assert (run_dirs[0] / "manifest_raw.json").exists()
