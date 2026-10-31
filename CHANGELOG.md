@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-31
+
 ### Added
 - Add self-contained run snapshots in `<output>/runs/<run_id>/` storing `pipeline_state.json`, `manifest.json`, `detections_refined.json`, `run.log`, and `highlights/` clips with an `<output>/latest` symlink.
 - Support resuming previous runs via `dive-clip scan --resume [run_id_or_path]`, automatically continuing the latest run or targeting a specific run folder while restoring run parameters.
