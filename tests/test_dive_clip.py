@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -532,3 +533,105 @@ def test_cmd_scan_archives_run_artifacts(tmp_path: Path) -> None:
     assert (run_folder / "run.log").exists()
     assert (run_folder / "manifest.json").exists()
     assert (run_folder / "detections_refined.json").exists()
+    assert (run_folder / "run_stats.json").exists()
+
+
+def test_cmd_scan_emits_pipeline_statistics(tmp_path: Path) -> None:
+    """cmd_scan should compile and persist pipeline statistics in run_stats.json."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "highlights"
+    output_folder.mkdir()
+
+    manifest_payload = {
+        "project_name": "Test",
+        "total_clips": 1,
+        "clips": [
+            {
+                "clip_id": "clip1",
+                "file_name": "test.mp4",
+                "file_path": str(input_folder / "test.mp4"),
+                "duration": 50.0,
+            }
+        ],
+    }
+
+    detections_payload = {
+        "total_clips": 1,
+        "total_detections": 1,
+        "detections": [
+            {
+                "clip_id": "clip1",
+                "file_name": "test.mp4",
+                "file_path": str(input_folder / "test.mp4"),
+                "start_time": 10.0,
+                "end_time": 14.0,
+                "subject": "turtle",
+                "confidence": 0.9,
+                "quality_score": 8,
+                "description": "turtle swimming",
+            }
+        ],
+    }
+
+    def side_effect(cmd, *a, **kw):
+        if "00_ingest_media.py" in cmd[1]:
+            out_idx = cmd.index("--output") + 1
+            Path(cmd[out_idx]).write_text(json.dumps(manifest_payload), encoding="utf-8")
+        elif "02_scan_footage.py" in cmd[1]:
+            run_dir_idx = cmd.index("--run-dir") + 1
+            run_path = Path(cmd[run_dir_idx])
+            (run_path / "detections_refined.json").write_text(
+                json.dumps(detections_payload), encoding="utf-8"
+            )
+            state_idx = cmd.index("--state-path") + 1
+            state_file = Path(cmd[state_idx])
+            state_data = json.loads(state_file.read_text(encoding="utf-8"))
+            state_data["scan_stats"] = {
+                "phase1": {
+                    "candidate_windows": 1,
+                    "candidate_duration": 8.0,
+                    "frames_analyzed": 20,
+                    "ollama_calls": 20,
+                },
+                "phase2": {
+                    "windows_scanned": 1,
+                    "detections_dedup": 1,
+                    "detections_dedup_duration": 4.0,
+                    "frames_analyzed": 16,
+                    "ollama_calls": 16,
+                },
+            }
+            state_file.write_text(json.dumps(state_data), encoding="utf-8")
+        elif "05_render_clips.py" in cmd[1]:
+            out_idx = cmd.index("--output") + 1
+            out_dir = Path(cmd[out_idx])
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "clip1_turtle_q8.mp4").write_bytes(b"dummy")
+        return MagicMock(returncode=0)
+
+    args = argparse.Namespace(
+        input=str(input_folder),
+        output=str(output_folder),
+        config="config.yaml",
+        resume=False,
+        reset=False,
+        debug=False,
+        log_file=None,
+    )
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=side_effect):
+        assert cmd_scan(args) == 0
+
+    runs_dir = output_folder / "runs"
+    run_folder = next(iter(runs_dir.iterdir()))
+    stats_file = run_folder / "run_stats.json"
+    assert stats_file.exists()
+
+    stats_data = json.loads(stats_file.read_text(encoding="utf-8"))
+    assert stats_data["video_count"] == 1
+    assert stats_data["total_video_duration"] == 50.0
+    assert stats_data["phase1"]["candidate_windows"] == 1
+    assert stats_data["phase2"]["detections_dedup"] == 1
+    assert stats_data["render"]["clips_rendered"] == 1
+    assert stats_data["render"]["total_duration"] == 4.0

@@ -1226,3 +1226,66 @@ def test_scan_main_passes_use_ramdisk_to_get_work_dir(
     ):
         scan.main()
         mock_get_work.assert_called_once_with(use_ramdisk=False)
+
+
+def test_scan_main_emits_run_stats_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """main should emit run_stats.json and update state with scan_stats."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({
+            "project_name": "Test",
+            "total_clips": 1,
+            "clips": [
+                {
+                    "clip_id": "clip1",
+                    "file_name": "video1.mp4",
+                    "file_path": str(tmp_path / "video1.mp4"),
+                    "duration": 42.0,
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    state_path = output_dir / "pipeline_state.json"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"general:\n  output_dir: {output_dir}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "02_scan_footage.py",
+            "--config",
+            str(config_path),
+            "--manifest",
+            str(manifest_path),
+            "--output-dir",
+            str(output_dir),
+            "--state-path",
+            str(state_path),
+        ],
+    )
+
+    with (
+        patch.object(scan, "get_work_dir", return_value=tmp_path / "work"),
+        patch.object(scan, "cleanup_work_dir"),
+        patch.object(scan, "process_clip", return_value=[]),
+    ):
+        scan.main()
+
+    stats_file = output_dir / "run_stats.json"
+    assert stats_file.exists()
+    data = json.loads(stats_file.read_text(encoding="utf-8"))
+    assert data["video_count"] == 1
+    assert data["total_video_duration"] == 42.0
+    assert "phase1" in data
+    assert "phase2" in data
+
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "scan_stats" in state_data
+    assert state_data["scan_stats"]["video_count"] == 1

@@ -47,6 +47,15 @@ from utils.prompt_templates import (
     get_template_for_keywords,
 )
 from utils.run_archive import archive_run_artifacts, get_run_dir
+from utils.stats import (
+    Phase1Stats,
+    Phase2Stats,
+    PipelineStats,
+    format_stats_log,
+    format_stats_table,
+    parse_duration,
+    save_stats_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +129,8 @@ def process_clip(
     ollama_client: OllamaClient | None = None,
     state: PipelineState | None = None,
     progress: Progress | None = None,
+    phase1_stats: Phase1Stats | None = None,
+    phase2_stats: Phase2Stats | None = None,
 ) -> list[RefinedDetection]:
     """Process a single clip through coarse-to-fine scanning.
 
@@ -166,6 +177,8 @@ def process_clip(
         fps=coarse_fps,
         scale=coarse_scale,
     )
+    if phase1_stats is not None:
+        phase1_stats.frames_extracted += len(coarse_frames)
     logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
 
     template = get_template_for_keywords(tags)
@@ -187,6 +200,8 @@ def process_clip(
 
     try:
         for frame_index, frame in enumerate(coarse_frames, start=1):
+            if phase1_stats is not None:
+                phase1_stats.frames_analyzed += 1
             logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
 
             start_time = time.perf_counter()
@@ -220,6 +235,8 @@ def process_clip(
             coarse_confidences.append(confidence)
             if detected:
                 coarse_detected += 1
+                if phase1_stats is not None:
+                    phase1_stats.detections_detected += 1
 
             frame_passes = (
                 detected
@@ -265,6 +282,8 @@ def process_clip(
 
     if not candidate_windows:
         logger.info("[Pass 1] No candidates found for %s", clip["file_name"])
+        if phase1_stats is not None:
+            phase1_stats.elapsed_seconds += coarse_elapsed_total
         cleanup_work_dir(clip_work_dir)
         return []
 
@@ -277,10 +296,17 @@ def process_clip(
         else:
             merged.append((start, end))
 
+    if phase1_stats is not None:
+        phase1_stats.candidate_windows += len(merged)
+        phase1_stats.candidate_duration += sum(end - start for start, end in merged)
+        phase1_stats.elapsed_seconds += coarse_elapsed_total
+
     # ---------- Pass 2: Fine scan ----------
     logger.info(
         "[Pass 2] Fine scan @ %.1f FPS: %s (%d windows)", fine_fps, clip["file_name"], len(merged)
     )
+    if phase2_stats is not None:
+        phase2_stats.windows_scanned += len(merged)
     all_detections: list[RefinedDetection] = []
     fine_frames_analyzed = 0
     fine_passed = 0
@@ -317,6 +343,8 @@ def process_clip(
             start_seconds=win_start,
             duration_seconds=duration,
         )
+        if phase2_stats is not None:
+            phase2_stats.frames_extracted += len(fine_frames)
         logger.info(
             "[Pass 2] Window %d of %d: extracted %d frames",
             window_index,
@@ -335,6 +363,8 @@ def process_clip(
 
         try:
             for frame_index, frame in enumerate(fine_frames, start=1):
+                if phase2_stats is not None:
+                    phase2_stats.frames_analyzed += 1
                 logger.debug(
                     "[Pass 2] Window %d of %d: analyzing frame %d of %d",
                     window_index,
@@ -371,6 +401,10 @@ def process_clip(
                 fine_confidences.append(confidence)
                 if frame_passes:
                     fine_passed += 1
+                    if phase2_stats is not None:
+                        phase2_stats.detections_found += 1
+                        ts = frame["timestamp"]
+                        phase2_stats.detections_duration += (ts + 1.0) - max(0.0, ts - 1.0)
 
                 if progress is not None and fine_task_id is not None:
                     progress.advance(fine_task_id)
@@ -418,6 +452,12 @@ def process_clip(
     # Deduplicate overlapping detections (keep highest quality_score)
     before_dedup = len(all_detections)
     all_detections = _deduplicate_detections(all_detections)
+    if phase2_stats is not None:
+        phase2_stats.detections_dedup += len(all_detections)
+        phase2_stats.detections_dedup_duration += sum(
+            d.end_time - d.start_time for d in all_detections
+        )
+        phase2_stats.elapsed_seconds += fine_elapsed_total
     logger.info(
         "[Pass 2] Summary %s: %d windows, %d frames analyzed, %d passed quality>=%d "
         "(conf %s), %d failed calls, %d -> %d detections after dedup, %.1fs total",
@@ -622,6 +662,22 @@ def main() -> None:
             if state.is_item_done("scan", cname):
                 completed_clips.add(cname)
 
+    scan_start_time = time.perf_counter()
+    p1_stats = Phase1Stats()
+    p2_stats = Phase2Stats()
+    if args.resume and state is not None:
+        prev_scan_stats = state.get("scan_stats")
+        if isinstance(prev_scan_stats, dict):
+            try:
+                prev_p1 = prev_scan_stats.get("phase1")
+                prev_p2 = prev_scan_stats.get("phase2")
+                if isinstance(prev_p1, dict):
+                    p1_stats = Phase1Stats.model_validate(prev_p1)
+                if isinstance(prev_p2, dict):
+                    p2_stats = Phase2Stats.model_validate(prev_p2)
+            except Exception as exc:
+                logger.debug("Could not restore previous scan_stats: %s", exc)
+
     try:
         with create_scan_progress() as progress:
             overall_task = (
@@ -649,6 +705,8 @@ def main() -> None:
                     ollama_client,
                     state=state,
                     progress=progress,
+                    phase1_stats=p1_stats,
+                    phase2_stats=p2_stats,
                 )
                 refined.detections.extend(detections)
                 refined.total_detections += len(detections)
@@ -662,19 +720,59 @@ def main() -> None:
         # Final atomic write to ensure complete sync
         save_detections_atomic(output_path, refined)
 
+        # Record Ollama calls for each phase
+        coarse_stats = ollama_client.metrics.by_phase.get("coarse")
+        if coarse_stats:
+            p1_stats.ollama_calls += coarse_stats.calls
+            p1_stats.ollama_failures += coarse_stats.failures
+        fine_stats = ollama_client.metrics.by_phase.get("fine")
+        if fine_stats:
+            p2_stats.ollama_calls += fine_stats.calls
+            p2_stats.ollama_failures += fine_stats.failures
+
+        total_video_duration = sum(parse_duration(clip.get("duration")) for clip in clips)
+        scan_elapsed = time.perf_counter() - scan_start_time
+
+        scan_pipeline_stats = PipelineStats(
+            run_id=target_run_dir.name if target_run_dir else "",
+            video_count=len(clips),
+            total_video_duration=round(total_video_duration, 2),
+            total_elapsed_seconds=round(scan_elapsed, 2),
+            phase1=p1_stats,
+            phase2=p2_stats,
+            step_durations={"scan": round(scan_elapsed, 2)},
+        )
+
+        if state is not None:
+            state.set("scan_stats", scan_pipeline_stats.to_dict())
+            state.save()
+
+        stats_save_path = (
+            (target_run_dir / "run_stats.json")
+            if target_run_dir
+            else (output_path.parent / "run_stats.json")
+        )
+        save_stats_json(scan_pipeline_stats, stats_save_path)
+
         if target_run_dir is not None:
             archive_run_artifacts(
                 target_run_dir,
                 manifest_path=manifest_path,
                 detections_path=output_path,
                 log_file=args.log_file,
+                stats_path=stats_save_path,
             )
             logger.info("Archived run artifacts to %s", target_run_dir)
+
+        console = get_console()
+        if console.is_terminal:
+            console.print(format_stats_table(scan_pipeline_stats, title="Scan Summary"))
 
         logger.info(
             "Done. %d detections across %d clips.", refined.total_detections, refined.total_clips
         )
         logger.info(ollama_client.metrics.format_summary())
+        logger.info(format_stats_log(scan_pipeline_stats))
         logger.info("Output: %s", output_path)
 
     except KeyboardInterrupt:

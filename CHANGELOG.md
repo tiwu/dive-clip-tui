@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add end-of-run processing statistics, Rich summary table, and `run_stats.json` artifact for full pipeline and standalone scanning.
+
 ## [0.13.0] - 2026-10-31
 
 ### Added
