@@ -1,0 +1,110 @@
+"""Tests for utils/run_archive.py."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from utils.run_archive import (
+    archive_file,
+    archive_run_artifacts,
+    default_run_log_path,
+    generate_run_id,
+    get_run_dir,
+)
+
+
+def test_generate_run_id_format() -> None:
+    """Run ID follows run-YYYYMMDD-HHMMSS format or uses provided timestamp."""
+    run_id = generate_run_id()
+    assert re.fullmatch(r"run-\d{8}-\d{6}", run_id)
+
+    custom_id = generate_run_id("20261031-120000")
+    assert custom_id == "run-20261031-120000"
+
+
+def test_get_run_dir(tmp_path: Path) -> None:
+    """Run directory path is under <output>/runs/<run_id>."""
+    run_dir = get_run_dir(tmp_path, "run-20261031-120000")
+    assert run_dir == tmp_path / "runs" / "run-20261031-120000"
+
+
+def test_default_run_log_path(tmp_path: Path) -> None:
+    """Default run log lives directly inside the run directory."""
+    log_path = default_run_log_path(tmp_path, "run-20261031-120000")
+    assert log_path == tmp_path / "runs" / "run-20261031-120000" / "run.log"
+
+
+def test_archive_file_copies_when_exists(tmp_path: Path) -> None:
+    """archive_file copies file to target dir and returns destination path."""
+    src = tmp_path / "sample.json"
+    src.write_text('{"hello": "world"}', encoding="utf-8")
+
+    dest_dir = tmp_path / "archive"
+    archived = archive_file(src, dest_dir)
+
+    assert archived is not None
+    assert archived == dest_dir / "sample.json"
+    assert archived.read_text(encoding="utf-8") == '{"hello": "world"}'
+
+
+def test_archive_file_with_target_name(tmp_path: Path) -> None:
+    """archive_file supports custom target name."""
+    src = tmp_path / "original.txt"
+    src.write_text("test data", encoding="utf-8")
+
+    dest_dir = tmp_path / "archive"
+    archived = archive_file(src, dest_dir, target_name="renamed.txt")
+
+    assert archived == dest_dir / "renamed.txt"
+    assert archived.read_text(encoding="utf-8") == "test data"
+
+
+def test_archive_file_returns_none_when_source_missing(tmp_path: Path) -> None:
+    """archive_file returns None when source file does not exist."""
+    src = tmp_path / "nonexistent.json"
+    dest_dir = tmp_path / "archive"
+    assert archive_file(src, dest_dir) is None
+
+
+def test_archive_run_artifacts_all(tmp_path: Path) -> None:
+    """archive_run_artifacts copies manifest, detections, and log to run_dir."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    manifest = output_dir / "manifest_raw.json"
+    manifest.write_text('{"manifest": true}', encoding="utf-8")
+
+    detections = output_dir / "detections_refined.json"
+    detections.write_text('{"detections": []}', encoding="utf-8")
+
+    log_file = tmp_path / "outside.log"
+    log_file.write_text("log line", encoding="utf-8")
+
+    run_dir = output_dir / "runs" / "run-20261031-120000"
+    archived = archive_run_artifacts(
+        run_dir,
+        manifest_path=manifest,
+        detections_path=detections,
+        log_file=log_file,
+    )
+
+    assert (run_dir / "manifest_raw.json").exists()
+    assert (run_dir / "detections_refined.json").exists()
+    assert (run_dir / "run.log").exists()
+    assert (run_dir / "run.log").read_text(encoding="utf-8") == "log line"
+    assert archived["manifest"] == run_dir / "manifest_raw.json"
+    assert archived["detections"] == run_dir / "detections_refined.json"
+    assert archived["log"] == run_dir / "run.log"
+
+
+def test_archive_run_artifacts_handles_already_in_place_log(tmp_path: Path) -> None:
+    """archive_run_artifacts does not copy log when it already lives at run_dir/run.log."""
+    run_dir = tmp_path / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+    in_place_log = run_dir / "run.log"
+    in_place_log.write_text("existing log", encoding="utf-8")
+
+    archived = archive_run_artifacts(run_dir, log_file=in_place_log)
+    assert archived["log"] == in_place_log
+    assert in_place_log.read_text(encoding="utf-8") == "existing log"

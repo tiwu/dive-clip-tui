@@ -39,9 +39,9 @@ def get_console() -> Console:
 
 
 def default_log_path(output_dir: Path) -> Path:
-    """Return a timestamped logfile path under `<output_dir>/logs/`."""
+    """Return a timestamped logfile path under `<output_dir>/runs/run-<stamp>/run.log`."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return Path(output_dir) / "logs" / f"run-{stamp}.log"
+    return Path(output_dir) / "runs" / f"run-{stamp}" / "run.log"
 
 
 def configure_logging(

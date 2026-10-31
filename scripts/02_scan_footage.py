@@ -46,6 +46,7 @@ from utils.prompt_templates import (
     BROAD_MARINE_TEMPLATE,
     get_template_for_keywords,
 )
+from utils.run_archive import archive_run_artifacts, get_run_dir
 
 logger = logging.getLogger(__name__)
 
@@ -504,6 +505,17 @@ def main() -> None:
         action="store_true",
         help="Resume scanning from last saved state, skipping completed clips",
     )
+    parser.add_argument(
+        "--run-dir",
+        type=Path,
+        default=None,
+        help="Run directory to archive detections and logs into",
+    )
+    parser.add_argument(
+        "--archive",
+        action="store_true",
+        help="Archive detections into a new timestamped directory under <output>/runs/run-<timestamp>/",
+    )
     args = parser.parse_args()
 
     configure_logging(debug=args.debug, log_file=args.log_file)
@@ -547,6 +559,10 @@ def main() -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "detections_refined.json"
+
+    target_run_dir = args.run_dir
+    if target_run_dir is None and args.archive:
+        target_run_dir = get_run_dir(output_dir)
 
     refined = DetectionsRefined(total_clips=0, total_detections=0, detections=[])
     completed_clips: set[str] = set()
@@ -620,6 +636,15 @@ def main() -> None:
         # Final atomic write to ensure complete sync
         save_detections_atomic(output_path, refined)
 
+        if target_run_dir is not None:
+            archive_run_artifacts(
+                target_run_dir,
+                manifest_path=manifest_path,
+                detections_path=output_path,
+                log_file=args.log_file,
+            )
+            logger.info("Archived run artifacts to %s", target_run_dir)
+
         logger.info(
             "Done. %d detections across %d clips.", refined.total_detections, refined.total_clips
         )
@@ -631,6 +656,16 @@ def main() -> None:
         if refined.detections:
             save_detections_atomic(output_path, refined)
             logger.info("Saved %d detections before exit.", len(refined.detections))
+            if target_run_dir is not None:
+                try:
+                    archive_run_artifacts(
+                        target_run_dir,
+                        manifest_path=manifest_path,
+                        detections_path=output_path,
+                        log_file=args.log_file,
+                    )
+                except Exception as exc:
+                    logger.warning("Could not archive partial run artifacts on interrupt: %s", exc)
         if state is not None:
             state.set_activity("scan: interrupted by user")
         sys.exit(130)
