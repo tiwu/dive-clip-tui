@@ -18,8 +18,10 @@ scan_parameters:
   coarse_fps: 0.5                   # 1 frame per 2 seconds
   coarse_scale: "640:-2"            # Downscale coarse frames for fast VLM screening
   fine_fps: 2.0                     # 2 frames per second during highlight windows
-  fine_scale: null                  # Native resolution for fine identification (or "1280:-2")
+  fine_scale: "1280:-2"             # Native resolution for fine identification 
+                                    #   (or "iw/2:-2" for half resolution or "null" for no scaling)
   coarse_confidence_threshold: 0.80 # Minimum confidence to trigger fine scan
+  coarse_quality_threshold: 4      # Minimum score (1-10) to reject upside-down/dangling frames in coarse pass
   fine_padding_seconds: 2           # Extra context before/after detected action
   quality_threshold: 8              # Min. score (1-10) to include in EDL/Storyline
   use_ramdisk: true                 # Use /dev/shm on Linux for fast I/O

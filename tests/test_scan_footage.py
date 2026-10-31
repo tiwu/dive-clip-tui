@@ -255,7 +255,7 @@ def test_process_clip_with_candidates(tmp_path: Path, caplog: pytest.LogCaptureF
     assert "[Pass 1] Summary video.mp4" in caplog.text
     assert "confidence min/avg/max" in caplog.text
     assert (
-        "[Pass 1] Frame 1 @ 2.0s: detected=True confidence=0.80 passes_threshold=True"
+        "[Pass 1] Frame 1 @ 2.0s: detected=True confidence=0.80 quality=8 passes_threshold=True"
         in caplog.text
     )
     assert "[Pass 2] Window 1 of 1: 0.0s-" in caplog.text
@@ -330,7 +330,7 @@ def test_fallback_uses_broad_marine_in_coarse_pass(tmp_path: Path) -> None:
     # Should have used broad marine template since tags are empty
     assert len(captured_prompts) >= 1
     prompt_used = captured_prompts[0]
-    assert BROAD_MARINE_TEMPLATE.user_prompt in prompt_used, (
+    assert BROAD_MARINE_TEMPLATE.coarse_prompt in prompt_used, (
         f"Expected broad marine template prompt in coarse pass, got: {prompt_used[:80]}..."
     )
     assert len(result) > 0
@@ -405,7 +405,7 @@ def test_fallback_uses_broad_marine_in_fine_pass(tmp_path: Path) -> None:
     # Should have used broad marine template in fine pass since tags are empty
     assert len(captured_prompts) >= 2  # coarse + fine
     fine_prompt = captured_prompts[-1]  # Last call is fine pass
-    assert BROAD_MARINE_TEMPLATE.user_prompt in fine_prompt, (
+    assert BROAD_MARINE_TEMPLATE.fine_prompt in fine_prompt, (
         f"Expected broad marine template prompt in fine pass, got: {fine_prompt[:80]}..."
     )
     assert len(result) > 0
@@ -472,7 +472,7 @@ def test_matched_template_preserves_pelagics(tmp_path: Path) -> None:
     # Should have used pelagics template since tags match
     assert len(captured_prompts) >= 1
     prompt_used = captured_prompts[0]
-    assert PELAGICS_TEMPLATE.user_prompt in prompt_used, (
+    assert PELAGICS_TEMPLATE.coarse_prompt in prompt_used, (
         f"Expected pelagics template prompt, got: {prompt_used[:80]}..."
     )
     assert len(result) > 0
@@ -539,7 +539,7 @@ def test_matched_template_preserves_macro(tmp_path: Path) -> None:
     # Should have used macro template since tags match
     assert len(captured_prompts) >= 1
     prompt_used = captured_prompts[0]
-    assert MACRO_TEMPLATE.user_prompt in prompt_used, (
+    assert MACRO_TEMPLATE.coarse_prompt in prompt_used, (
         f"Expected macro template prompt, got: {prompt_used[:80]}..."
     )
     assert len(result) > 0
@@ -945,3 +945,118 @@ def test_scan_main_incremental_and_resume(tmp_path: Path) -> None:
     # Final file still contains both detections
     final_data = json.loads((output_dir / "detections_refined.json").read_text(encoding="utf-8"))
     assert len(final_data["detections"]) == 2
+
+
+def test_coarse_scan_rejects_upside_down_or_dangling_by_quality_threshold(tmp_path: Path) -> None:
+    """Pass 1 coarse scan should reject detected frames when quality_score is below coarse_quality_threshold."""
+    video = tmp_path / "inverted_video.mp4"
+    video.touch()
+
+    clip = {
+        "file_path": str(video),
+        "file_name": "inverted_video.mp4",
+        "tags": [],
+    }
+    config = {
+        "scan_parameters": {
+            "coarse_fps": 0.5,
+            "fine_fps": 2.0,
+            "coarse_confidence_threshold": 0.65,
+            "coarse_quality_threshold": 4,
+            "fine_padding_seconds": 4,
+            "quality_threshold": 7,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+            "timeout_seconds": 90,
+        },
+    }
+
+    coarse_frame_path = tmp_path / "frame_000001.jpg"
+    coarse_frame_path.touch()
+
+    def mock_extract(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        return [
+            {"frame_path": str(coarse_frame_path), "timestamp": 2.0, "frame_number": 1},
+        ]
+
+    # Model returned detected=True but low quality (e.g. 2 because camera is dangling / upside down)
+    def mock_call(*args, **kwargs):
+        return {
+            "detected": True,
+            "subject": "coral",
+            "confidence": 0.9,
+            "quality_score": 2,
+            "description": "Camera dangling upside down, coral barely visible",
+            "timestamp": 2.0,
+        }
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        result = scan.process_clip(clip, config, tmp_path / "work")
+
+    # Frame rejected in coarse scan -> no candidate windows -> no fine detections
+    assert result == []
+
+
+def test_coarse_scan_accepts_good_orientation_frame(tmp_path: Path) -> None:
+    """Pass 1 coarse scan should accept detected frames when quality_score meets coarse_quality_threshold."""
+    video = tmp_path / "good_video.mp4"
+    video.touch()
+
+    clip = {
+        "file_path": str(video),
+        "file_name": "good_video.mp4",
+        "tags": [],
+    }
+    config = {
+        "scan_parameters": {
+            "coarse_fps": 0.5,
+            "fine_fps": 2.0,
+            "coarse_confidence_threshold": 0.65,
+            "coarse_quality_threshold": 4,
+            "fine_padding_seconds": 2,
+            "quality_threshold": 7,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+            "timeout_seconds": 90,
+        },
+    }
+
+    frame_path = tmp_path / "frame_000001.jpg"
+    frame_path.touch()
+
+    def mock_extract(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return [
+            {"frame_path": str(frame_path), "timestamp": 2.0, "frame_number": 1},
+        ]
+
+    def mock_call(*args, **kwargs):
+        return {
+            "detected": True,
+            "subject": "turtle",
+            "confidence": 0.85,
+            "quality_score": 8,
+            "description": "Upright clear shot of sea turtle",
+            "timestamp": 2.0,
+        }
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        result = scan.process_clip(clip, config, tmp_path / "work")
+
+    assert len(result) > 0
+    assert result[0].subject == "turtle"
