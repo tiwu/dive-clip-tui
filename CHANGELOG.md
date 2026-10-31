@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-31
+
 ### Changed
 - Wire up `scan_parameters.use_ramdisk` configuration setting in `scripts/02_scan_footage.py` and `utils/ffmpeg_streamer.py`, allowing users to explicitly control RAM-disk usage (`/dev/shm`) and documenting its I/O performance and SSD wear reduction benefits.
 
