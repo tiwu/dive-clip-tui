@@ -126,6 +126,7 @@ def process_clip(
     fine_fps = scan_params.get("fine_fps", 2.0)
     fine_scale = scan_params.get("fine_scale")
     coarse_threshold = scan_params.get("coarse_confidence_threshold", 0.65)
+    coarse_quality_threshold = scan_params.get("coarse_quality_threshold", 4)
     fine_padding = scan_params.get("fine_padding_seconds", 4)
     quality_threshold = scan_params.get("quality_threshold", 7)
 
@@ -151,7 +152,7 @@ def process_clip(
     logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
 
     template = get_template_for_keywords(tags)
-    prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
+    coarse_prompt = template.coarse_prompt if template else BROAD_MARINE_TEMPLATE.coarse_prompt
 
     candidate_windows: list[tuple[float, float]] = []
     coarse_confidences: list[float] = []
@@ -176,7 +177,7 @@ def process_clip(
                 ollama_host,
                 ollama_model,
                 frame["frame_path"],
-                prompt_template,
+                coarse_prompt,
                 ollama_timeout,
                 client=client,
                 phase="coarse",
@@ -198,11 +199,16 @@ def process_clip(
 
             detected = bool(result.get("detected"))
             confidence = float(result.get("confidence", 0.0) or 0.0)
+            quality_score = int(result.get("quality_score", 0) or 0)
             coarse_confidences.append(confidence)
             if detected:
                 coarse_detected += 1
 
-            frame_passes = detected and confidence >= coarse_threshold
+            frame_passes = (
+                detected
+                and confidence >= coarse_threshold
+                and quality_score >= coarse_quality_threshold
+            )
             if frame_passes:
                 ts = frame["timestamp"]
                 candidate_windows.append((max(0, ts - fine_padding), ts + fine_padding))
@@ -212,12 +218,13 @@ def process_clip(
                 progress.update(task_id, status=f"({len(candidate_windows)} hits)")
 
             logger.debug(
-                "[Pass 1] Frame %d @ %.1fs: detected=%s confidence=%.2f passes_threshold=%s "
+                "[Pass 1] Frame %d @ %.1fs: detected=%s confidence=%.2f quality=%d passes_threshold=%s "
                 "subject=%s (%.1fs)",
                 frame_index,
                 frame["timestamp"],
                 detected,
                 confidence,
+                quality_score,
                 frame_passes,
                 result.get("subject", "-"),
                 elapsed,
@@ -265,7 +272,7 @@ def process_clip(
     fine_confidences: list[float] = []
 
     template = get_template_for_keywords(tags)
-    prompt_template = template.user_prompt if template else BROAD_MARINE_TEMPLATE.user_prompt
+    fine_prompt = template.fine_prompt if template else BROAD_MARINE_TEMPLATE.fine_prompt
     color = template.color if template else BROAD_MARINE_TEMPLATE.color
 
     for window_index, (win_start, win_end) in enumerate(merged, start=1):
@@ -323,7 +330,7 @@ def process_clip(
                     ollama_host,
                     ollama_model,
                     frame["frame_path"],
-                    prompt_template,
+                    fine_prompt,
                     ollama_timeout,
                     client=client,
                     phase="fine",

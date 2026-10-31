@@ -14,18 +14,21 @@ from utils.prompt_templates import (
 
 
 def test_prompt_template_creation() -> None:
-    """PromptTemplate should be constructable with all fields."""
+    """PromptTemplate should be constructable with coarse and fine prompts."""
     template = PromptTemplate(
         name="test",
         keywords=["kw1", "kw2"],
         system_prompt="System prompt",
-        user_prompt="User prompt",
+        coarse_prompt="Coarse prompt",
+        fine_prompt="Fine prompt",
         color="Blue",
     )
     assert template.name == "test"
     assert template.keywords == ["kw1", "kw2"]
     assert template.system_prompt == "System prompt"
-    assert template.user_prompt == "User prompt"
+    assert template.coarse_prompt == "Coarse prompt"
+    assert template.fine_prompt == "Fine prompt"
+    assert template.user_prompt == "Fine prompt"
     assert template.color == "Blue"
 
 
@@ -120,19 +123,42 @@ def test_broad_marine_template_not_in_all_templates() -> None:
     assert BROAD_MARINE_TEMPLATE not in ALL_TEMPLATES
 
 
-def test_broad_marine_template_has_structured_output() -> None:
-    """BROAD_MARINE_TEMPLATE user_prompt should ask for structured detection fields."""
-    prompt = BROAD_MARINE_TEMPLATE.user_prompt
-    assert "detected" in prompt
-    assert "subject" in prompt
-    assert "confidence" in prompt
-    assert "quality_score" in prompt
-    assert "description" in prompt
-    assert "timestamp" in prompt
+def test_coarse_prompts_reject_inverted_and_dangling() -> None:
+    """Coarse prompts across all templates should instruct rejection of upside down and dangling camera."""
+    templates = [PELAGICS_TEMPLATE, MACRO_TEMPLATE, DIVER_TEMPLATE, BROAD_MARINE_TEMPLATE]
+    for tmpl in templates:
+        prompt_lower = tmpl.coarse_prompt.lower()
+        assert "upside down" in prompt_lower or "inverted" in prompt_lower, (
+            f"{tmpl.name} coarse prompt missing upside-down instruction"
+        )
+        assert "dangling" in prompt_lower or "tumbling" in prompt_lower, (
+            f"{tmpl.name} coarse prompt missing dangling camera instruction"
+        )
+        assert "detected" in prompt_lower
+        assert "confidence" in prompt_lower
+        assert "quality_score" in prompt_lower
+
+
+def test_fine_prompts_include_quality_rubric() -> None:
+    """Fine prompts should instruct evaluation of lighting, focus, and camera stability."""
+    templates = [PELAGICS_TEMPLATE, MACRO_TEMPLATE, DIVER_TEMPLATE, BROAD_MARINE_TEMPLATE]
+    for tmpl in templates:
+        prompt_lower = tmpl.fine_prompt.lower()
+        assert "lighting" in prompt_lower or "lit" in prompt_lower, (
+            f"{tmpl.name} fine prompt missing lighting evaluation"
+        )
+        assert "focus" in prompt_lower, f"{tmpl.name} fine prompt missing focus evaluation"
+        assert (
+            "stability" in prompt_lower
+            or "shake" in prompt_lower
+            or "stutter" in prompt_lower
+            or "motion" in prompt_lower
+        ), f"{tmpl.name} fine prompt missing stability evaluation"
+        assert "quality_score" in prompt_lower
 
 
 def test_broad_marine_template_includes_examples() -> None:
-    """BROAD_MARINE_TEMPLATE user_prompt should include representative marine life examples."""
+    """BROAD_MARINE_TEMPLATE coarse and fine prompts should include representative marine life examples."""
     examples = [
         "corals",
         "worms",
@@ -148,6 +174,8 @@ def test_broad_marine_template_includes_examples() -> None:
         "seahorses",
         "stonefish",
     ]
-    prompt = BROAD_MARINE_TEMPLATE.user_prompt
     for example in examples:
-        assert example in prompt, f"Expected '{example}' in prompt"
+        assert example in BROAD_MARINE_TEMPLATE.coarse_prompt, (
+            f"Expected '{example}' in coarse prompt"
+        )
+        assert example in BROAD_MARINE_TEMPLATE.fine_prompt, f"Expected '{example}' in fine prompt"

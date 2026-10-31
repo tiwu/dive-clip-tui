@@ -6,6 +6,14 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Split VLM screening into coarse gatekeeping and fine quality evaluation:
+  Coarse pass instructs Qwen2.5-VL to reject upside-down, tumbling, and dangling
+  camera footage (`detected: false`), enforced by a configurable
+  `coarse_quality_threshold` (default `4`). Fine pass scores candidate highlights
+  using a calibrated 1-10 rubric covering lighting, focus sharpness, camera
+  stability, and composition.
+
 ### Fixed
 - Mute background render logging on console to eliminate cursor displacement and duplicate progress bar lines during video scanning, while preserving complete logs in run logfiles.
 - Add version reporting to `dive-clip` startup banner panel, log transcripts, and new `--version` CLI flag.
