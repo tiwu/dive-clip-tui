@@ -81,20 +81,26 @@ def test_archive_run_artifacts_all(tmp_path: Path) -> None:
     log_file = tmp_path / "outside.log"
     log_file.write_text("log line", encoding="utf-8")
 
+    stats_file = output_dir / "run_stats.json"
+    stats_file.write_text('{"video_count": 1}', encoding="utf-8")
+
     run_dir = output_dir / "runs" / "run-20261031-120000"
     archived = archive_run_artifacts(
         run_dir,
         manifest_path=manifest,
         detections_path=detections,
         log_file=log_file,
+        stats_path=stats_file,
     )
 
     assert (run_dir / "manifest_raw.json").exists()
     assert (run_dir / "detections_refined.json").exists()
+    assert (run_dir / "run_stats.json").exists()
     assert (run_dir / "run.log").exists()
     assert (run_dir / "run.log").read_text(encoding="utf-8") == "log line"
     assert archived["manifest"] == run_dir / "manifest_raw.json"
     assert archived["detections"] == run_dir / "detections_refined.json"
+    assert archived["stats"] == run_dir / "run_stats.json"
     assert archived["log"] == run_dir / "run.log"
 
 

@@ -295,6 +295,23 @@ def main() -> None:
 
     if state is not None:
         state.mark_step_done("render")
+        total_highlight_duration = sum(
+            max(0.0, float(d.get("end_time", 0)) - float(d.get("start_time", 0)))
+            for d in detections
+        )
+        render_duration = float(state.get("render_duration_seconds", 0.0) or 0.0)
+        state.set(
+            "render_stats",
+            {
+                "clips_total": len(detections),
+                "clips_rendered": rendered + concurrent_ready,
+                "clips_skipped": concurrent_ready,
+                "clips_failed": failed,
+                "total_duration": round(total_highlight_duration, 2),
+                "elapsed_seconds": render_duration,
+            },
+        )
+        state.save()
 
     if concurrent_ready > 0:
         logger.info(

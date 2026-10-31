@@ -120,6 +120,7 @@ def archive_run_artifacts(
     manifest_path: Path | str | None = None,
     detections_path: Path | str | None = None,
     log_file: Path | str | None = None,
+    stats_path: Path | str | None = None,
 ) -> dict[str, Path]:
     """Archive available pipeline artifacts into `run_dir`.
 
@@ -139,6 +140,11 @@ def archive_run_artifacts(
         dest = archive_file(detections_path, target_dir, "detections_refined.json")
         if dest:
             archived["detections"] = dest
+
+    if stats_path is not None:
+        dest = archive_file(stats_path, target_dir, "run_stats.json")
+        if dest:
+            archived["stats"] = dest
 
     if log_file is not None:
         src_log = Path(log_file)

@@ -17,6 +17,8 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -34,6 +36,16 @@ from utils.run_archive import (  # noqa: E402
     get_run_dir,
     resolve_run_dir,
     update_latest_symlink,
+)
+from utils.stats import (  # noqa: E402
+    Phase1Stats,
+    Phase2Stats,
+    PipelineStats,
+    RenderStats,
+    format_stats_log,
+    format_stats_table,
+    parse_duration,
+    save_stats_json,
 )
 from utils.version import get_version  # noqa: E402
 
@@ -137,6 +149,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     Supports checkpointing: if --resume is set, completed steps are skipped.
     State is stored in <output>/runs/<run_id>/pipeline_state.json.
     """
+    pipeline_start_time = time.perf_counter()
     general = load_general_config(args.config)
     output_value = args.output or general.get("output_dir") or "./outputs"
     output_folder = Path(output_value)
@@ -347,25 +360,101 @@ def cmd_scan(args: argparse.Namespace) -> int:
     else:
         logger.info("Step 3/3: Render clips (MP4 highlights) — SKIPPED (already done)")
 
+    pipeline_elapsed = time.perf_counter() - pipeline_start_time
+
+    # Calculate footage stats from manifest
+    video_count = 0
+    total_video_duration = 0.0
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest_data = json.load(f)
+            manifest_clips = manifest_data.get("clips", [])
+            video_count = len(manifest_clips)
+            total_video_duration = sum(parse_duration(c.get("duration")) for c in manifest_clips)
+        except Exception as exc:
+            logger.debug("Could not read manifest for stats: %s", exc)
+
+    # Restore scan stats
+    scan_data = state.get("scan_stats")
+    p1_stats = Phase1Stats()
+    p2_stats = Phase2Stats()
+    if isinstance(scan_data, dict):
+        if isinstance(scan_data.get("phase1"), dict):
+            p1_stats = Phase1Stats.model_validate(scan_data["phase1"])
+        if isinstance(scan_data.get("phase2"), dict):
+            p2_stats = Phase2Stats.model_validate(scan_data["phase2"])
+
+    # Restore or build render stats
+    render_data = state.get("render_stats")
+    if isinstance(render_data, dict):
+        r_stats = RenderStats.model_validate(render_data)
+    else:
+        dets_list = []
+        if detections_path.exists():
+            try:
+                with open(detections_path, encoding="utf-8") as f:
+                    dets_list = json.load(f).get("detections", [])
+            except Exception:
+                pass
+        rendered_files = list(highlights_dir.glob("*.mp4")) if highlights_dir.exists() else []
+        total_highlight_dur = sum(
+            max(0.0, float(d.get("end_time", 0)) - float(d.get("start_time", 0))) for d in dets_list
+        )
+        r_stats = RenderStats(
+            clips_total=len(dets_list),
+            clips_rendered=len(rendered_files),
+            total_duration=round(total_highlight_dur, 2),
+            elapsed_seconds=float(state.get("render_duration_seconds", 0.0) or 0.0),
+        )
+
+    step_durations = {}
+    for step in ("ingest", "scan", "render"):
+        dur = state.get(f"{step}_duration_seconds")
+        if dur is not None:
+            step_durations[step] = float(dur)
+
+    pipeline_stats = PipelineStats(
+        run_id=run_dir.name,
+        started_at=state.get("created_at", ""),
+        finished_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        total_elapsed_seconds=round(pipeline_elapsed, 2),
+        video_count=video_count,
+        total_video_duration=round(total_video_duration, 2),
+        phase1=p1_stats,
+        phase2=p2_stats,
+        render=r_stats,
+        step_durations=step_durations,
+    )
+
+    stats_path = run_dir / "run_stats.json"
+    save_stats_json(pipeline_stats, stats_path)
+    state.set("pipeline_stats", pipeline_stats.to_dict())
+    state.save()
+
     archive_run_artifacts(
         run_dir,
         manifest_path=manifest_path,
         detections_path=detections_path,
         log_file=log_path,
+        stats_path=stats_path,
     )
     update_latest_symlink(output_folder, run_dir)
 
     if console.is_terminal:
+        console.print(format_stats_table(pipeline_stats, title="Dive Clip Pipeline Summary"))
         console.print(
             Panel(
                 f"[bold green]Pipeline complete![/bold green]\n"
                 f"[bold white]Highlights in:[/] [cyan]{highlights_dir}[/]\n"
-                f"[bold white]Run archive:[/]   [cyan]{run_dir}[/]",
+                f"[bold white]Run archive:[/]   [cyan]{run_dir}[/]\n"
+                f"[bold white]Run statistics:[/] [cyan]{stats_path}[/]",
                 border_style="green",
             )
         )
     logger.info("✓ Pipeline complete. Highlights in: %s", highlights_dir)
     logger.info("Run artifacts in: %s", run_dir)
+    logger.info(format_stats_log(pipeline_stats))
     return 0
 
 
