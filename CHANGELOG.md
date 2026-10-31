@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-31
+
 ### Security
 - Secure temporary frame directory in `/dev/shm` using restricted private directories (`0700` permissions) to prevent local symlink attacks and race conditions on multi-user systems.
 - Sanitize `clip_id` against directory traversal in video scan, clip render, and aftermovie generation.
