@@ -24,6 +24,11 @@ scan_parameters:
   coarse_quality_threshold: 4      # Minimum score (1-10) to reject upside-down/dangling frames in coarse pass
   fine_padding_seconds: 2           # Extra context before/after detected action
   quality_threshold: 8              # Min. score (1-10) to include in EDL/Storyline
+  # Temporary frame storage (RAM disk):
+  # When true and /dev/shm is available (Linux), extracted frames are stored in shared
+  # memory (/dev/shm) to maximize I/O throughput and eliminate SSD write wear during
+  # video frame sampling. Set to false to force using standard disk temporary storage.
+  # Automatically falls back to system temp on OSes without /dev/shm (e.g. macOS).
   use_ramdisk: true                 # Use /dev/shm on Linux for fast I/O
 
 cloud_storyline:

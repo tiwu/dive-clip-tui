@@ -1198,3 +1198,31 @@ def test_scan_main_archives_with_archive_flag(
     assert run_dirs[0].name.startswith("run-")
     assert (run_dirs[0] / "detections_refined.json").exists()
     assert (run_dirs[0] / "manifest_raw.json").exists()
+
+
+def test_scan_main_passes_use_ramdisk_to_get_work_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main should pass use_ramdisk from scan_parameters or processing to get_work_dir."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest_path = output_dir / "manifest_raw.json"
+    manifest_path.write_text(json.dumps({"clips": []}), encoding="utf-8")
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"general:\n  output_dir: {output_dir}\nscan_parameters:\n  use_ramdisk: false\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["02_scan_footage.py", "--config", str(config_path), "--output-dir", str(output_dir)],
+    )
+
+    with (
+        patch.object(scan, "get_work_dir", return_value=tmp_path / "work") as mock_get_work,
+        patch.object(scan, "cleanup_work_dir"),
+    ):
+        scan.main()
+        mock_get_work.assert_called_once_with(use_ramdisk=False)

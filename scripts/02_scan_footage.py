@@ -547,8 +547,16 @@ def main() -> None:
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    work_dir = get_work_dir()
-    logger.info("Using work directory: %s", work_dir)
+    scan_params = config.get("scan_parameters", {})
+    processing_cfg = config.get("processing", {})
+    use_ramdisk = bool(
+        scan_params.get(
+            "use_ramdisk",
+            processing_cfg.get("use_ramdisk", True),
+        )
+    )
+    work_dir = get_work_dir(use_ramdisk=use_ramdisk)
+    logger.info("Using work directory: %s (ramdisk=%s)", work_dir, use_ramdisk)
     setup_signal_handlers()
 
     ollama_cfg = config.get("ollama", {})
