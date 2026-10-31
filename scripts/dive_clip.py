@@ -21,7 +21,6 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-import yaml
 from rich.panel import Panel
 from rich.rule import Rule
 
@@ -29,6 +28,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
+from utils.config import ConfigError, load_general_config  # noqa: E402
 from utils.logging_setup import configure_logging, get_console  # noqa: E402
 from utils.run_archive import (  # noqa: E402
     archive_run_artifacts,
@@ -72,16 +72,6 @@ def run(cmd: list[str], description: str) -> int:
         return 130
 
 
-def load_general_config(config_path: str | Path) -> dict:
-    """Return the `general` section of a config file, or {} if unavailable."""
-    path = Path(config_path)
-    if not path.exists():
-        return {}
-    with open(path, encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
-    return config.get("general") or {}
-
-
 def _run_background_render_worker(
     detections_path: Path,
     highlights_dir: Path,
@@ -123,7 +113,11 @@ def resolve_paths(args: argparse.Namespace) -> tuple[Path, Path] | None:
 
     Returns None when neither source supplies the input folder.
     """
-    general = load_general_config(args.config)
+    try:
+        general = load_general_config(args.config)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return None
 
     input_value = args.input or general.get("input_dir")
     if not input_value:
@@ -151,7 +145,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     State is stored in <output>/runs/<run_id>/pipeline_state.json.
     """
     pipeline_start_time = time.perf_counter()
-    general = load_general_config(args.config)
+    try:
+        general = load_general_config(args.config)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return 1
     output_value = args.output or general.get("output_dir") or "./outputs"
     output_folder = Path(output_value)
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -531,11 +529,15 @@ def main(argv: list[str] | None = None) -> None:
     setup_signal_handlers()
     parser = build_parser()
     args = parser.parse_args(argv)
+    configure_logging(debug=getattr(args, "debug", False))
     try:
         sys.exit(args.func(args))
     except KeyboardInterrupt:
         logger.warning("Pipeline interrupted by user.")
         sys.exit(130)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Fixed
+- Cleanly handle configuration errors across the CLI and pipeline scripts, reporting syntax errors with file and line details instead of printing raw Python tracebacks.
+
 ## [0.14.0] - 2026-10-31
 
 ### Added

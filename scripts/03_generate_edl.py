@@ -12,12 +12,11 @@ import json
 import sys
 from pathlib import Path
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pydantic import ValidationError
 
+from utils.config import ConfigError, load_config
 from utils.models import DetectionsRefined
 from utils.timecode_math import Timecode
 
@@ -103,13 +102,11 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     args = parser.parse_args()
 
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"ERROR: Config not found: {config_path}")
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
 
     output_dir = Path(config.get("general", {}).get("output_dir", "./outputs"))
     detections_path = output_dir / "detections_refined.json"

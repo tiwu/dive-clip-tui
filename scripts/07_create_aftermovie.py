@@ -16,9 +16,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from utils.config import ConfigError, load_config
 
 
 def setup_signal_handlers() -> None:
@@ -340,13 +340,11 @@ def main() -> None:
     args = parser.parse_args()
     setup_signal_handlers()
 
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"ERROR: Config not found: {config_path}")
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
 
     general = config.get("general", {})
     output_dir = Path(general.get("output_dir", "./outputs"))

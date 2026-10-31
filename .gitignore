@@ -46,3 +46,7 @@ outputs/*.json
 outputs/*.edl
 outputs/*.csv
 outputs/*.md
+
+# Local agent tools and skills
+.agents/
+.agents

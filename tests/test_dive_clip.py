@@ -351,6 +351,42 @@ def test_resolve_paths_tolerates_missing_config(tmp_path: Path) -> None:
     assert resolve_paths(args) == (Path("/cli/in"), Path("/cli/out"))
 
 
+def test_resolve_paths_handles_malformed_config(tmp_path: Path) -> None:
+    """A malformed config should return None without unhandled exception."""
+    broken_config = tmp_path / "broken.yaml"
+    broken_config.write_text("general:\n  input_dir: /in  output_dir: /out\n")
+    args = argparse.Namespace(input=None, output=None, config=str(broken_config))
+
+    assert resolve_paths(args) is None
+
+
+def test_cmd_scan_handles_malformed_config(tmp_path: Path) -> None:
+    """cmd_scan should exit with code 1 when config is malformed."""
+    broken_config = tmp_path / "broken.yaml"
+    broken_config.write_text("general:\n  input_dir: /in  output_dir: /out\n")
+    args = argparse.Namespace(
+        input=None,
+        output=None,
+        config=str(broken_config),
+        resume=False,
+        reset=False,
+        debug=False,
+        log_file=None,
+    )
+
+    assert cmd_scan(args) == 1
+
+
+def test_main_handles_malformed_config(tmp_path: Path) -> None:
+    """main should exit cleanly with code 1 when config is malformed."""
+    broken_config = tmp_path / "broken.yaml"
+    broken_config.write_text("general:\n  input_dir: /in  output_dir: /out\n")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["scan", "--config", str(broken_config)])
+    assert exc_info.value.code == 1
+
+
 def test_cmd_scan_exits_when_paths_unresolvable(tmp_path: Path) -> None:
     """cmd_scan should bail out with code 2 when no input folder is available."""
     args = argparse.Namespace(
