@@ -132,7 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", required=True, help="Path to footage folder")
     parser.add_argument(
-        "--output", default="outputs/manifest_raw.json", help="Output manifest JSON path"
+        "--output", default="outputs/manifest.json", help="Output manifest JSON path"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(

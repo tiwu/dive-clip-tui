@@ -506,6 +506,12 @@ def main() -> None:
         help="Resume scanning from last saved state, skipping completed clips",
     )
     parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Path to manifest JSON file (default: <output-dir>/manifest.json)",
+    )
+    parser.add_argument(
         "--run-dir",
         type=Path,
         default=None,
@@ -532,14 +538,26 @@ def main() -> None:
         output_dir = args.output_dir
     else:
         output_dir = Path(config.get("general", {}).get("output_dir", "./outputs"))
-    manifest_path = output_dir / "manifest_raw.json"
 
-    if not manifest_path.exists() and args.output_dir is None:
-        # Legacy fallback for manifests written before output_dir was configured.
-        manifest_path = Path(__file__).resolve().parent.parent / "outputs" / "manifest_raw.json"
+    if args.manifest is not None:
+        manifest_path = args.manifest
+    else:
+        manifest_path = output_dir / "manifest.json"
+        if not manifest_path.exists():
+            manifest_path = output_dir / "manifest_raw.json"
+
+        if not manifest_path.exists() and args.output_dir is None:
+            # Legacy fallback for manifests written before output_dir was configured.
+            alt = Path(__file__).resolve().parent.parent / "outputs" / "manifest.json"
+            if alt.exists():
+                manifest_path = alt
+            else:
+                manifest_path = (
+                    Path(__file__).resolve().parent.parent / "outputs" / "manifest_raw.json"
+                )
 
     if not manifest_path.exists():
-        logger.error("manifest_raw.json not found at %s", manifest_path)
+        logger.error("manifest.json not found at %s", manifest_path)
         logger.error("Run 00_ingest_media.py --input <folder> to generate it,")
         logger.error("or 01_extract_manifest.py from inside DaVinci Resolve.")
         sys.exit(1)

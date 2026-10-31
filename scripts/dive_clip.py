@@ -27,11 +27,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
-from utils.logging_setup import configure_logging, default_log_path, get_console  # noqa: E402
+from utils.logging_setup import configure_logging, get_console  # noqa: E402
 from utils.run_archive import (  # noqa: E402
-    archive_file,
     archive_run_artifacts,
+    find_latest_run_dir,
     get_run_dir,
+    resolve_run_dir,
+    update_latest_symlink,
 )
 from utils.version import get_version  # noqa: E402
 
@@ -133,20 +135,73 @@ def cmd_scan(args: argparse.Namespace) -> int:
     """Execute the full scan pipeline: ingest → scan → render.
 
     Supports checkpointing: if --resume is set, completed steps are skipped.
-    State is stored in <output>/.pipeline_state.json.
+    State is stored in <output>/runs/<run_id>/pipeline_state.json.
     """
-    resolved = resolve_paths(args)
-    if resolved is None:
-        return 2
-    input_folder, output_folder = resolved
+    general = load_general_config(args.config)
+    output_value = args.output or general.get("output_dir") or "./outputs"
+    output_folder = Path(output_value)
+    output_folder.mkdir(parents=True, exist_ok=True)
+
     config = args.config
     debug_mode = args.debug
 
+    resume_target = getattr(args, "resume", False)
+    is_resuming = resume_target is not False
+
+    if is_resuming:
+        if isinstance(resume_target, str):
+            try:
+                run_dir = resolve_run_dir(output_folder, resume_target)
+            except FileNotFoundError as exc:
+                logger.error("%s", exc)
+                return 1
+        else:
+            latest_dir = find_latest_run_dir(output_folder)
+            if latest_dir is not None:
+                run_dir = latest_dir
+            else:
+                logger.info(
+                    "No previous run found to resume in %s; starting a new run.", output_folder
+                )
+                run_dir = get_run_dir(output_folder)
+    else:
+        run_dir = get_run_dir(output_folder)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "pipeline_state.json"
+    state = PipelineState(state_path)
+
+    if args.reset:
+        state.reset()
+        logger.info("Pipeline state reset.")
+
+    # Resolve input folder (from CLI args, prior run metadata, or config)
+    run_meta = state.get_run_metadata()
+    input_value = (
+        args.input
+        or (run_meta.get("input_dir") if is_resuming else None)
+        or general.get("input_dir")
+    )
+    if not input_value:
+        logger.error(
+            "No input folder given. Pass --input or set general.input_dir in %s.",
+            args.config,
+        )
+        return 2
+
+    input_folder = Path(input_value)
     if not input_folder.exists():
         logger.error("Input folder does not exist: %s", input_folder)
         return 1
 
-    output_folder.mkdir(parents=True, exist_ok=True)
+    # Record run metadata in state
+    state.init_run_metadata(
+        run_id=run_dir.name,
+        input_dir=input_folder,
+        output_dir=output_folder,
+        config_path=config,
+        cli_args=sys.argv[1:],
+    )
 
     version = get_version()
     console = get_console()
@@ -156,29 +211,27 @@ def cmd_scan(args: argparse.Namespace) -> int:
                 f"[bold white]Version:[/] [green]v{version}[/]\n"
                 f"[bold white]Input:[/]   [yellow]{input_folder}[/]\n"
                 f"[bold white]Output:[/]  [yellow]{output_folder}[/]\n"
+                f"[bold white]Run:[/]     [cyan]{run_dir}[/]\n"
                 f"[bold white]Config:[/]  [yellow]{config}[/]",
                 title=f"[bold green]Dive Clip Curation Pipeline v{version}[/bold green]",
                 border_style="green",
             )
         )
 
-    log_path = args.log_file or default_log_path(output_folder)
-    run_dir = get_run_dir(output_folder) if args.log_file else log_path.parent
-    run_dir.mkdir(parents=True, exist_ok=True)
-
+    log_path = args.log_file or (run_dir / "run.log")
     configure_logging(debug=debug_mode, log_file=log_path)
+    update_latest_symlink(output_folder, run_dir)
     logger.info("Dive Clip Curation Pipeline v%s", version)
     logger.info("Logging to %s", log_path)
 
-    state_path = output_folder / ".pipeline_state.json"
-    state = PipelineState(state_path)
+    manifest_path = run_dir / "manifest.json"
+    legacy_manifest = run_dir / "manifest_raw.json"
+    if not manifest_path.exists() and legacy_manifest.exists():
+        manifest_path = legacy_manifest
 
-    if args.reset:
-        state.reset()
-        logger.info("Pipeline state reset.")
-
-    manifest_path = output_folder / "manifest_raw.json"
-    detections_path = output_folder / "detections_refined.json"
+    detections_path = run_dir / "detections_refined.json"
+    highlights_dir = run_dir / "highlights"
+    highlights_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Ingest
     ingest_cmd = [
@@ -207,11 +260,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             logger.error("Ingest failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("ingest")
-        archive_file(manifest_path, run_dir, "manifest_raw.json")
     else:
         logger.info("Step 1/3: Ingest media (manifest) — SKIPPED (already done)")
-        if not (run_dir / "manifest_raw.json").exists():
-            archive_file(manifest_path, run_dir, "manifest_raw.json")
 
     # Step 2: Scan
     scan_cmd = [
@@ -219,8 +269,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
         str(SCRIPTS_DIR / "02_scan_footage.py"),
         "--config",
         config,
+        "--manifest",
+        str(manifest_path),
         "--output-dir",
-        str(output_folder),
+        str(run_dir),
         "--run-dir",
         str(run_dir),
         "--state-path",
@@ -230,12 +282,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     ]
     if debug_mode:
         scan_cmd.append("--debug")
-    if getattr(args, "resume", False):
+    if is_resuming:
         scan_cmd.append("--resume")
 
     if not state.is_step_done("scan") or not detections_path.exists():
         state.mark_step_started("scan")
-        highlights_dir = output_folder / "highlights"
         stop_render_event = threading.Event()
         render_thread = threading.Thread(
             target=_run_background_render_worker,
@@ -259,11 +310,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
             logger.error("Scan failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("scan")
-        archive_file(detections_path, run_dir, "detections_refined.json")
     else:
         logger.info("Step 2/3: Scan footage (AI detections) — SKIPPED (already done)")
-        if not (run_dir / "detections_refined.json").exists():
-            archive_file(detections_path, run_dir, "detections_refined.json")
 
     # Step 3: Render
     render_cmd = [
@@ -274,7 +322,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         "--input",
         str(detections_path),
         "--output",
-        str(output_folder),
+        str(highlights_dir),
         "--state-path",
         str(state_path),
         "--log-file",
@@ -305,18 +353,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
         detections_path=detections_path,
         log_file=log_path,
     )
+    update_latest_symlink(output_folder, run_dir)
 
     if console.is_terminal:
         console.print(
             Panel(
                 f"[bold green]Pipeline complete![/bold green]\n"
-                f"[bold white]Highlights in:[/] [cyan]{output_folder}[/]\n"
+                f"[bold white]Highlights in:[/] [cyan]{highlights_dir}[/]\n"
                 f"[bold white]Run archive:[/]   [cyan]{run_dir}[/]",
                 border_style="green",
             )
         )
-    logger.info("✓ Pipeline complete. Highlights in: %s", output_folder)
-    logger.info("Run artifacts archived in: %s", run_dir)
+    logger.info("✓ Pipeline complete. Highlights in: %s", highlights_dir)
+    logger.info("Run artifacts in: %s", run_dir)
     return 0
 
 
@@ -345,8 +394,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--debug", action="store_true", help="Enable debug logging")
     scan_p.add_argument(
         "--resume",
-        action="store_true",
-        help="Resume from last completed checkpoint",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="RUN_ID_OR_PATH",
+        help="Resume execution (defaults to latest run if no run ID or path specified)",
     )
     scan_p.add_argument(
         "--reset",

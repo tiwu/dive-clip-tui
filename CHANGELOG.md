@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add self-contained run snapshots in `<output>/runs/<run_id>/` storing `pipeline_state.json`, `manifest.json`, `detections_refined.json`, `run.log`, and `highlights/` clips with an `<output>/latest` symlink.
+- Support resuming previous runs via `dive-clip scan --resume [run_id_or_path]`, automatically continuing the latest run or targeting a specific run folder while restoring run parameters.
+- Rename manifest artifact from `manifest_raw.json` to `manifest.json` with backward-compatible fallback for legacy manifests.
+
 ## [0.12.0] - 2026-10-31
 
 ### Changed

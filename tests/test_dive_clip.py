@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from scripts.dive_clip import build_parser, cmd_scan, main, resolve_paths, run
+from utils.run_archive import find_latest_run_dir
 
 
 def test_run_success() -> None:
@@ -82,19 +83,20 @@ def test_cmd_scan_skips_completed_steps(tmp_path: Path) -> None:
     output_folder = tmp_path / "highlights"
     output_folder.mkdir()
 
-    # Pre-create state with all steps done
-    state_path = output_folder / ".pipeline_state.json"
+    # Pre-create run directory with state and artifacts marked done
+    run_dir = output_folder / "runs" / "run-20261031-100000"
+    run_dir.mkdir(parents=True)
+    state_path = run_dir / "pipeline_state.json"
     state_path.write_text('{"ingest_done": true, "scan_done": true, "render_done": true}')
 
-    # Pre-create manifest and detections so the "already done" check passes
-    (output_folder / "manifest_raw.json").write_text("{}")
-    (output_folder / "detections_refined.json").write_text("{}")
+    (run_dir / "manifest.json").write_text("{}")
+    (run_dir / "detections_refined.json").write_text("{}")
 
     args = argparse.Namespace(
         input=str(input_folder),
         output=str(output_folder),
         config="config.yaml",
-        resume=False,
+        resume=True,
         reset=False,
         debug=False,
         log_file=None,
@@ -133,8 +135,10 @@ def test_cmd_scan_runs_all_steps(tmp_path: Path) -> None:
     # Should have called subprocess 3 times (ingest, scan, render)
     assert mock_result.returncode == 0
 
-    # State file should be created with all steps done
-    state_path = output_folder / ".pipeline_state.json"
+    # State file should be created in the run directory with all steps done
+    latest = find_latest_run_dir(output_folder)
+    assert latest is not None
+    state_path = latest / "pipeline_state.json"
     assert state_path.exists()
 
 
@@ -171,15 +175,17 @@ def test_cmd_scan_reset_state(tmp_path: Path) -> None:
     output_folder = tmp_path / "highlights"
     output_folder.mkdir()
 
-    # Pre-create state with all steps done
-    state_path = output_folder / ".pipeline_state.json"
+    # Pre-create run directory with state with all steps done
+    run_dir = output_folder / "runs" / "run-20261031-100000"
+    run_dir.mkdir(parents=True)
+    state_path = run_dir / "pipeline_state.json"
     state_path.write_text('{"ingest_done": true, "scan_done": true, "render_done": true}')
 
     args = argparse.Namespace(
         input=str(input_folder),
         output=str(output_folder),
         config="config.yaml",
-        resume=False,
+        resume=True,
         reset=True,
         debug=False,
         log_file=None,
@@ -264,7 +270,9 @@ def test_cmd_scan_threads_state_path_to_workers(tmp_path: Path) -> None:
     with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
         assert cmd_scan(args) == 0
 
-    state_path = str(Path(args.output) / ".pipeline_state.json")
+    latest = find_latest_run_dir(Path(args.output))
+    assert latest is not None
+    state_path = str(latest / "pipeline_state.json")
     cmds = [call.args[0] for call in mock.call_args_list]
     assert len(cmds) == 3
 
@@ -282,7 +290,9 @@ def test_cmd_scan_writes_step_timestamps(tmp_path: Path) -> None:
     with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)):
         assert cmd_scan(args) == 0
 
-    state = json.loads((Path(args.output) / ".pipeline_state.json").read_text())
+    latest = find_latest_run_dir(Path(args.output))
+    assert latest is not None
+    state = json.loads((latest / "pipeline_state.json").read_text())
     assert "updated_at" in state
     for step in ("ingest", "scan", "render"):
         assert state[f"{step}_done"] is True
@@ -356,15 +366,17 @@ def test_cmd_scan_exits_when_paths_unresolvable(tmp_path: Path) -> None:
 
 
 def test_cmd_scan_passes_output_dir_to_scan_step(tmp_path: Path) -> None:
-    """The scan step must use the resolved output folder, not the config one."""
+    """The scan step must use the run folder as output dir."""
     args = _scan_args(tmp_path, debug=False)
 
     with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock:
         assert cmd_scan(args) == 0
 
+    latest = find_latest_run_dir(Path(args.output))
+    assert latest is not None
     scan_cmd = mock.call_args_list[1].args[0]
     assert "--output-dir" in scan_cmd
-    assert scan_cmd[scan_cmd.index("--output-dir") + 1] == args.output
+    assert scan_cmd[scan_cmd.index("--output-dir") + 1] == str(latest)
 
 
 def test_cmd_scan_writes_timestamped_logfile(tmp_path: Path) -> None:
@@ -481,20 +493,21 @@ def test_cmd_scan_prints_version(tmp_path: Path) -> None:
 
 
 def test_cmd_scan_archives_run_artifacts(tmp_path: Path) -> None:
-    """cmd_scan should archive manifest_raw.json and detections_refined.json under runs/run-<timestamp>/."""
+    """cmd_scan should write manifest.json and detections_refined.json under runs/run-<timestamp>/."""
     input_folder = tmp_path / "footage"
     input_folder.mkdir()
     output_folder = tmp_path / "highlights"
     output_folder.mkdir()
 
-    manifest_path = output_folder / "manifest_raw.json"
-    detections_path = output_folder / "detections_refined.json"
-
     def side_effect(cmd, *a, **kw):
         if "00_ingest_media.py" in cmd[1]:
-            manifest_path.write_text('{"clips": []}', encoding="utf-8")
+            out_idx = cmd.index("--output") + 1
+            Path(cmd[out_idx]).write_text('{"clips": []}', encoding="utf-8")
         elif "02_scan_footage.py" in cmd[1]:
-            detections_path.write_text('{"detections": []}', encoding="utf-8")
+            run_dir_idx = cmd.index("--run-dir") + 1
+            (Path(cmd[run_dir_idx]) / "detections_refined.json").write_text(
+                '{"detections": []}', encoding="utf-8"
+            )
         return MagicMock(returncode=0)
 
     args = argparse.Namespace(
@@ -517,5 +530,5 @@ def test_cmd_scan_archives_run_artifacts(tmp_path: Path) -> None:
     run_folder = run_folders[0]
     assert run_folder.name.startswith("run-")
     assert (run_folder / "run.log").exists()
-    assert (run_folder / "manifest_raw.json").exists()
+    assert (run_folder / "manifest.json").exists()
     assert (run_folder / "detections_refined.json").exists()
