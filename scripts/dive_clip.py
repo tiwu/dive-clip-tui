@@ -207,11 +207,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
             logger.error("Ingest failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("ingest")
-        if manifest_path.exists():
-            archive_file(manifest_path, run_dir, "manifest_raw.json")
+        archive_file(manifest_path, run_dir, "manifest_raw.json")
     else:
         logger.info("Step 1/3: Ingest media (manifest) — SKIPPED (already done)")
-        if manifest_path.exists() and not (run_dir / "manifest_raw.json").exists():
+        if not (run_dir / "manifest_raw.json").exists():
             archive_file(manifest_path, run_dir, "manifest_raw.json")
 
     # Step 2: Scan
@@ -260,11 +259,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
             logger.error("Scan failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("scan")
-        if detections_path.exists():
-            archive_file(detections_path, run_dir, "detections_refined.json")
+        archive_file(detections_path, run_dir, "detections_refined.json")
     else:
         logger.info("Step 2/3: Scan footage (AI detections) — SKIPPED (already done)")
-        if detections_path.exists() and not (run_dir / "detections_refined.json").exists():
+        if not (run_dir / "detections_refined.json").exists():
             archive_file(detections_path, run_dir, "detections_refined.json")
 
     # Step 3: Render

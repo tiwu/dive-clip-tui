@@ -1,7 +1,7 @@
 # Architecture Plan: [Issue #20] Archive run artifacts (manifest, detections, log) under runs directory
 
 - **Issue**: [#20](https://github.com/tiwu/dive-clip-tui/issues/20)
-- **Status**: In Progress
+- **Status**: Review Ready
 - **Author**: Autonomous Agent / Contributor
 - **Date**: 2026-10-31
 - **Target Branch**: `feature/issue-20-archive-run-artifacts`

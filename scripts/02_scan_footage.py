@@ -657,12 +657,15 @@ def main() -> None:
             save_detections_atomic(output_path, refined)
             logger.info("Saved %d detections before exit.", len(refined.detections))
             if target_run_dir is not None:
-                archive_run_artifacts(
-                    target_run_dir,
-                    manifest_path=manifest_path,
-                    detections_path=output_path,
-                    log_file=args.log_file,
-                )
+                try:
+                    archive_run_artifacts(
+                        target_run_dir,
+                        manifest_path=manifest_path,
+                        detections_path=output_path,
+                        log_file=args.log_file,
+                    )
+                except Exception as exc:
+                    logger.warning("Could not archive partial run artifacts on interrupt: %s", exc)
         if state is not None:
             state.set_activity("scan: interrupted by user")
         sys.exit(130)

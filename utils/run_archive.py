@@ -83,11 +83,12 @@ def archive_run_artifacts(
         src_log = Path(log_file)
         dest_log = target_dir / "run.log"
         # Only copy if source exists and is not already the target file
-        if src_log.resolve() != dest_log.resolve():
-            dest = archive_file(src_log, target_dir, "run.log")
-            if dest:
-                archived["log"] = dest
-        elif src_log.exists():
-            archived["log"] = src_log
+        if src_log.exists():
+            if src_log.resolve() != dest_log.resolve():
+                dest = archive_file(src_log, target_dir, "run.log")
+                if dest:
+                    archived["log"] = dest
+            else:
+                archived["log"] = src_log
 
     return archived
