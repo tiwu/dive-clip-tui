@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-31
+
 ### Added
 - Split VLM screening into coarse gatekeeping and fine quality evaluation:
   Coarse pass instructs Qwen2.5-VL to reject upside-down, tumbling, and dangling
