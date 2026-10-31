@@ -30,6 +30,64 @@ def get_run_dir(output_dir: Path | str, run_id: str | None = None) -> Path:
     return Path(output_dir) / "runs" / resolved_id
 
 
+def find_latest_run_dir(output_dir: Path | str) -> Path | None:
+    """Return the most recent run directory under `<output_dir>/runs/`, or None."""
+    runs_dir = Path(output_dir) / "runs"
+    if not runs_dir.exists() or not runs_dir.is_dir():
+        return None
+    candidates = [p for p in runs_dir.iterdir() if p.is_dir() and p.name.startswith("run-")]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.name)
+    return candidates[-1]
+
+
+def resolve_run_dir(output_dir: Path | str, target: str | Path | None = None) -> Path:
+    """Resolve an existing run directory by run ID or explicit path.
+
+    If target is None, returns a new timestamped run directory.
+    If target is specified but not found, raises FileNotFoundError.
+    """
+    if target is None:
+        return get_run_dir(output_dir)
+
+    direct_path = Path(target)
+    if direct_path.is_dir():
+        return direct_path
+
+    relative_run = Path(output_dir) / "runs" / target
+    if relative_run.is_dir():
+        return relative_run
+
+    raise FileNotFoundError(f"Run directory not found: {target}")
+
+
+def update_latest_symlink(output_dir: Path | str, run_dir: Path | str) -> Path:
+    """Point `<output_dir>/latest` symlink to `run_dir` using a relative target."""
+    out_path = Path(output_dir)
+    target_path = Path(run_dir).resolve()
+    latest_link = out_path / "latest"
+
+    try:
+        rel_target = target_path.relative_to(out_path.resolve())
+    except ValueError:
+        rel_target = target_path
+
+    if latest_link.is_symlink() or latest_link.exists():
+        try:
+            latest_link.unlink()
+        except OSError as exc:
+            logger.debug("Could not remove existing symlink %s: %s", latest_link, exc)
+
+    try:
+        latest_link.symlink_to(rel_target)
+        logger.debug("Updated latest symlink: %s -> %s", latest_link, rel_target)
+    except OSError as exc:
+        logger.warning("Could not create latest symlink at %s: %s", latest_link, exc)
+
+    return latest_link
+
+
 def default_run_log_path(output_dir: Path | str, run_id: str | None = None) -> Path:
     """Return the standard log path inside the run directory."""
     return get_run_dir(output_dir, run_id=run_id) / "run.log"
@@ -50,6 +108,8 @@ def archive_file(
     dest_dir = Path(destination_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_file = dest_dir / (target_name or src.name)
+    if src.resolve() == dest_file.resolve():
+        return dest_file
     shutil.copy2(src, dest_file)
     logger.debug("Archived %s -> %s", src, dest_file)
     return dest_file
@@ -70,7 +130,8 @@ def archive_run_artifacts(
     archived: dict[str, Path] = {}
 
     if manifest_path is not None:
-        dest = archive_file(manifest_path, target_dir, "manifest_raw.json")
+        src_manifest = Path(manifest_path)
+        dest = archive_file(src_manifest, target_dir, src_manifest.name)
         if dest:
             archived["manifest"] = dest
 

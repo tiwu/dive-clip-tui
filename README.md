@@ -139,11 +139,16 @@ folder.
 The pipeline writes a JSON manifest, refined detections, and rendered MP4 clips
 to the configured output location.
 
-### Pipeline state file
+### Pipeline state file & run archives
 
-`dive-clip scan` records progress in `<output>/.pipeline_state.json` and saves it
-after every clip and scan window, so an interrupted run leaves an up-to-date
-checkpoint. The file also records timing:
+`dive-clip scan` organizes each execution into a self-contained snapshot under
+`<output>/runs/<run_id>/` (with an `<output>/latest` symlink pointing to the most
+recent run). Each run directory contains `pipeline_state.json`, `manifest.json`,
+`detections_refined.json`, `run.log`, and the extracted `highlights/` clips.
+
+Progress is recorded in `pipeline_state.json` and saved after every clip and scan window,
+so an interrupted run leaves an up-to-date checkpoint. The file also preserves full run
+context (`run_id`, `input_dir`, `output_dir`, `config_path`) and timing:
 
 | Field | Meaning |
 | --- | --- |
@@ -153,6 +158,10 @@ checkpoint. The file also records timing:
 | `<step>_started_at` / `<step>_finished_at` | Step start and end timestamps (UTC, ISO 8601) |
 | `<step>_duration_seconds` | Wall-clock duration of the completed step |
 | `<step>_progress` | Per-step list of completed clip names |
+
+To resume an interrupted or completed run:
+- `dive-clip scan --output ./outputs --resume`: Resumes the most recent run automatically, restoring footage path and settings.
+- `dive-clip scan --output ./outputs --resume run-20261031-120000`: Resumes or inspects a specific run folder.
 
 Saves merge with the existing file on disk, so the orchestrator and the scan and
 render workers can share one state path without overwriting each other's work.
@@ -226,14 +235,14 @@ outputs/                   # Generated manifests, detections, and exports
 ## Pipeline notes
 
 - Folder ingestion uses `ffprobe` to record video duration, frame rate,
-  resolution, and codec in `manifest_raw.json`.
+  resolution, and codec in `manifest.json` (with backward compatibility for `manifest_raw.json`).
 - The scanner uses Ollama's JSON response mode and writes
   `detections_refined.json`. It prints request counts, failures, elapsed time,
   and available Ollama token/timing metrics after the scan. Use `--debug` for
   per-frame verdicts, per-request timing, and token counts during the run.
-- `dive-clip scan` stores progress in `<output>/.pipeline_state.json`, updated
+- `dive-clip scan` stores progress and full run context in `pipeline_state.json` inside each run directory, updated
   after every clip and scan window with `updated_at`, `activity`, and per-step
-  timing; use `--resume` to skip completed steps or `--reset` to clear that state.
+  timing; use `--resume [run_id_or_path]` to resume previous runs or `--reset` to clear that state.
 - Frame sampling creates isolated private temporary directories under `/dev/shm`
   when available and enabled via `scan_parameters.use_ramdisk: true` (default).
   Writing temporary JPEG frames to shared memory maximizes extraction and reading

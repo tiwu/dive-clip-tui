@@ -59,6 +59,41 @@ class PipelineState:
         with open(self.state_path, "w") as f:
             json.dump(self.data, f, indent=2, ensure_ascii=False)
 
+    def init_run_metadata(
+        self,
+        run_id: str | None = None,
+        input_dir: str | Path | None = None,
+        output_dir: str | Path | None = None,
+        config_path: str | Path | None = None,
+        cli_args: list[str] | None = None,
+    ) -> None:
+        """Initialize or update high-level run metadata."""
+        if "created_at" not in self.data:
+            self.data["created_at"] = _utc_now()
+        if run_id:
+            self.data["run_id"] = str(run_id)
+        if input_dir:
+            self.data["input_dir"] = str(input_dir)
+        if output_dir:
+            self.data["output_dir"] = str(output_dir)
+        if config_path:
+            self.data["config_path"] = str(config_path)
+        if cli_args:
+            self.data["cli_args"] = [str(a) for a in cli_args]
+        self.save()
+
+    def get_run_metadata(self) -> dict[str, Any]:
+        """Return run context metadata stored in state."""
+        return {
+            "run_id": self.data.get("run_id"),
+            "input_dir": self.data.get("input_dir"),
+            "output_dir": self.data.get("output_dir"),
+            "config_path": self.data.get("config_path"),
+            "cli_args": self.data.get("cli_args"),
+            "created_at": self.data.get("created_at"),
+            "updated_at": self.data.get("updated_at"),
+        }
+
     def get(self, key: str, default: Any = None) -> Any:
         return self.data.get(key, default)
 

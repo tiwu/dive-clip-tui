@@ -88,7 +88,7 @@ uv sync
 uv run scripts/dive_clip.py scan --input ./footage --output ./highlights --config config.yaml
 
 # Or use individual scripts
-uv run scripts/00_ingest_media.py --input ./footage --output outputs/manifest_raw.json
+uv run scripts/00_ingest_media.py --input ./footage --output outputs/manifest.json
 uv run scripts/02_scan_footage.py --config config.yaml
 uv run scripts/03_generate_edl.py --config config.yaml
 
