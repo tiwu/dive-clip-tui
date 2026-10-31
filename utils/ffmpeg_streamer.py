@@ -7,6 +7,7 @@ on systems without shared memory (e.g. macOS).
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -14,11 +15,10 @@ from pathlib import Path
 
 
 def get_work_dir() -> Path:
-    """Return /dev/shm/dive_worker_tmp if available, else a temp dir."""
-    shm = Path("/dev/shm/dive_worker_tmp")
-    if shm.exists() or _try_create(shm):
-        return shm
-    return Path(tempfile.mkdtemp(prefix="dive_worker_"))
+    """Return a private temp directory in /dev/shm if available, else standard temp."""
+    shm_base = Path("/dev/shm")
+    target_dir = shm_base if shm_base.is_dir() and os.access(shm_base, os.W_OK) else None
+    return Path(tempfile.mkdtemp(prefix="dive_worker_", dir=target_dir))
 
 
 def _try_create(path: Path) -> bool:
@@ -86,24 +86,25 @@ def extract_frames(
     for frame_file in sorted(output_dir.glob("frame_*.jpg")):
         try:
             frame_num = int(frame_file.stem.split("_")[1])
-        except (ValueError, IndexError):
+        except ValueError, IndexError:
             continue
         timestamp = (frame_num - 1) / fps if fps > 0 else 0.0
         if start_seconds is not None:
             timestamp += start_seconds
-        frames.append(
-            {
-                "frame_path": str(frame_file),
-                "timestamp": timestamp,
-                "frame_number": frame_num,
-            }
-        )
+        frames.append({
+            "frame_path": str(frame_file),
+            "timestamp": timestamp,
+            "frame_number": frame_num,
+        })
 
     return frames
 
 
 def cleanup_work_dir(path: str | Path) -> None:
-    """Clean up temporary frame files (skips the shared /dev/shm dir)."""
+    """Clean up temporary frame files."""
     path = Path(path)
-    if path.exists() and path != Path("/dev/shm/dive_worker_tmp"):
-        shutil.rmtree(path, ignore_errors=True)
+    if not path.exists():
+        return
+    if path in (Path("/dev/shm"), Path("/dev/shm/dive_worker_tmp"), Path("/"), Path("/tmp")):
+        return
+    shutil.rmtree(path, ignore_errors=True)

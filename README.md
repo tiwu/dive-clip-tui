@@ -89,6 +89,8 @@ The command supports checkpointing and can resume completed steps:
 uv run dive-clip scan --input ./footage --output ./highlights --resume
 ```
 
+Interrupting a scan with `Ctrl-C` (or `SIGINT`/`SIGTERM`) cleanly terminates processing: completed clip detections are preserved in `detections_refined.json`, checkpoint progress is flushed, and temporary working frames are deleted.
+
 To start over and clear the saved pipeline state:
 
 ```bash
@@ -232,8 +234,8 @@ outputs/                   # Generated manifests, detections, and exports
 - `dive-clip scan` stores progress in `<output>/.pipeline_state.json`, updated
   after every clip and scan window with `updated_at`, `activity`, and per-step
   timing; use `--resume` to skip completed steps or `--reset` to clear that state.
-- Frame sampling uses `/dev/shm` when available and falls back to a temporary
-  directory on systems such as macOS.
+- Frame sampling creates isolated private temporary directories under `/dev/shm`
+  when available and falls back to system temporary storage on systems such as macOS.
 - The optional Resolve marker export supports frame-rate-aware timecodes,
   including 29.97 drop-frame and non-drop-frame formats.
 

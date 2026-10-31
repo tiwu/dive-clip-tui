@@ -947,6 +947,75 @@ def test_scan_main_incremental_and_resume(tmp_path: Path) -> None:
     assert len(final_data["detections"]) == 2
 
 
+def test_scan_main_keyboard_interrupt_handles_gracefully(tmp_path: Path) -> None:
+    """main should catch KeyboardInterrupt, save existing detections, clean up work_dir, and exit with code 130."""
+    from utils.models import RefinedDetection
+
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = output_dir / "manifest_raw.json"
+    manifest_data = {
+        "clips": [
+            {"file_name": "clip1.mp4", "file_path": str(tmp_path / "clip1.mp4"), "fps": 25.0},
+            {"file_name": "clip2.mp4", "file_path": str(tmp_path / "clip2.mp4"), "fps": 25.0},
+        ]
+    }
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+    (tmp_path / "clip1.mp4").touch()
+    (tmp_path / "clip2.mp4").touch()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"general:\n  output_dir: {output_dir}\n", encoding="utf-8")
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="clip1.mp4",
+        file_path=str(tmp_path / "clip1.mp4"),
+        start_time=0.0,
+        end_time=2.0,
+        subject="turtle",
+        confidence=0.9,
+        quality_score=8,
+        description="turtle",
+    )
+
+    def mock_process_clip(clip, *args, **kwargs):
+        if clip["file_name"] == "clip1.mp4":
+            return [det1]
+        raise KeyboardInterrupt
+
+    cleaned_dirs = []
+
+    def mock_cleanup(d):
+        cleaned_dirs.append(Path(d))
+
+    with (
+        patch.object(scan, "process_clip", side_effect=mock_process_clip),
+        patch.object(scan, "cleanup_work_dir", side_effect=mock_cleanup),
+        patch(
+            "sys.argv",
+            [
+                "02_scan_footage.py",
+                "--config",
+                str(config_path),
+                "--output-dir",
+                str(output_dir),
+            ],
+        ),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            scan.main()
+        assert exc_info.value.code == 130
+
+    # Ensure detections from clip1 were saved before exit
+    saved_data = json.loads((output_dir / "detections_refined.json").read_text(encoding="utf-8"))
+    assert len(saved_data["detections"]) == 1
+    assert saved_data["detections"][0]["subject"] == "turtle"
+    # Ensure cleanup_work_dir was called
+    assert len(cleaned_dirs) > 0
+
+
 def test_coarse_scan_rejects_upside_down_or_dangling_by_quality_threshold(tmp_path: Path) -> None:
     """Pass 1 coarse scan should reject detected frames when quality_score is below coarse_quality_threshold."""
     video = tmp_path / "inverted_video.mp4"

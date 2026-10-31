@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Security
+- Secure temporary frame directory in `/dev/shm` using restricted private directories (`0700` permissions) to prevent local symlink attacks and race conditions on multi-user systems.
+- Sanitize `clip_id` against directory traversal in video scan, clip render, and aftermovie generation.
+- Enforce strict escaping of backslashes and single quotes for FFmpeg concat demuxer lists and reject path names with newline characters.
+- Sanitize exported CSV marker cells to neutralize spreadsheet formula injection vulnerabilities (`=`, `+`, `-`, `@`).
+
+### Fixed
+- Add signal and interrupt handlers (`SIGINT`, `SIGTERM`, `KeyboardInterrupt`) across all pipeline scripts (`dive-clip`, `scan_footage`, `render_clips`, `create_aftermovie`, `ingest_media`) to ensure clean shutdown, progress persistence, and temporary file cleanup without terminal tracebacks.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added
