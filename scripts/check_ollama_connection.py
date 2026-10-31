@@ -13,17 +13,11 @@ import time
 from pathlib import Path
 
 import requests
-import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from utils.config import ConfigError, load_config
 from utils.ollama_client import resolve_host
-
-
-def load_config(config_path: str = "config.yaml") -> dict:
-    """Load configuration from YAML file."""
-    with open(config_path) as f:
-        return yaml.safe_load(f)
 
 
 def check_ollama_connection(host: str, model: str, timeout: int = 30) -> bool:
@@ -101,11 +95,8 @@ def main() -> int:
     """Main entry point."""
     try:
         config = load_config()
-    except FileNotFoundError:
-        print("Error: config.yaml not found in current directory")
-        return 1
-    except yaml.YAMLError as exc:
-        print(f"Error: Failed to parse config.yaml: {exc}")
+    except ConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     ollama_config = config.get("ollama", {})

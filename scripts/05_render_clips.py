@@ -18,11 +18,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.checkpoint import PipelineState
+from utils.config import ConfigError, load_config
 from utils.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -242,13 +241,11 @@ def main() -> None:
     configure_logging(debug=args.debug, log_file=args.log_file)
     setup_signal_handlers()
 
-    config_path = Path(args.config)
-    if not config_path.exists():
-        logger.error("Config not found: %s", config_path)
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:
+        logger.error("%s", exc)
         sys.exit(1)
-
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
 
     general = config.get("general", {})
     output_dir = Path(general.get("output_dir", "./outputs"))
