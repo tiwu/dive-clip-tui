@@ -235,7 +235,11 @@ outputs/                   # Generated manifests, detections, and exports
   after every clip and scan window with `updated_at`, `activity`, and per-step
   timing; use `--resume` to skip completed steps or `--reset` to clear that state.
 - Frame sampling creates isolated private temporary directories under `/dev/shm`
-  when available and falls back to system temporary storage on systems such as macOS.
+  when available and enabled via `scan_parameters.use_ramdisk: true` (default).
+  Writing temporary JPEG frames to shared memory maximizes extraction and reading
+  throughput while eliminating heavy SSD write cycles when processing large batches.
+  The pipeline automatically falls back to standard temporary storage on systems without
+  `/dev/shm` (e.g. macOS) or when `use_ramdisk` is set to `false`.
 - The optional Resolve marker export supports frame-rate-aware timecodes,
   including 29.97 drop-frame and non-drop-frame formats.
 

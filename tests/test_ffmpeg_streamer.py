@@ -6,8 +6,6 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from utils.ffmpeg_streamer import _try_create, cleanup_work_dir, extract_frames, get_work_dir
 
 
@@ -15,6 +13,54 @@ def test_get_work_dir_returns_path() -> None:
     """get_work_dir should return a Path object."""
     result = get_work_dir()
     assert isinstance(result, Path)
+
+
+def test_get_work_dir_uses_shm_when_enabled_and_available(tmp_path: Path) -> None:
+    """get_work_dir should use /dev/shm when use_ramdisk=True and /dev/shm is available."""
+    shm_fake = tmp_path / "dev_shm"
+    shm_fake.mkdir()
+
+    with (
+        patch("utils.ffmpeg_streamer.Path") as mock_path,
+        patch("tempfile.mkdtemp", return_value=str(shm_fake / "dive_worker_123")) as mock_mkdtemp,
+        patch("os.access", return_value=True),
+    ):
+        mock_shm = MagicMock()
+        mock_shm.is_dir.return_value = True
+        mock_path.side_effect = lambda p: mock_shm if p == "/dev/shm" else Path(p)
+
+        res = get_work_dir(use_ramdisk=True)
+        assert res == Path(shm_fake / "dive_worker_123")
+        mock_mkdtemp.assert_called_once_with(prefix="dive_worker_", dir=mock_shm)
+
+
+def test_get_work_dir_ignores_shm_when_use_ramdisk_false(tmp_path: Path) -> None:
+    """get_work_dir should use standard temp dir when use_ramdisk=False even if /dev/shm exists."""
+    fallback_dir = tmp_path / "temp_fallback"
+    fallback_dir.mkdir()
+
+    with patch("tempfile.mkdtemp", return_value=str(fallback_dir)) as mock_mkdtemp:
+        res = get_work_dir(use_ramdisk=False)
+        assert res == fallback_dir
+        mock_mkdtemp.assert_called_once_with(prefix="dive_worker_", dir=None)
+
+
+def test_get_work_dir_falls_back_when_shm_missing(tmp_path: Path) -> None:
+    """get_work_dir should fall back to standard temp when /dev/shm is missing or not writable."""
+    fallback_dir = tmp_path / "temp_fallback"
+    fallback_dir.mkdir()
+
+    with (
+        patch("utils.ffmpeg_streamer.Path") as mock_path,
+        patch("tempfile.mkdtemp", return_value=str(fallback_dir)) as mock_mkdtemp,
+    ):
+        mock_shm = MagicMock()
+        mock_shm.is_dir.return_value = False
+        mock_path.side_effect = lambda p: mock_shm if p == "/dev/shm" else Path(p)
+
+        res = get_work_dir(use_ramdisk=True)
+        assert res == fallback_dir
+        mock_mkdtemp.assert_called_once_with(prefix="dive_worker_", dir=None)
 
 
 def test_try_create_success(tmp_path: Path) -> None:
@@ -62,9 +108,7 @@ def test_extract_frames_success(tmp_path: Path) -> None:
         (output_dir / "frame_000002.jpg").write_text("fake frame 2")
         return mock_result
 
-    with patch(
-        "utils.ffmpeg_streamer.subprocess.run", side_effect=create_frames
-    ):
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=create_frames):
         frames = extract_frames(video, output_dir, fps=1.0)
 
     assert len(frames) == 2
@@ -92,9 +136,7 @@ def test_extract_frames_with_start_seconds(tmp_path: Path) -> None:
         (output_dir / "frame_000001.jpg").write_text("fake frame")
         return mock_result
 
-    with patch(
-        "utils.ffmpeg_streamer.subprocess.run", side_effect=create_frames
-    ):
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=create_frames):
         frames = extract_frames(video, output_dir, fps=1.0, start_seconds=10.0)
 
     assert len(frames) == 1
@@ -112,9 +154,7 @@ def test_extract_frames_ffmpeg_failure(tmp_path: Path) -> None:
     mock_result.returncode = 1
     mock_result.stderr = "ffmpeg error"
 
-    with patch(
-        "utils.ffmpeg_streamer.subprocess.run", return_value=mock_result
-    ):
+    with patch("utils.ffmpeg_streamer.subprocess.run", return_value=mock_result):
         frames = extract_frames(video, output_dir, fps=1.0)
 
     assert frames == []

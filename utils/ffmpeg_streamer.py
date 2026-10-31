@@ -14,10 +14,18 @@ import tempfile
 from pathlib import Path
 
 
-def get_work_dir() -> Path:
-    """Return a private temp directory in /dev/shm if available, else standard temp."""
+def get_work_dir(use_ramdisk: bool = True) -> Path:
+    """Return a private temp directory in /dev/shm if requested and available, else standard temp.
+
+    When `use_ramdisk` is True and `/dev/shm` is available and writable (e.g. Linux),
+    temporary frames are written to shared memory to maximize I/O throughput and eliminate
+    SSD write wear. When False or on systems without `/dev/shm` (e.g. macOS), falls back
+    to standard temporary directory.
+    """
     shm_base = Path("/dev/shm")
-    target_dir = shm_base if shm_base.is_dir() and os.access(shm_base, os.W_OK) else None
+    target_dir = (
+        shm_base if use_ramdisk and shm_base.is_dir() and os.access(shm_base, os.W_OK) else None
+    )
     return Path(tempfile.mkdtemp(prefix="dive_worker_", dir=target_dir))
 
 
