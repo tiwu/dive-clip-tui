@@ -44,6 +44,7 @@ from utils.stats import (  # noqa: E402
     RenderStats,
     format_stats_log,
     format_stats_table,
+    load_stats_json,
     parse_duration,
     save_stats_json,
 )
@@ -379,7 +380,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
     scan_data = state.get("scan_stats")
     p1_stats = Phase1Stats()
     p2_stats = Phase2Stats()
-    if isinstance(scan_data, dict):
+    if not scan_data and (run_dir / "run_stats.json").exists():
+        try:
+            prior_stats = load_stats_json(run_dir / "run_stats.json")
+            p1_stats = prior_stats.phase1
+            p2_stats = prior_stats.phase2
+        except Exception as exc:
+            logger.debug("Could not restore prior scan stats from file: %s", exc)
+    elif isinstance(scan_data, dict):
         if isinstance(scan_data.get("phase1"), dict):
             p1_stats = Phase1Stats.model_validate(scan_data["phase1"])
         if isinstance(scan_data.get("phase2"), dict):

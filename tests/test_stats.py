@@ -29,6 +29,7 @@ def test_parse_duration() -> None:
     assert parse_duration("01:30") == 90.0
     assert parse_duration("01:02:03") == 3723.0
     assert parse_duration("00:00:10:00") == 10.0
+    assert parse_duration("00:00:10:15", fps=30.0) == 10.5
     assert parse_duration("") == 0.0
     assert parse_duration(None) == 0.0
     assert parse_duration("invalid") == 0.0

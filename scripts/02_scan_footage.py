@@ -403,7 +403,8 @@ def process_clip(
                     fine_passed += 1
                     if phase2_stats is not None:
                         phase2_stats.detections_found += 1
-                        phase2_stats.detections_duration += 2.0
+                        ts = frame["timestamp"]
+                        phase2_stats.detections_duration += (ts + 1.0) - max(0.0, ts - 1.0)
 
                 if progress is not None and fine_task_id is not None:
                     progress.advance(fine_task_id)
@@ -722,12 +723,12 @@ def main() -> None:
         # Record Ollama calls for each phase
         coarse_stats = ollama_client.metrics.by_phase.get("coarse")
         if coarse_stats:
-            p1_stats.ollama_calls = coarse_stats.calls
-            p1_stats.ollama_failures = coarse_stats.failures
+            p1_stats.ollama_calls += coarse_stats.calls
+            p1_stats.ollama_failures += coarse_stats.failures
         fine_stats = ollama_client.metrics.by_phase.get("fine")
         if fine_stats:
-            p2_stats.ollama_calls = fine_stats.calls
-            p2_stats.ollama_failures = fine_stats.failures
+            p2_stats.ollama_calls += fine_stats.calls
+            p2_stats.ollama_failures += fine_stats.failures
 
         total_video_duration = sum(parse_duration(clip.get("duration")) for clip in clips)
         scan_elapsed = time.perf_counter() - scan_start_time

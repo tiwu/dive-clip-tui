@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 
-def parse_duration(value: Any) -> float:
+def parse_duration(value: Any, fps: float = 25.0) -> float:
     """Parse a duration value (float, int, or SMPTE/colon string) into seconds.
 
     Examples:
@@ -56,7 +56,8 @@ def parse_duration(value: Any) -> float:
                 float(parts[2]),
                 float(parts[3]),
             )
-            return max(0.0, hours * 3600 + minutes * 60 + secs + frames / 25.0)
+            fps_divisor = max(1.0, fps)
+            return max(0.0, hours * 3600 + minutes * 60 + secs + frames / fps_divisor)
     except ValueError:
         pass
 

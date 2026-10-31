@@ -63,8 +63,8 @@ Providing a clean Rich summary panel in the terminal, logging it to `run.log`, a
 
 ## 5. Verification & Rollout Checklist
 
-- [ ] Tests pass: `uv run python -m pytest`
-- [ ] Changed Python files pass Ruff lint and formatting checks
-- [ ] `CHANGELOG.md` updated under `[Unreleased]`
-- [ ] PR has no conflicting SemVer labels (`semver:minor`)
-- [ ] PR submitted with `Closes #26` and plan linked
+- [x] Tests pass: `uv run python -m pytest`
+- [x] Changed Python files pass Ruff lint and formatting checks
+- [x] `CHANGELOG.md` updated under `[Unreleased]`
+- [x] PR has no conflicting SemVer labels (`semver:minor`)
+- [x] PR submitted with `Closes #26` and plan linked
