@@ -13,6 +13,7 @@ import argparse
 import importlib.util
 import json
 import logging
+import signal
 import subprocess
 import sys
 import threading
@@ -192,6 +193,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             "Step 1/3: Ingest media (manifest)",
         )
         if rc != 0:
+            if rc == 130:
+                logger.warning("Pipeline interrupted by user.")
+                return 130
             logger.error("Ingest failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("ingest")
@@ -236,6 +240,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             render_thread.join(timeout=2.0)
 
         if rc != 0:
+            if rc == 130:
+                logger.warning("Pipeline interrupted by user.")
+                return 130
             logger.error("Scan failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("scan")
@@ -267,6 +274,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
             "Step 3/3: Render clips (MP4 highlights)",
         )
         if rc != 0:
+            if rc == 130:
+                logger.warning("Pipeline interrupted by user.")
+                return 130
             logger.error("Render failed with exit code %d. Aborting.", rc)
             return rc
         state.mark_step_done("render")
@@ -329,11 +339,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def setup_signal_handlers() -> None:
+    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
+
+    def _handler(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, _handler)
+        signal.signal(signal.SIGTERM, _handler)
+    except ValueError, AttributeError:
+        pass
+
+
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the dive-clip console script."""
+    setup_signal_handlers()
     parser = build_parser()
     args = parser.parse_args(argv)
-    sys.exit(args.func(args))
+    try:
+        sys.exit(args.func(args))
+    except KeyboardInterrupt:
+        logger.warning("Pipeline interrupted by user.")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

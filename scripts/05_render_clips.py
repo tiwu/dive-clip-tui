@@ -11,6 +11,7 @@ import argparse
 import json
 import logging
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -25,6 +26,19 @@ from utils.checkpoint import PipelineState
 from utils.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
+
+
+def setup_signal_handlers() -> None:
+    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
+
+    def _handler(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, _handler)
+        signal.signal(signal.SIGTERM, _handler)
+    except ValueError, AttributeError:
+        pass
 
 
 def slugify(text: str) -> str:
@@ -82,6 +96,10 @@ def render_clip(
     except subprocess.TimeoutExpired:
         logger.warning("FFmpeg timeout rendering %s", output_path.name, extra=extra)
         return False
+    except KeyboardInterrupt:
+        if output_path.exists():
+            output_path.unlink(missing_ok=True)
+        raise
     except Exception as exc:
         logger.warning("FFmpeg error rendering %s: %s", output_path.name, exc, extra=extra)
         return False
@@ -133,7 +151,7 @@ def render_detections(
         end_time = float(det.get("end_time", start_time + 5))
         subject = slugify(det.get("subject", "unknown"))
         quality = det.get("quality_score", 0)
-        clip_id = det.get("clip_id", f"clip{i}")
+        clip_id = slugify(str(det.get("clip_id", f"clip{i}")))
 
         output_name = f"{clip_id}_{subject}_q{quality}.mp4"
         output_path = highlights_dir / output_name
@@ -222,6 +240,7 @@ def main() -> None:
     args = parser.parse_args()
 
     configure_logging(debug=args.debug, log_file=args.log_file)
+    setup_signal_handlers()
 
     config_path = Path(args.config)
     if not config_path.exists():
@@ -264,7 +283,14 @@ def main() -> None:
         state = PipelineState(args.state_path)
         state.mark_step_started("render")
 
-    rendered, failed = render_detections(detections, highlights_dir, state=state)
+    try:
+        rendered, failed = render_detections(detections, highlights_dir, state=state)
+    except KeyboardInterrupt:
+        logger.warning("\nRender interrupted by user (Ctrl+C).")
+        if state is not None:
+            state.set_activity("render: interrupted by user")
+        sys.exit(130)
+
     concurrent_ready = len(detections) - rendered - failed
 
     if state is not None:

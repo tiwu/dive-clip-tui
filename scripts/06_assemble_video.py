@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -16,6 +18,19 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def setup_signal_handlers() -> None:
+    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
+
+    def _handler(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, _handler)
+        signal.signal(signal.SIGTERM, _handler)
+    except ValueError, AttributeError:
+        pass
 
 
 def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
@@ -28,10 +43,13 @@ def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
 
     # FFmpeg concat demuxer requires absolute or relative paths in the list file.
     list_path = output_path.parent / "concat_list.txt"
-    with open(list_path, "w") as f:
+    with open(list_path, "w", encoding="utf-8") as f:
         for clip in clip_paths:
-            # Escape single quotes for the concat demuxer format
-            escaped = str(clip.resolve()).replace("'", "'\\''")
+            path_str = str(clip.resolve())
+            if "\n" in path_str or "\r" in path_str:
+                raise ValueError(f"Path contains newline character: {path_str}")
+            # FFmpeg concat demuxer escaping for single-quoted string: escape \ then '
+            escaped = path_str.replace("\\", "\\\\").replace("'", "\\'")
             f.write(f"file '{escaped}'\n")
 
     cmd = [
@@ -66,9 +84,7 @@ def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
     list_path.unlink(missing_ok=True)
 
     if result.returncode != 0:
-        print(
-            f"WARNING: FFmpeg concat failed: {result.stderr.strip()[:200]}"
-        )
+        print(f"WARNING: FFmpeg concat failed: {result.stderr.strip()[:200]}")
         return False
 
     return True
@@ -101,6 +117,7 @@ def main() -> None:
         help="Number of top-quality clips to include (default: 10)",
     )
     args = parser.parse_args()
+    setup_signal_handlers()
 
     config_path = Path(args.config)
     if not config_path.exists():
@@ -148,8 +165,10 @@ def main() -> None:
     # Find rendered clip files matching each detection's clip_id
     clip_files: list[Path] = []
     for det in top_dets:
-        clip_id = det.get("clip_id", "")
-        subject = det.get("subject", "unknown")
+        raw_clip_id = str(det.get("clip_id", ""))
+        clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
+        raw_subject = str(det.get("subject", "unknown"))
+        subject = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_subject)[:40]
         quality = det.get("quality_score", 0)
 
         # Look for rendered clip matching this detection
@@ -171,11 +190,15 @@ def main() -> None:
         sys.exit(1)
 
     output_path = Path(args.output)
-    if concat_clips(clip_files, output_path):
-        print(f"\n✓ Assembled {len(clip_files)} clips into: {output_path}")
-    else:
-        print("\n✗ Assembly failed.")
-        sys.exit(1)
+    try:
+        if concat_clips(clip_files, output_path):
+            print(f"\n✓ Assembled {len(clip_files)} clips into: {output_path}")
+        else:
+            print("\n✗ Assembly failed.")
+            sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nAssembly interrupted by user (Ctrl+C).")
+        sys.exit(130)
 
 
 if __name__ == "__main__":

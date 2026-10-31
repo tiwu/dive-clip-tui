@@ -50,9 +50,7 @@ def generate_edl(detections: DetectionsRefined, output_path: Path) -> None:
             f"01:00:00:00 01:00:00:00"
         )
         lines.append(f"* FROM CLIP NAME: {source_name}")
-        lines.append(
-            f"* LOC: {start_tc} {color} {det.subject} - {det.description}"
-        )
+        lines.append(f"* LOC: {start_tc} {color} {det.subject} - {det.description}")
         lines.append("")
         edit_number += 1
 
@@ -64,35 +62,36 @@ def generate_csv(detections: DetectionsRefined, output_path: Path) -> None:
     """Generate CSV marker file from refined detections."""
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            [
-                "Clip Name",
-                "Start Timecode",
-                "End Timecode",
-                "Color",
-                "Subject",
-                "Description",
-                "Confidence",
-                "Quality Score",
-            ]
-        )
+        writer.writerow([
+            "Clip Name",
+            "Start Timecode",
+            "End Timecode",
+            "Color",
+            "Subject",
+            "Description",
+            "Confidence",
+            "Quality Score",
+        ])
+
+        def _sanitize_csv_cell(val: object) -> object:
+            if isinstance(val, str) and val and val[0] in ("=", "+", "-", "@", "\t", "\r"):
+                return f"'{val}"
+            return val
 
         for det in detections.detections:
             fps = float(det.fps) if det.fps else 25.0
             start_tc = str(Timecode.from_seconds(det.start_time, fps))
             end_tc = str(Timecode.from_seconds(det.end_time, fps))
-            writer.writerow(
-                [
-                    det.file_name,
-                    start_tc,
-                    end_tc,
-                    det.color,
-                    det.subject,
-                    det.description,
-                    det.confidence,
-                    det.quality_score,
-                ]
-            )
+            writer.writerow([
+                _sanitize_csv_cell(det.file_name),
+                start_tc,
+                end_tc,
+                det.color,
+                _sanitize_csv_cell(det.subject),
+                _sanitize_csv_cell(det.description),
+                det.confidence,
+                det.quality_score,
+            ])
 
     print(f"CSV written: {output_path}")
 

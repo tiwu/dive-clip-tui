@@ -138,6 +138,32 @@ def test_cmd_scan_runs_all_steps(tmp_path: Path) -> None:
     assert state_path.exists()
 
 
+def test_cmd_scan_handles_interrupt(tmp_path: Path) -> None:
+    """cmd_scan should return 130 and abort cleanly when interrupted."""
+    args = _scan_args(tmp_path, debug=False)
+
+    # Ingest succeeds, scan is interrupted with code 130
+    mock_ingest = MagicMock(returncode=0)
+    mock_scan = MagicMock(returncode=130)
+
+    # Fake that ingest wrote manifest_raw.json so it proceeds to scan
+    manifest_path = tmp_path / "highlights" / "manifest_raw.json"
+
+    def side_effect(cmd, *a, **kw):
+        if "00_ingest_media.py" in cmd[1]:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.touch()
+            return mock_ingest
+        return mock_scan
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=side_effect):
+        rc = cmd_scan(args)
+
+    assert rc == 130
+    # Render should NOT have run
+    assert not (tmp_path / "highlights" / "detections_refined.json").exists()
+
+
 def test_cmd_scan_reset_state(tmp_path: Path) -> None:
     """cmd_scan with --reset should clear state and re-run steps."""
     input_folder = tmp_path / "footage"
@@ -448,4 +474,7 @@ def test_cmd_scan_prints_version(tmp_path: Path) -> None:
         for call in mock_console.print.call_args_list
         if call.args and isinstance(call.args[0], Panel)
     ]
-    assert any("v0.9.0" in str(p.title) or "v0.9.0" in str(p.renderable) for p in panels)
+    from utils.version import get_version
+
+    version = get_version()
+    assert any(f"v{version}" in str(p.title) or f"v{version}" in str(p.renderable) for p in panels)

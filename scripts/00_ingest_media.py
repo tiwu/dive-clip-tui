@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.logging_setup import configure_logging
 
 logger = logging.getLogger(__name__)
+
+
+def setup_signal_handlers() -> None:
+    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
+
+    def _handler(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, _handler)
+        signal.signal(signal.SIGTERM, _handler)
+    except ValueError, AttributeError:
+        pass
+
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mpg", ".mpeg"}
 
@@ -133,6 +148,7 @@ def main() -> None:
     args = build_parser().parse_args()
 
     configure_logging(debug=args.debug, log_file=args.log_file)
+    setup_signal_handlers()
 
     folder = Path(args.input)
     if not folder.exists():
@@ -140,7 +156,11 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("Scanning %s for video files", folder)
-    clips = ingest_folder(folder)
+    try:
+        clips = ingest_folder(folder)
+    except KeyboardInterrupt:
+        logger.warning("\nIngest interrupted by user (Ctrl+C).")
+        sys.exit(130)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -76,8 +77,6 @@ def test_concat_clips_timeout(tmp_path: Path) -> None:
 
 def test_main_no_detections(tmp_path: Path) -> None:
     """main should exit gracefully when no detections found."""
-    import sys as sys_module
-    import os
 
     detections_path = tmp_path / "detections_refined.json"
     detections_path.write_text('{"detections": []}')
@@ -87,7 +86,7 @@ def test_main_no_detections(tmp_path: Path) -> None:
     highlights_dir.mkdir(parents=True)
 
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("general:\n  output_dir: \"./outputs\"\n")
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
 
     original_argv = sys_module.argv
     original_exit = sys_module.exit
@@ -112,10 +111,8 @@ def test_main_no_detections(tmp_path: Path) -> None:
         ]
         sys_module.exit = fake_exit
         os.chdir(tmp_path)
-        try:
+        with contextlib.suppress(SystemExit):
             assemble.main()
-        except SystemExit:
-            pass
     finally:
         sys_module.argv = original_argv
         sys_module.exit = original_exit
@@ -126,8 +123,6 @@ def test_main_no_detections(tmp_path: Path) -> None:
 
 def test_main_renders_clips(tmp_path: Path) -> None:
     """main should render top-N clips from detections."""
-    import sys as sys_module
-    import json
     import os
 
     # Create detections file with 3 detections
@@ -172,7 +167,7 @@ def test_main_renders_clips(tmp_path: Path) -> None:
 
     # Create a minimal config.yaml
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("general:\n  output_dir: \"./outputs\"\n")
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
 
     # Mock subprocess.run to return success
     mock_result = MagicMock()
@@ -205,11 +200,11 @@ def test_main_renders_clips(tmp_path: Path) -> None:
         sys_module.exit = fake_exit
         os.chdir(tmp_path)
 
-        with patch.object(assemble.subprocess, "run", return_value=mock_result):
-            try:
-                assemble.main()
-            except SystemExit:
-                pass
+        with (
+            patch.object(assemble.subprocess, "run", return_value=mock_result),
+            contextlib.suppress(SystemExit),
+        ):
+            assemble.main()
     finally:
         sys_module.argv = original_argv
         sys_module.exit = original_exit
@@ -217,3 +212,35 @@ def test_main_renders_clips(tmp_path: Path) -> None:
 
     assert exit_code is None or exit_code == 0
 
+
+def test_concat_clips_escapes_single_quotes(tmp_path: Path) -> None:
+    """concat_clips should escape single quotes using FFmpeg demuxer syntax."""
+    clip1 = tmp_path / "it's_a_test.mp4"
+    clip1.touch()
+    output = tmp_path / "output.mp4"
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+
+    written_content: list[str] = []
+
+    def mock_run(cmd, **kwargs):
+        list_file = Path(cmd[cmd.index("-i") + 1])
+        written_content.append(list_file.read_text(encoding="utf-8"))
+        return mock_result
+
+    with patch.object(assemble.subprocess, "run", side_effect=mock_run):
+        assert assemble.concat_clips([clip1], output) is True
+
+    assert len(written_content) == 1
+    assert "it\\'s_a_test.mp4" in written_content[0]
+
+
+def test_concat_clips_rejects_newlines(tmp_path: Path) -> None:
+    """concat_clips should raise ValueError if path contains a newline."""
+    output = tmp_path / "output.mp4"
+    malicious_path = MagicMock(spec=Path)
+    malicious_path.resolve.return_value = "clip.mp4\nfile 'malicious.mp4'"
+
+    with pytest.raises(ValueError, match="Path contains newline character"):
+        assemble.concat_clips([malicious_path], output)

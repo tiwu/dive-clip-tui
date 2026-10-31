@@ -13,6 +13,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -46,6 +48,19 @@ from utils.prompt_templates import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def setup_signal_handlers() -> None:
+    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
+
+    def _handler(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGINT, _handler)
+        signal.signal(signal.SIGTERM, _handler)
+    except ValueError, AttributeError:
+        pass
 
 
 def call_ollama(
@@ -114,9 +129,10 @@ def process_clip(
         logger.warning("File not found: %s", file_path)
         return []
 
-    clip_id = clip.get("clip_id") or (
+    raw_clip_id = clip.get("clip_id") or (
         f"clip_{hashlib.sha256(file_path.encode('utf-8')).hexdigest()[:16]}"
     )
+    clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
     clip_work_dir = work_dir / clip_id
     clip_work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -521,6 +537,7 @@ def main() -> None:
 
     work_dir = get_work_dir()
     logger.info("Using work directory: %s", work_dir)
+    setup_signal_handlers()
 
     ollama_cfg = config.get("ollama", {})
     ollama_client = OllamaClient(
@@ -563,54 +580,62 @@ def main() -> None:
             if state.is_item_done("scan", cname):
                 completed_clips.add(cname)
 
-    with create_scan_progress() as progress:
-        overall_task = (
-            progress.add_task("[bold white]Overall clips[/]", total=len(clips), status="")
-            if len(clips) > 1
-            else None
-        )
-        for index, clip in enumerate(clips, start=1):
-            clip_name = clip.get("file_name", "unknown")
-            if args.resume and clip_name in completed_clips:
-                logger.info(
-                    "Skipping already processed clip: %s (%d/%d)", clip_name, index, len(clips)
+    try:
+        with create_scan_progress() as progress:
+            overall_task = (
+                progress.add_task("[bold white]Overall clips[/]", total=len(clips), status="")
+                if len(clips) > 1
+                else None
+            )
+            for index, clip in enumerate(clips, start=1):
+                clip_name = clip.get("file_name", "unknown")
+                if args.resume and clip_name in completed_clips:
+                    logger.info(
+                        "Skipping already processed clip: %s (%d/%d)", clip_name, index, len(clips)
+                    )
+                    if overall_task is not None:
+                        progress.advance(overall_task)
+                    continue
+
+                logger.info("Processing %d/%d: %s", index, len(clips), clip_name)
+                if state is not None:
+                    state.set_activity(f"scan: starting {clip_name} ({index}/{len(clips)})")
+                detections = process_clip(
+                    clip,
+                    config,
+                    work_dir,
+                    ollama_client,
+                    state=state,
+                    progress=progress,
                 )
+                refined.detections.extend(detections)
+                refined.total_detections += len(detections)
+                refined.total_clips += 1
+                save_detections_atomic(output_path, refined)
                 if overall_task is not None:
                     progress.advance(overall_task)
-                continue
+                if state is not None:
+                    state.add_progress("scan", clip_name)
 
-            logger.info("Processing %d/%d: %s", index, len(clips), clip_name)
-            if state is not None:
-                state.set_activity(f"scan: starting {clip_name} ({index}/{len(clips)})")
-            detections = process_clip(
-                clip,
-                config,
-                work_dir,
-                ollama_client,
-                state=state,
-                progress=progress,
-            )
-            refined.detections.extend(detections)
-            refined.total_detections += len(detections)
-            refined.total_clips += 1
+        # Final atomic write to ensure complete sync
+        save_detections_atomic(output_path, refined)
+
+        logger.info(
+            "Done. %d detections across %d clips.", refined.total_detections, refined.total_clips
+        )
+        logger.info(ollama_client.metrics.format_summary())
+        logger.info("Output: %s", output_path)
+
+    except KeyboardInterrupt:
+        logger.warning("\nScan interrupted by user (Ctrl+C). Cleaning up...")
+        if refined.detections:
             save_detections_atomic(output_path, refined)
-            if overall_task is not None:
-                progress.advance(overall_task)
-            if state is not None:
-                state.add_progress("scan", clip_name)
-
-    # Final atomic write to ensure complete sync
-    save_detections_atomic(output_path, refined)
-
-    # Clean up the top-level work directory (only removes mkdtemp dirs on macOS;
-    # /dev/shm/dive_worker_tmp on Linux is intentionally skipped)
-    cleanup_work_dir(work_dir)
-
-    logger.info(
-        "Done. %d detections across %d clips.", refined.total_detections, refined.total_clips
-    )
-    logger.info(ollama_client.metrics.format_summary())
-    logger.info("Output: %s", output_path)
+            logger.info("Saved %d detections before exit.", len(refined.detections))
+        if state is not None:
+            state.set_activity("scan: interrupted by user")
+        sys.exit(130)
+    finally:
+        cleanup_work_dir(work_dir)
 
 
 if __name__ == "__main__":
