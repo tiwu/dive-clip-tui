@@ -47,7 +47,7 @@ Adding persistent intra-clip checkpointing ensures progress is committed every f
 - [x] **Completion & Cleanup**:
   - Once a clip successfully completes both passes and its detections are merged into `detections_refined.json`, the intra-clip checkpoint is marked completed or cleaned up.
 - [x] **Automated Tests**:
-  - Comprehensive unit and integration tests covering checkpoint creation, periodic flushes, interrupt handling, frame skipping on resume, Pass 2 resume, corrupted file handling, and cleanup upon completion.
+  - Full unit and integration tests covering checkpoint creation, periodic flushes, interrupt handling, frame skipping on resume, Pass 2 resume, corrupted file handling, and cleanup upon completion.
 
 ---
 

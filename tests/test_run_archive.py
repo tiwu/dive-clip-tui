@@ -131,3 +131,67 @@ def test_update_latest_symlink_exfat_fallback(tmp_path: Path) -> None:
     fallback_file = out_dir / "latest.txt"
     assert fallback_file.exists()
     assert "run-20261101-100000" in fallback_file.read_text(encoding="utf-8")
+
+
+def test_archive_run_artifacts_with_aftermovie(tmp_path: Path) -> None:
+    """archive_run_artifacts copies aftermovie_path into run_dir when present."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    aftermovie = output_dir / "aftermovie.mp4"
+    aftermovie.write_bytes(b"fake mp4 data")
+
+    run_dir = output_dir / "runs" / "run-20261101-120000"
+    archived = archive_run_artifacts(
+        run_dir,
+        aftermovie_path=aftermovie,
+    )
+
+    assert "aftermovie" in archived
+    assert archived["aftermovie"] == run_dir / "aftermovie.mp4"
+    assert (run_dir / "aftermovie.mp4").read_bytes() == b"fake mp4 data"
+
+    # Missing aftermovie file is safely ignored
+    missing_run_dir = output_dir / "runs" / "run-20261101-130000"
+    archived_missing = archive_run_artifacts(
+        missing_run_dir,
+        aftermovie_path=output_dir / "nonexistent.mp4",
+    )
+    assert "aftermovie" not in archived_missing
+
+
+def test_resolve_assembly_artifacts(tmp_path: Path) -> None:
+    """resolve_assembly_artifacts resolves from explicit paths, latest run, or output dir."""
+    from utils.run_archive import resolve_assembly_artifacts, update_latest_symlink
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    # 1. Fallback to output_dir when no latest run exists
+    dets, clips, run_dir = resolve_assembly_artifacts(output_dir)
+    assert dets == output_dir / "detections_refined.json"
+    assert clips == output_dir / "highlights"
+    assert run_dir is None
+
+    # 2. Automatically resolves from latest run when artifacts exist
+    run_1 = output_dir / "runs" / "run-20261101-100000"
+    run_1_highlights = run_1 / "highlights"
+    run_1_highlights.mkdir(parents=True)
+    run_1_dets = run_1 / "detections_refined.json"
+    run_1_dets.write_text("{}", encoding="utf-8")
+    update_latest_symlink(output_dir, run_1)
+
+    dets, clips, run_dir = resolve_assembly_artifacts(output_dir)
+    assert dets == run_1_dets
+    assert clips == run_1_highlights
+    assert run_dir == run_1
+
+    # 3. Explicit paths override run archive
+    custom_dets = tmp_path / "custom_dets.json"
+    custom_clips = tmp_path / "custom_clips"
+    dets, clips, run_dir = resolve_assembly_artifacts(
+        output_dir, input_detections=custom_dets, clips_dir=custom_clips
+    )
+    assert dets == custom_dets
+    assert clips == custom_clips
+    assert run_dir == run_1

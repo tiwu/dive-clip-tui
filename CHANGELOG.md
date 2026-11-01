@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add end-to-end highlight assembly to `dive-clip scan` via `--assemble` and introduce first-class `assemble` and `aftermovie` CLI subcommands.
+
 ## [0.18.2] - 2026-11-01
 
 ### Added

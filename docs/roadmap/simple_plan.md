@@ -85,6 +85,7 @@ pipeline steps with live log output. (Shipped)
 - [x] **End-of-run processing statistics & Rich summary table:** Throughput (FPS), phase breakdown, and `run_stats.json` artifact
 - [x] **3-stage domain-aware scanning:** Pass 0 video domain classification, Pass 1 domain coarse screen, Pass 2 subject-routed fine scan (underwater, motorcycle, generic, custom)
 - [x] **Config presets:** Aftermovie, social, and subject config presets
+- [x] **End-to-end CLI highlight assembly:** `dive-clip scan --assemble` flag plus first-class `dive-clip assemble` and `dive-clip aftermovie` subcommands with automatic latest-run resolution (`scripts/dive_clip.py`)
 - [ ] **Social aspect ratios:** 9:16 vertical render for Reels/TikTok / Shorts
 - [ ] **Face/subject-aware reframing:** Smart cropping for portrait output
 - [ ] **TUI review-to-render integration:** Wire accepted detection review directly into clip rendering from the UI

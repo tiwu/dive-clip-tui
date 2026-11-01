@@ -107,6 +107,45 @@ def default_run_log_path(output_dir: Path | str, run_id: str | None = None) -> P
     return get_run_dir(output_dir, run_id=run_id) / "run.log"
 
 
+def resolve_assembly_artifacts(
+    output_dir: Path | str,
+    input_detections: Path | str | None = None,
+    clips_dir: Path | str | None = None,
+) -> tuple[Path, Path, Path | None]:
+    """Resolve detections JSON path, clips directory, and latest run dir for assembly.
+
+    Searches explicit paths, the latest symlink, recent timestamped runs, and output_dir.
+    Returns (detections_path, clips_dir, latest_run).
+    """
+    out_path = Path(output_dir)
+    latest_link = out_path / "latest"
+    latest_run: Path | None = (
+        latest_link.resolve() if latest_link.exists() else find_latest_run_dir(out_path)
+    )
+
+    if input_detections:
+        detections_path = Path(input_detections)
+    elif (latest_link / "detections_refined.json").exists():
+        detections_path = (latest_link / "detections_refined.json").resolve()
+    elif latest_run and (latest_run / "detections_refined.json").exists():
+        detections_path = latest_run / "detections_refined.json"
+    else:
+        detections_path = out_path / "detections_refined.json"
+
+    if clips_dir:
+        resolved_clips_dir = Path(clips_dir)
+    elif (detections_path.parent / "highlights").exists():
+        resolved_clips_dir = detections_path.parent / "highlights"
+    elif (latest_link / "highlights").exists():
+        resolved_clips_dir = (latest_link / "highlights").resolve()
+    elif latest_run and (latest_run / "highlights").exists():
+        resolved_clips_dir = latest_run / "highlights"
+    else:
+        resolved_clips_dir = out_path / "highlights"
+
+    return detections_path, resolved_clips_dir, latest_run
+
+
 def archive_file(
     source: Path | str,
     destination_dir: Path | str,
@@ -135,6 +174,7 @@ def archive_run_artifacts(
     detections_path: Path | str | None = None,
     log_file: Path | str | None = None,
     stats_path: Path | str | None = None,
+    aftermovie_path: Path | str | None = None,
 ) -> dict[str, Path]:
     """Archive available pipeline artifacts into `run_dir`.
 
@@ -159,6 +199,12 @@ def archive_run_artifacts(
         dest = archive_file(stats_path, target_dir, "run_stats.json")
         if dest:
             archived["stats"] = dest
+
+    if aftermovie_path is not None:
+        src_aftermovie = Path(aftermovie_path)
+        dest = archive_file(src_aftermovie, target_dir, src_aftermovie.name)
+        if dest:
+            archived["aftermovie"] = dest
 
     if log_file is not None:
         src_log = Path(log_file)

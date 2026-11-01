@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import signal
 import subprocess
@@ -18,6 +19,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
+from utils.logging_setup import configure_logging
+from utils.run_archive import resolve_assembly_artifacts
+
+logger = logging.getLogger(__name__)
 
 
 def setup_signal_handlers() -> None:
@@ -74,17 +79,17 @@ def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        print(f"WARNING: FFmpeg timeout concatenating to {output_path.name}")
+        logger.warning("FFmpeg timeout concatenating to %s", output_path.name)
         return False
     except Exception as exc:
-        print(f"WARNING: FFmpeg error: {exc}")
+        logger.warning("FFmpeg error: %s", exc)
         return False
 
     # Clean up the concat list file
     list_path.unlink(missing_ok=True)
 
     if result.returncode != 0:
-        print(f"WARNING: FFmpeg concat failed: {result.stderr.strip()[:200]}")
+        logger.warning("FFmpeg concat failed: %s", result.stderr.strip()[:200])
         return False
 
     return True
@@ -113,52 +118,70 @@ def main() -> None:
     parser.add_argument(
         "--top-n",
         type=int,
-        default=10,
-        help="Number of top-quality clips to include (default: 10)",
+        default=None,
+        help="Number of top-quality clips to include (default: 10, or config)",
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional logfile path",
     )
     args = parser.parse_args()
     setup_signal_handlers()
+    configure_logging(debug=args.debug, log_file=args.log_file)
 
     try:
         config = load_config(args.config)
     except ConfigError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        logger.error("%s", exc)
         sys.exit(1)
 
     general = config.get("general", {})
     output_dir = Path(general.get("output_dir", "./outputs"))
 
-    # Resolve detections input path
-    detections_path = Path(args.input) if args.input else output_dir / "detections_refined.json"
+    # Resolve detections input path and clips directory
+    detections_path, clips_dir, _ = resolve_assembly_artifacts(
+        output_dir,
+        input_detections=args.input,
+        clips_dir=args.clips_dir,
+    )
     if not detections_path.exists():
         alt = Path(__file__).resolve().parent.parent / "outputs" / "detections_refined.json"
         if alt.exists():
             detections_path = alt
         else:
-            print(f"ERROR: detections_refined.json not found at {detections_path}")
-            print("Run 02_scan_footage.py first.")
+            logger.error(
+                "detections_refined.json not found at %s. Run 02_scan_footage.py first.",
+                detections_path,
+            )
             sys.exit(1)
 
-    # Resolve clips directory
-    clips_dir = Path(args.clips_dir) if args.clips_dir else output_dir / "highlights"
     if not clips_dir.exists():
-        print(f"ERROR: Clips directory not found: {clips_dir}")
-        print("Run 05_render_clips.py first to render detection clips.")
+        logger.error(
+            "Clips directory not found: %s. Run 05_render_clips.py first to render detection clips.",
+            clips_dir,
+        )
         sys.exit(1)
 
-    with open(detections_path) as f:
+    with open(detections_path, encoding="utf-8") as f:
         detections_data = json.load(f)
 
     detections = detections_data.get("detections", [])
     if not detections:
-        print("No detections found to assemble.")
+        logger.info("No detections found to assemble.")
         sys.exit(0)
 
-    # Sort by quality score (descending) and take top-N
+    # Sort by quality score (descending) and take top-N (CLI flag > config > default 10)
+    aftermovie_cfg = (
+        config.get("aftermovie", {}) if isinstance(config.get("aftermovie"), dict) else {}
+    )
+    top_n = args.top_n if args.top_n is not None else int(aftermovie_cfg.get("top_n_clips", 10))
     sorted_dets = sorted(detections, key=lambda d: d.get("quality_score", 0), reverse=True)
-    top_dets = sorted_dets[: args.top_n]
+    top_dets = sorted_dets[:top_n]
 
-    print(f"Assembling top {len(top_dets)} of {len(detections)} detections")
+    logger.info("Assembling top %d of %d detections", len(top_dets), len(detections))
 
     # Find rendered clip files matching each detection's clip_id
     clip_files: list[Path] = []
@@ -182,29 +205,31 @@ def main() -> None:
             matching = list(clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_*.mp4"))
         if matching:
             clip_files.append(matching[0])
-            print(f"  Using: {matching[0].name} (quality {quality}/10)")
+            logger.info("  Using: %s (quality %s/10)", matching[0].name, quality)
         else:
             # Fallback: try any file starting with clip_id
             fallback = list(clips_dir.glob(f"{clip_id}_*.mp4"))
             if fallback:
                 clip_files.append(fallback[0])
-                print(f"  Using: {fallback[0].name} (quality {quality}/10, fallback match)")
+                logger.info(
+                    "  Using: %s (quality %s/10, fallback match)", fallback[0].name, quality
+                )
             else:
-                print(f"  SKIP: No rendered clip found for {clip_id} ({subject})")
+                logger.warning("  SKIP: No rendered clip found for %s (%s)", clip_id, subject)
 
     if not clip_files:
-        print("No clip files found to concatenate.")
+        logger.error("No clip files found to concatenate.")
         sys.exit(1)
 
     output_path = Path(args.output)
     try:
         if concat_clips(clip_files, output_path):
-            print(f"\n✓ Assembled {len(clip_files)} clips into: {output_path}")
+            logger.info("✓ Assembled %d clips into: %s", len(clip_files), output_path)
         else:
-            print("\n✗ Assembly failed.")
+            logger.error("✗ Assembly failed.")
             sys.exit(1)
     except KeyboardInterrupt:
-        print("\nAssembly interrupted by user (Ctrl+C).")
+        logger.warning("Assembly interrupted by user (Ctrl+C).")
         sys.exit(130)
 
 
