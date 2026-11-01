@@ -19,6 +19,11 @@ Stage 2 — Implement and release
 9. User reviews and merges the PR; the issue closes and the release workflow processes the merge.
 ```
 
+### GitHub CLI Guidelines
+- **Issue/PR Viewing**: Always pass `--json title,body,labels,comments` to `gh issue view` and `gh pr view` to avoid GraphQL `projectCards` deprecation errors.
+- **PR Bodies**: Write PR descriptions containing Markdown, diagrams, or code blocks to a file and pass `--body-file <path>` to `gh pr create` / `gh pr edit` to avoid shell command substitution and redirection syntax errors.
+- **PR Update Fallback**: If `gh pr edit` errors on `projectCards`, use `gh api repos/:owner/:repo/pulls/:number -X PATCH -F body=@<file>`.
+
 ### Label Taxonomy
 
 | Label | Meaning | Who Applies |

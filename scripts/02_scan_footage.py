@@ -318,6 +318,7 @@ def process_clip(
         "fine",
         "completed",
     )
+    need_classification = False
 
     coarse_frames: list[dict] = []
     if skip_coarse_inference and checkpoint is not None:
@@ -335,9 +336,20 @@ def process_clip(
             phase1_stats.detections_detected += coarse_detected
         coarse_frames_count = checkpoint.coarse_frames_analyzed
     else:
-        logger.info("[Pass 1] Coarse scan @ %.1f FPS: %s", coarse_fps, clip["file_name"])
-        if state is not None:
-            state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
+        need_classification = detected_domain is None and classify_clips != "off"
+        if need_classification:
+            logger.info("[Pass 0] Extracting frames @ %.1f FPS: %s", coarse_fps, clip["file_name"])
+            if state is not None:
+                state.set_activity(f"scan: {clip['file_name']} (pass 0 extract, {coarse_fps} FPS)")
+        else:
+            logger.info(
+                "[Pass 1] Coarse scan @ %.1f FPS (%s): %s",
+                coarse_fps,
+                detected_domain or "underwater",
+                clip["file_name"],
+            )
+            if state is not None:
+                state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
 
         coarse_frames = extract_frames(
             video_path=file_path,
@@ -348,7 +360,12 @@ def process_clip(
         coarse_frames_count = len(coarse_frames)
         if phase1_stats is not None:
             phase1_stats.frames_extracted += len(coarse_frames)
-        logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
+        logger.info(
+            "%s Extracted %d frames from %s",
+            "[Pass 0]" if need_classification else "[Pass 1]",
+            len(coarse_frames),
+            clip["file_name"],
+        )
 
         # Execute Pass 0 VLM classification if domain is still unknown
         if detected_domain is None and classify_clips != "off" and coarse_frames:
@@ -399,6 +416,16 @@ def process_clip(
     coarse_prompt = matched_template.coarse_prompt if matched_template else dom_config.coarse_prompt
 
     if not skip_coarse_inference:
+        if need_classification:
+            logger.info(
+                "[Pass 1] Coarse scan @ %.1f FPS (%s): %s",
+                coarse_fps,
+                detected_domain,
+                clip["file_name"],
+            )
+            if state is not None:
+                state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
+
         task_id = None
         if progress is not None and coarse_frames:
             task_id = progress.add_task(
