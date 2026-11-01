@@ -54,7 +54,7 @@
 - **Documentation Explored**:
   - README.md - Full setup, configuration, execution guide
   - docs/roadmap/roadmap.md - High-level roadmap reference
-  - docs/roadmap/simple_plan.md - Simplified MVP plan
+  - docs/archive/simple_plan.md - Simplified MVP plan
   - Project checklist items (data model, I/O safety, error recovery, timecode precision, Ollama JSON mode)
 
 ## 2. Comparison Table Covering Key Features from Both Projects

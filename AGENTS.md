@@ -7,18 +7,20 @@ This file helps AI agents (and humans) navigate, understand, and contribute to t
 
 ## 🌊 Project overview
 
-**Dive Clip TUI** — local-first AI curation for dive and motorcycle footage, with a
-Textual terminal UI and optional DaVinci Resolve marker export.
+**Dive Clip** — local-first AI curation for dive and motorcycle footage, with a
+CLI-first pipeline and optional DaVinci Resolve marker export. The existing
+Textual TUI is an unmaintained prototype; future UI work starts from scratch.
 
-A simplified MVP (`docs/roadmap/simple_plan.md`) is in progress to make the pipeline
-CLI-first and local-first (no Resolve required for the core flow): point at a folder of
-videos → AI finds the interesting bits → get back a watchable highlight video.
+The active direction is in [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
+The core flow needs no Resolve: point at a folder of videos → AI finds the
+interesting bits → get back a watchable highlight video.
 
 **Key docs**
 - `README.md` — full setup, configuration, and execution guide
 - `CHANGELOG.md` — unreleased changes and release history
-- `docs/roadmap/simple_plan.md` — active simplified MVP plan (supersedes `roadmap.md`)
-- `docs/roadmap/roadmap.md` — kept for reference
+- `docs/roadmap/roadmap.md` — active product roadmap
+- `docs/archive/simple_plan.md` — archived CLI-first MVP plan
+- `docs/archive/original_roadmap.md` — archived original product roadmap
 - `docs/plans/` - folder for architecture plans
 - `docs/plans/README.md` — required issue, plan, PR, changelog, and release workflow
 - `config.yaml` — paths, thresholds, Ollama endpoints, API keys
@@ -64,12 +66,13 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 │   ├── stats.py              # Scan throughput and pipeline metrics
 │   ├── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
 │   └── version.py            # Dynamic package version helper
-├── tui/                      # Textual-based terminal UI
+├── tui/                      # Legacy Textual UI prototype; future UI is a rebuild
 │   ├── app.py                # Main TUI application
 │   └── screens/              # browse.py, pipeline.py, review.py
 ├── tests/                    # Pytest tests (+ conftest.py fixtures)
 ├── docs/
-|   └── roadmap/              # roadmap.md, simple_plan.md
+|   └── roadmap/              # active product roadmap
+|   └── archive/              # superseded roadmaps and historical documents
 |   └── plans/                # architecture plans
 └── outputs/                  # Generated outputs (manifest, detections, EDL, etc.)
 ```

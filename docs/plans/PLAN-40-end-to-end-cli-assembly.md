@@ -62,7 +62,7 @@ This breaks the "one-command watchable video" promise. Users need:
    - Reuses `scripts/07_create_aftermovie.py` logic.
 
 4. **Roadmap alignment:**
-   - Update `docs/roadmap/simple_plan.md` to reflect Option 1 implementation and confirm Option 3 (social vertical 9:16 reframing) remains on the roadmap for future execution.
+   - Update the then-active `docs/archive/simple_plan.md` to reflect Option 1 implementation and confirm Option 3 (social vertical 9:16 reframing) remains on the roadmap for future execution.
 
 ### Non-Functional Requirements
 - Maintain strictly local-first processing (FFmpeg only).
@@ -110,7 +110,7 @@ This breaks the "one-command watchable video" promise. Users need:
    - `cmd_assemble()` and `cmd_aftermovie()`: Resolve latest run directories when omitted and invoke assembly handlers.
 2. **`utils/run_archive.py`**:
    - Add `aftermovie_path` parameter to `archive_run_artifacts()` so generated aftermovies are archived in per-run snapshots alongside `run_stats.json` and manifests.
-3. **`docs/roadmap/simple_plan.md`**:
+3. **`docs/archive/simple_plan.md`** (the roadmap active when this plan was written):
    - Document the completed CLI assembly workflow while preserving social 9:16 and TUI review as upcoming roadmap milestones.
 
 ---
