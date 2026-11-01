@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-11-01
+
 ### Fixed
 - Prevent scan-time and final clip renders from racing, and retry incomplete clips safely after interruption.
 
