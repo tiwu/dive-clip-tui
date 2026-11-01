@@ -11,88 +11,18 @@ import argparse
 import json
 import logging
 import re
-import signal
-import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
+from utils.ffmpeg_streamer import concat_clips
 from utils.logging_setup import configure_logging
-from utils.run_archive import resolve_assembly_artifacts
+from utils.run_archive import resolve_and_validate_assembly_artifacts
+from utils.signals import setup_signal_handlers
 
 logger = logging.getLogger(__name__)
-
-
-def setup_signal_handlers() -> None:
-    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
-
-    def _handler(signum: int, frame: object) -> None:
-        raise KeyboardInterrupt
-
-    try:
-        signal.signal(signal.SIGINT, _handler)
-        signal.signal(signal.SIGTERM, _handler)
-    except ValueError, AttributeError:
-        pass
-
-
-def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
-    """Concatenate MP4 clips using FFmpeg's concat demuxer.
-
-    All clips must have identical codec/resolution (they do, since they're
-    all rendered by 05_render_clips.py with the same settings).
-    """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # FFmpeg concat demuxer requires absolute or relative paths in the list file.
-    list_path = output_path.parent / "concat_list.txt"
-    with open(list_path, "w", encoding="utf-8") as f:
-        for clip in clip_paths:
-            path_str = str(clip.resolve())
-            if "\n" in path_str or "\r" in path_str:
-                raise ValueError(f"Path contains newline character: {path_str}")
-            # FFmpeg concat demuxer escaping for single-quoted string: escape \ then '
-            escaped = path_str.replace("\\", "\\\\").replace("'", "\\'")
-            f.write(f"file '{escaped}'\n")
-
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        str(list_path),
-        "-c",
-        "copy",
-        "-movflags",
-        "+faststart",
-        "-y",
-        str(output_path),
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        logger.warning("FFmpeg timeout concatenating to %s", output_path.name)
-        return False
-    except Exception as exc:
-        logger.warning("FFmpeg error: %s", exc)
-        return False
-
-    # Clean up the concat list file
-    list_path.unlink(missing_ok=True)
-
-    if result.returncode != 0:
-        logger.warning("FFmpeg concat failed: %s", result.stderr.strip()[:200])
-        return False
-
-    return True
 
 
 def main() -> None:
@@ -142,27 +72,14 @@ def main() -> None:
     output_dir = Path(general.get("output_dir", "./outputs"))
 
     # Resolve detections input path and clips directory
-    detections_path, clips_dir, _ = resolve_assembly_artifacts(
-        output_dir,
-        input_detections=args.input,
-        clips_dir=args.clips_dir,
-    )
-    if not detections_path.exists():
-        alt = Path(__file__).resolve().parent.parent / "outputs" / "detections_refined.json"
-        if alt.exists():
-            detections_path = alt
-        else:
-            logger.error(
-                "detections_refined.json not found at %s. Run 02_scan_footage.py first.",
-                detections_path,
-            )
-            sys.exit(1)
-
-    if not clips_dir.exists():
-        logger.error(
-            "Clips directory not found: %s. Run 05_render_clips.py first to render detection clips.",
-            clips_dir,
+    try:
+        detections_path, clips_dir, _ = resolve_and_validate_assembly_artifacts(
+            output_dir,
+            input_detections=args.input,
+            clips_dir=args.clips_dir,
         )
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
         sys.exit(1)
 
     with open(detections_path, encoding="utf-8") as f:

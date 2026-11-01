@@ -15,6 +15,16 @@ from pathlib import Path
 from rich.console import Console
 from rich.logging import RichHandler
 
+from utils.signals import setup_signal_handlers
+
+__all__ = [
+    "ExcludeNoConsoleFilter",
+    "configure_logging",
+    "default_log_path",
+    "get_console",
+    "setup_signal_handlers",
+]
+
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # Marks the handlers this module installs, so reconfiguring replaces only those

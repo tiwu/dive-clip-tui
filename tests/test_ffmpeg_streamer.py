@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from utils.ffmpeg_streamer import _try_create, cleanup_work_dir, extract_frames, get_work_dir
 
 
@@ -245,3 +247,54 @@ def test_extract_frames_short_clip_fallback(tmp_path: Path) -> None:
     assert frames[0]["frame_number"] == 1
     assert frames[0]["timestamp"] == 0.0
     assert call_count == 3  # probe duration, ffmpeg fps pass, fallback ffmpeg frame
+
+
+def test_concat_clips_success(tmp_path: Path) -> None:
+    """concat_clips should invoke ffmpeg concat demuxer and succeed."""
+    from utils.ffmpeg_streamer import concat_clips
+
+    c1 = tmp_path / "c1.mp4"
+    c2 = tmp_path / "c2.mp4"
+    c1.touch()
+    c2.touch()
+    out = tmp_path / "out.mp4"
+
+    mock_res = MagicMock()
+    mock_res.returncode = 0
+    mock_res.stderr = ""
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", return_value=mock_res) as mock_run:
+        assert concat_clips([c1, c2], out) is True
+
+    call_args = mock_run.call_args[0][0]
+    assert "-f" in call_args
+    assert "concat" in call_args
+    assert not (tmp_path / "concat_list.txt").exists()
+
+
+def test_concat_clips_failure_and_cleanup(tmp_path: Path) -> None:
+    """concat_clips should clean up list file and return False on failure."""
+    from utils.ffmpeg_streamer import concat_clips
+
+    c1 = tmp_path / "c1.mp4"
+    c1.touch()
+    out = tmp_path / "out.mp4"
+
+    mock_res = MagicMock()
+    mock_res.returncode = 1
+    mock_res.stderr = "fail"
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", return_value=mock_res):
+        assert concat_clips([c1], out) is False
+    assert not (tmp_path / "concat_list.txt").exists()
+
+
+def test_concat_clips_rejects_newlines(tmp_path: Path) -> None:
+    """concat_clips should raise ValueError on newline in path."""
+    from utils.ffmpeg_streamer import concat_clips
+
+    bad_path = tmp_path / "clip\n.mp4"
+    out = tmp_path / "out.mp4"
+
+    with pytest.raises(ValueError, match="Path contains newline character"):
+        concat_clips([bad_path], out)

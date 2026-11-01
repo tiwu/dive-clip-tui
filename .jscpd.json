@@ -1,0 +1,17 @@
+{
+  "reporters": ["console"],
+  "ignore": [
+    "**/.venv/**",
+    "**/__pycache__/**",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/outputs/**",
+    "**/.agents/**",
+    "**/_agents/**",
+    "**/node_modules/**"
+  ],
+  "format": ["python"],
+  "path": ["scripts", "utils", "tui"],
+  "minLines": 10,
+  "minTokens": 50
+}

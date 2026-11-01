@@ -146,6 +146,48 @@ def resolve_assembly_artifacts(
     return detections_path, resolved_clips_dir, latest_run
 
 
+def validate_assembly_inputs(
+    detections_path: Path,
+    clips_dir: Path,
+) -> Path:
+    """Validate that detections JSON and clips directory exist, falling back to repo outputs.
+
+    Returns the verified detections Path, or raises FileNotFoundError.
+    """
+    if not detections_path.exists():
+        alt = Path(__file__).resolve().parent.parent / "outputs" / "detections_refined.json"
+        if alt.exists():
+            detections_path = alt
+        else:
+            raise FileNotFoundError(
+                f"detections_refined.json not found at {detections_path}. Run 02_scan_footage.py first."
+            )
+
+    if not clips_dir.exists():
+        raise FileNotFoundError(
+            f"Clips directory not found: {clips_dir}. Run 05_render_clips.py first to render detection clips."
+        )
+
+    return detections_path
+
+
+def resolve_and_validate_assembly_artifacts(
+    output_dir: Path | str,
+    input_detections: Path | str | None = None,
+    clips_dir: Path | str | None = None,
+) -> tuple[Path, Path, Path | None]:
+    """Resolve and validate detections path and clips directory for video assembly.
+
+    Returns (verified_detections_path, clips_dir, latest_run).
+    Raises FileNotFoundError if artifacts are missing.
+    """
+    detections_path, resolved_clips_dir, latest_run = resolve_assembly_artifacts(
+        output_dir, input_detections=input_detections, clips_dir=clips_dir
+    )
+    detections_path = validate_assembly_inputs(detections_path, resolved_clips_dir)
+    return detections_path, resolved_clips_dir, latest_run
+
+
 def archive_file(
     source: Path | str,
     destination_dir: Path | str,

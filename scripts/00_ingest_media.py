@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -17,21 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.logging_setup import configure_logging
+from utils.signals import setup_signal_handlers
 
 logger = logging.getLogger(__name__)
-
-
-def setup_signal_handlers() -> None:
-    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
-
-    def _handler(signum: int, frame: object) -> None:
-        raise KeyboardInterrupt
-
-    try:
-        signal.signal(signal.SIGINT, _handler)
-        signal.signal(signal.SIGTERM, _handler)
-    except ValueError, AttributeError:
-        pass
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mpg", ".mpeg"}

@@ -173,3 +173,59 @@ def cleanup_work_dir(path: str | Path) -> None:
     if path in (Path("/dev/shm"), Path("/dev/shm/dive_worker_tmp"), Path("/"), Path("/tmp")):
         return
     shutil.rmtree(path, ignore_errors=True)
+
+
+def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
+    """Concatenate MP4 clips using FFmpeg's concat demuxer.
+
+    All clips must have compatible codec/resolution.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # FFmpeg concat demuxer requires absolute or relative paths in the list file.
+    list_path = output_path.parent / "concat_list.txt"
+    try:
+        with open(list_path, "w", encoding="utf-8") as f:
+            for clip in clip_paths:
+                path_str = str(clip.resolve())
+                if "\n" in path_str or "\r" in path_str:
+                    raise ValueError(f"Path contains newline character: {path_str}")
+                # FFmpeg concat demuxer escaping for single-quoted string: escape \ then '
+                escaped = path_str.replace("\\", "\\\\").replace("'", "\\'")
+                f.write(f"file '{escaped}'\n")
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(output_path),
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            logger.warning("FFmpeg timeout concatenating to %s", output_path.name)
+            return False
+        except Exception as exc:
+            logger.warning("FFmpeg error: %s", exc)
+            return False
+
+        if result.returncode != 0:
+            logger.warning("FFmpeg concat failed: %s", (result.stderr or "").strip()[:200])
+            return False
+
+        return True
+    finally:
+        list_path.unlink(missing_ok=True)

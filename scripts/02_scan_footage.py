@@ -14,7 +14,6 @@ import json
 import logging
 import os
 import re
-import signal
 import sys
 import time
 from pathlib import Path
@@ -56,6 +55,7 @@ from utils.prompt_templates import (
     resolve_template_for_subject,
 )
 from utils.run_archive import archive_run_artifacts, get_run_dir
+from utils.signals import setup_signal_handlers
 from utils.stats import (
     Phase0Stats,
     Phase1Stats,
@@ -68,19 +68,6 @@ from utils.stats import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def setup_signal_handlers() -> None:
-    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
-
-    def _handler(signum: int, frame: Any) -> None:
-        raise KeyboardInterrupt
-
-    try:
-        signal.signal(signal.SIGINT, _handler)
-        signal.signal(signal.SIGTERM, _handler)
-    except ValueError, AttributeError:
-        pass
 
 
 def call_ollama(
