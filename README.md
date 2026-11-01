@@ -189,6 +189,28 @@ To resume an interrupted or completed run:
 Saves merge with the existing file on disk, so the orchestrator and the scan and
 render workers can share one state path without overwriting each other's work.
 
+### Reviewing and recording clip feedback
+
+To review rendered highlight clips from a scan, open each in your default media player, and record judgments in the terminal:
+
+```bash
+uv run dive-clip review
+```
+
+Options:
+- `--run <RUN_ID_OR_PATH>`: Review a specific run ID or folder (defaults to the latest run)
+- `--all`: Re-review all clips in the run, including those with existing saved feedback
+
+For each clip, your platform's video player launches automatically while the terminal prompts for:
+- `[k]eep`: Highlight is accurate and worth keeping
+- `[r]eject`: False detection or unwanted highlight
+- `[w]rong subject`: Accurate highlight window but detected subject was wrong (prompts for corrected subject)
+- `[s]kip`: Skip this clip without recording feedback
+- `[b]ack`: Step back to the previous clip
+- `[q]uit`: Exit review and display feedback summary
+
+Feedback is saved atomically after each response to `<run_dir>/feedback.json`. When review ends, a summary table displays decision counts alongside all subject corrections and notes, providing concrete evidence for manual prompt refinement.
+
 ## Legacy terminal UI
 
 The old Textual prototype remains available but is not maintained. It cannot

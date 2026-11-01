@@ -13,6 +13,8 @@ import argparse
 import importlib.util
 import json
 import logging
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,9 +22,11 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.table import Table
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
@@ -475,7 +479,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     dets_list = json.load(f).get("detections", [])
             except Exception:
                 pass
-        rendered_files = list(highlights_dir.glob("*.mp4")) if highlights_dir.exists() else []
+        rendered_files = (
+            [p for p in highlights_dir.glob("*.mp4") if not p.name.startswith(".")]
+            if highlights_dir.exists()
+            else []
+        )
         total_highlight_dur = sum(
             max(0.0, float(d.get("end_time", 0)) - float(d.get("start_time", 0))) for d in dets_list
         )
@@ -695,6 +703,357 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
     return rc
 
 
+def open_clip_player(clip_path: Path) -> bool:
+    """Open a video clip with the operating system default video player."""
+    if not clip_path.exists():
+        logger.error("Clip file not found: %s", clip_path)
+        return False
+    try:
+        if sys.platform == "darwin":
+            cmd = ["open", str(clip_path)]
+        elif sys.platform.startswith("win"):
+            if hasattr(os, "startfile"):
+                os.startfile(str(clip_path))
+                return True
+            cmd = ["cmd", "/c", "start", "", str(clip_path)]
+        else:
+            cmd = ["xdg-open", str(clip_path)]
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return True
+    except Exception as exc:
+        logger.error("Failed to open player for %s: %s", clip_path.name, exc)
+        return False
+
+
+def load_feedback(feedback_path: Path) -> dict[str, Any]:
+    """Load existing feedback dictionary from feedback.json."""
+    if feedback_path.exists():
+        try:
+            with open(feedback_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:
+            logger.warning("Could not read feedback file %s: %s", feedback_path, exc)
+    return {"run_id": feedback_path.parent.name, "feedback": {}}
+
+
+def save_feedback(feedback_path: Path, data: dict[str, Any]) -> None:
+    """Atomically save feedback dictionary to feedback.json."""
+    data["updated_at"] = datetime.now(UTC).isoformat()
+    tmp_path = feedback_path.with_name(f".tmp_{feedback_path.name}")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        tmp_path.replace(feedback_path)
+    except Exception as exc:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        logger.error("Failed to save feedback to %s: %s", feedback_path, exc)
+
+
+def summarize_feedback(feedback_items: dict[str, Any]) -> None:
+    """Display a concise summary of review decisions and notes."""
+    console = get_console()
+    counts = {"keep": 0, "reject": 0, "wrong_subject": 0}
+    corrections: list[tuple[str, str, str, str]] = []
+
+    for clip_name, item in feedback_items.items():
+        dec = item.get("decision", "")
+        if dec in counts:
+            counts[dec] += 1
+        if dec == "wrong_subject" or item.get("note"):
+            corrections.append((
+                clip_name,
+                item.get("detected_subject", "unknown"),
+                item.get("corrected_subject") or "-",
+                item.get("note") or "",
+            ))
+
+    total = sum(counts.values())
+    logger.info(
+        "Feedback Summary: total=%d, keep=%d, reject=%d, wrong_subject=%d",
+        total,
+        counts["keep"],
+        counts["reject"],
+        counts["wrong_subject"],
+    )
+    for c_name, det_subj, corr_subj, note in corrections:
+        logger.info(
+            "  - %s: detected='%s', corrected='%s', note='%s'",
+            c_name,
+            det_subj,
+            corr_subj,
+            note,
+        )
+
+    if console.is_terminal:
+        console.print(Rule("[bold green]Feedback Summary[/bold green]", style="green"))
+        table = Table(title=f"Review Results ({total} clips judged)")
+        table.add_column("Decision", style="bold")
+        table.add_column("Count", justify="right")
+        table.add_row("[green]Keep[/green]", str(counts["keep"]))
+        table.add_row("[red]Reject[/red]", str(counts["reject"]))
+        table.add_row("[yellow]Wrong Subject[/yellow]", str(counts["wrong_subject"]))
+        console.print(table)
+
+        if corrections:
+            detail_table = Table(title="Corrections & Notes")
+            detail_table.add_column("Clip", style="cyan")
+            detail_table.add_column("Detected", style="magenta")
+            detail_table.add_column("Corrected", style="green")
+            detail_table.add_column("Note", style="white")
+            for c_name, det_subj, corr_subj, note in corrections:
+                detail_table.add_row(c_name, det_subj, corr_subj, note)
+            console.print(detail_table)
+
+
+def _slugify(text: str) -> str:
+    """Convert a string to a filesystem-safe slug (matches 05_render_clips.slugify)."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", text)[:40]
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """Review rendered clips from a run and record feedback interactively."""
+    try:
+        general = load_general_config(args.config)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    output_value = getattr(args, "output", None) or general.get("output_dir") or "./outputs"
+    output_folder = Path(output_value)
+
+    run_target = getattr(args, "run", None)
+    if run_target:
+        try:
+            run_dir = resolve_run_dir(output_folder, run_target)
+        except FileNotFoundError as exc:
+            logger.error("%s", exc)
+            return 1
+    else:
+        latest_dir = find_latest_run_dir(output_folder)
+        if latest_dir is None:
+            logger.error("No runs found in %s to review.", output_folder)
+            return 1
+        run_dir = latest_dir
+
+    highlights_dir = run_dir / "highlights"
+    if not highlights_dir.exists():
+        logger.error("Highlights folder does not exist: %s", highlights_dir)
+        return 1
+
+    clip_paths = sorted(p for p in highlights_dir.glob("*.mp4") if not p.name.startswith("."))
+    if not clip_paths:
+        logger.info("No rendered clips found in %s.", highlights_dir)
+        return 0
+
+    detections_path = run_dir / "detections_refined.json"
+    if not detections_path.exists():
+        detections_path = run_dir / "detections.json"
+
+    detections_by_name: dict[str, dict[str, Any]] = {}
+    if detections_path.exists():
+        try:
+            with open(detections_path, encoding="utf-8") as f:
+                det_data = json.load(f)
+            for i, d in enumerate(det_data.get("detections", []), start=1):
+                start_t = float(d.get("start_time", 0))
+                end_t = float(d.get("end_time", start_t + 5))
+                raw_subj = d.get("subject", "unknown")
+                subj_slug = _slugify(raw_subj)
+                q = d.get("quality_score", 0)
+                raw_cid = str(d.get("clip_id", f"clip{i}"))
+                cid_slug = _slugify(raw_cid)
+                # Key by both slugified filename and raw filename
+                detections_by_name[
+                    f"{cid_slug}_{start_t:.1f}s-{end_t:.1f}s_{subj_slug}_q{q}.mp4"
+                ] = d
+                detections_by_name[f"{raw_cid}_{start_t:.1f}s-{end_t:.1f}s_{raw_subj}_q{q}.mp4"] = d
+        except Exception as exc:
+            logger.debug("Could not read detections for review context: %s", exc)
+
+    feedback_path = run_dir / "feedback.json"
+    feedback_state = load_feedback(feedback_path)
+    feedback_dict: dict[str, Any] = feedback_state.setdefault("feedback", {})
+    if not isinstance(feedback_dict, dict):
+        feedback_dict = {}
+        feedback_state["feedback"] = feedback_dict
+
+    review_all = getattr(args, "all", False)
+    if not review_all:
+        review_queue = [p for p in clip_paths if p.name not in feedback_dict]
+    else:
+        review_queue = list(clip_paths)
+
+    if not review_queue:
+        logger.info(
+            "No unanswered clips to review in %s (%d clips already judged). Use --all to re-review.",
+            run_dir.name,
+            len(feedback_dict),
+        )
+        summarize_feedback(feedback_dict)
+        return 0
+
+    console = get_console()
+    idx = 0
+    total_queue = len(review_queue)
+
+    logger.info("Starting review of %d clips in run %s", total_queue, run_dir.name)
+    logger.info("Controls: [k]eep, [r]eject, [w]rong subject, [s]kip, [b]ack, [q]uit")
+
+    while 0 <= idx < total_queue:
+        clip_path = review_queue[idx]
+        clip_name = clip_path.name
+        det = detections_by_name.get(clip_name, {})
+
+        if not det:
+            # Fallback parse: {cid}_{start}s-{end}s_{subject}_q{quality}.mp4
+            m = re.match(r"^.+?_([\d\.]+)s-([\d\.]+)s_(.+?)_q\d+\.mp4$", clip_name)
+            if m:
+                start_t = float(m.group(1))
+                end_t = float(m.group(2))
+                detected_subject = m.group(3).replace("_", " ")
+            else:
+                start_t = 0.0
+                end_t = 0.0
+                detected_subject = "unknown"
+            source_file = "unknown source"
+            domain = "generic"
+        else:
+            source_file = det.get("file_name") or det.get("file_path") or "unknown source"
+            start_t = float(det.get("start_time", 0))
+            end_t = float(det.get("end_time", 0))
+            detected_subject = det.get("subject", "unknown")
+            domain = det.get("domain") or det.get("template") or "generic"
+
+        prior = feedback_dict.get(clip_name)
+        status_str = f" [Previous: {prior.get('decision')}]" if prior else ""
+
+        if console.is_terminal:
+            console.print(
+                Rule(
+                    f"[bold cyan]Clip {idx + 1}/{total_queue}: {clip_name}{status_str}[/bold cyan]"
+                )
+            )
+            console.print(
+                f"[bold white]Source:[/]   {source_file} "
+                f"([yellow]{start_t:.1f}s - {end_t:.1f}s[/yellow])\n"
+                f"[bold white]Subject:[/]  [green]{detected_subject}[/green] "
+                f"([dim]domain: {domain}[/dim])"
+            )
+
+        if not clip_path.exists():
+            console.print(f"[red]Clip file not found: {clip_name}[/red]")
+            console.print("[yellow]You can still judge, [s]kip, or [q]uit.[/yellow]")
+        elif not open_clip_player(clip_path):
+            console.print(
+                "[yellow]Could not open player. You can still judge, [s]kip, or [q]uit.[/yellow]"
+            )
+
+        try:
+            choice = input("Decision [k/r/w/s/b/q]: ").strip().lower()
+        except EOFError, KeyboardInterrupt:
+            console.print("\n[yellow]Review paused by user.[/yellow]")
+            break
+
+        if choice in ("q", "quit"):
+            break
+
+        if choice in ("b", "back"):
+            if idx > 0:
+                idx -= 1
+            else:
+                console.print("[yellow]Already at the first clip.[/yellow]")
+            continue
+
+        if choice in ("s", "skip"):
+            idx += 1
+            continue
+
+        if choice in ("k", "keep"):
+            try:
+                note = input("Note (optional, press Enter to skip): ").strip()
+            except EOFError, KeyboardInterrupt:
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
+            feedback_dict[clip_name] = {
+                "clip_file": clip_name,
+                "decision": "keep",
+                "corrected_subject": None,
+                "note": note or None,
+                "source_file": str(source_file),
+                "start_time": start_t,
+                "end_time": end_t,
+                "detected_subject": detected_subject,
+                "domain": domain,
+                "reviewed_at": datetime.now(UTC).isoformat(),
+            }
+            save_feedback(feedback_path, feedback_state)
+            idx += 1
+            continue
+
+        if choice in ("r", "reject"):
+            try:
+                note = input("Note (optional, press Enter to skip): ").strip()
+            except EOFError, KeyboardInterrupt:
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
+            feedback_dict[clip_name] = {
+                "clip_file": clip_name,
+                "decision": "reject",
+                "corrected_subject": None,
+                "note": note or None,
+                "source_file": str(source_file),
+                "start_time": start_t,
+                "end_time": end_t,
+                "detected_subject": detected_subject,
+                "domain": domain,
+                "reviewed_at": datetime.now(UTC).isoformat(),
+            }
+            save_feedback(feedback_path, feedback_state)
+            idx += 1
+            continue
+
+        if choice in ("w", "wrong", "wrong subject", "wrong_subject"):
+            try:
+                corrected = input("Corrected subject: ").strip()
+            except EOFError, KeyboardInterrupt:
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
+            try:
+                note = input("Note (optional, press Enter to skip): ").strip()
+            except EOFError, KeyboardInterrupt:
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
+            feedback_dict[clip_name] = {
+                "clip_file": clip_name,
+                "decision": "wrong_subject",
+                "corrected_subject": corrected or None,
+                "note": note or None,
+                "source_file": str(source_file),
+                "start_time": start_t,
+                "end_time": end_t,
+                "detected_subject": detected_subject,
+                "domain": domain,
+                "reviewed_at": datetime.now(UTC).isoformat(),
+            }
+            save_feedback(feedback_path, feedback_state)
+            idx += 1
+            continue
+
+        console.print(
+            "[red]Invalid choice. Enter 'k' (keep), 'r' (reject), 'w' (wrong subject), 's' (skip), 'b' (back), or 'q' (quit).[/red]"
+        )
+
+    summarize_feedback(feedback_dict)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     version = get_version()
     parser = argparse.ArgumentParser(description="dive-clip — Local footage curation pipeline")
@@ -844,6 +1203,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional logfile path",
     )
     aftermovie_p.set_defaults(func=cmd_aftermovie)
+
+    review_p = sub.add_parser("review", help="Review and record feedback on rendered clips")
+    review_p.add_argument(
+        "--run",
+        default=None,
+        metavar="RUN_ID_OR_PATH",
+        help="Run ID or path to review (default: latest run)",
+    )
+    review_p.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="Include clips with existing feedback to edit them",
+    )
+    review_p.add_argument(
+        "--output",
+        default=None,
+        help="Base output directory (defaults to general.output_dir in config)",
+    )
+    review_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    review_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    review_p.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional logfile path",
+    )
+    review_p.set_defaults(func=cmd_review)
 
     return parser
 

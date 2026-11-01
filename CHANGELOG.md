@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add a CLI flow to review rendered clips and save keep, reject, and subject-correction feedback per run.
+
 ## [0.19.2] - 2026-11-01
 
 ### Fixed
