@@ -679,7 +679,7 @@ def test_build_parser_scan_assemble_flags() -> None:
     default_args = parser.parse_args(["scan", "--input", "/in", "--output", "/out"])
     assert default_args.assemble is False
     assert default_args.music is None
-    assert default_args.top_n == 10
+    assert default_args.top_n is None
     assert default_args.assemble_mode == "aftermovie"
 
     custom_args = parser.parse_args([
@@ -691,8 +691,7 @@ def test_build_parser_scan_assemble_flags() -> None:
         "--assemble",
         "--music",
         "/tmp/track.mp3",
-        "--top-n",
-        "5",
+        "--top-n=5",
         "--assemble-mode",
         "simple",
     ])
@@ -1084,3 +1083,32 @@ def test_cmd_aftermovie_reads_top_n_from_config(tmp_path: Path) -> None:
 
     cmd = mock_run.call_args.args[0]
     assert cmd[cmd.index("--top-n") + 1] == "15"
+
+
+def test_cmd_aftermovie_reads_volume_and_fade_from_config(tmp_path: Path) -> None:
+    """dive-clip aftermovie should resolve music_volume and fade_duration from config."""
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    config_file = tmp_path / "config.aftermovie.yaml"
+    config_file.write_text(
+        f'general:\n  output_dir: "{output_folder}"\n'
+        "aftermovie:\n"
+        "  top_n_clips: 12\n"
+        "  music_volume: 0.25\n"
+        "  fade_duration: 2.0\n",
+        encoding="utf-8",
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(["aftermovie", "--config", str(config_file)])
+
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run:
+        assert args.func(args) == 0
+
+    cmd = mock_run.call_args.args[0]
+    assert cmd[cmd.index("--top-n") + 1] == "12"
+    assert cmd[cmd.index("--music-volume") + 1] == "0.25"
+    assert cmd[cmd.index("--fade-duration") + 1] == "2.0"

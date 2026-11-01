@@ -35,6 +35,7 @@ from utils.run_archive import (  # noqa: E402
     archive_run_artifacts,
     find_latest_run_dir,
     get_run_dir,
+    resolve_assembly_artifacts,
     resolve_run_dir,
     update_latest_symlink,
 )
@@ -564,50 +565,49 @@ def resolve_assembly_inputs(
     else:
         output_path = output_dir / default_filename
 
-    latest_link = output_dir / "latest"
-    latest_run: Path | None = (
-        latest_link.resolve() if latest_link.exists() else find_latest_run_dir(output_dir)
+    detections_path, clips_dir, latest_run = resolve_assembly_artifacts(
+        output_dir,
+        input_detections=getattr(args, "input", None),
+        clips_dir=getattr(args, "clips_dir", None),
     )
 
-    raw_input = getattr(args, "input", None)
-    if raw_input:
-        detections_path = Path(raw_input)
-    elif (latest_link / "detections_refined.json").exists():
-        detections_path = (latest_link / "detections_refined.json").resolve()
-    elif latest_run and (latest_run / "detections_refined.json").exists():
-        detections_path = latest_run / "detections_refined.json"
-    else:
-        detections_path = output_dir / "detections_refined.json"
-
-    raw_clips_dir = getattr(args, "clips_dir", None)
-    if raw_clips_dir:
-        clips_dir = Path(raw_clips_dir)
-    elif (detections_path.parent / "highlights").exists():
-        clips_dir = detections_path.parent / "highlights"
-    elif (latest_link / "highlights").exists():
-        clips_dir = (latest_link / "highlights").resolve()
-    elif latest_run and (latest_run / "highlights").exists():
-        clips_dir = latest_run / "highlights"
-    else:
-        clips_dir = output_dir / "highlights"
-
     return detections_path, clips_dir, output_path, latest_run
+
+
+def _resolve_aftermovie_setting(
+    args: argparse.Namespace,
+    config_path: str | Path,
+    attr_name: str,
+    config_key: str,
+    default_val: float,
+) -> float:
+    """Resolve an aftermovie float setting from CLI args or config file."""
+    raw_val = getattr(args, attr_name, None)
+    if raw_val is not None:
+        return float(raw_val)
+    try:
+        full_cfg = load_config(config_path, default_to_empty=True)
+        aftermovie_cfg = full_cfg.get("aftermovie")
+        if isinstance(aftermovie_cfg, dict) and aftermovie_cfg.get(config_key) is not None:
+            return float(aftermovie_cfg[config_key])
+    except ConfigError:
+        pass
+    return default_val
 
 
 def _resolve_top_n(args: argparse.Namespace, config_path: str | Path) -> int:
     """Resolve top_n from CLI args, falling back to aftermovie.top_n_clips in config."""
     raw_top_n = getattr(args, "top_n", None)
-    if raw_top_n is not None and raw_top_n != 10:
+    if raw_top_n is not None:
         return int(raw_top_n)
-    if "--top-n" not in sys.argv:
-        try:
-            full_cfg = load_config(config_path, default_to_empty=True)
-            aftermovie_cfg = full_cfg.get("aftermovie")
-            if isinstance(aftermovie_cfg, dict) and aftermovie_cfg.get("top_n_clips") is not None:
-                return int(aftermovie_cfg["top_n_clips"])
-        except ConfigError:
-            pass
-    return int(raw_top_n or 10)
+    try:
+        full_cfg = load_config(config_path, default_to_empty=True)
+        aftermovie_cfg = full_cfg.get("aftermovie")
+        if isinstance(aftermovie_cfg, dict) and aftermovie_cfg.get("top_n_clips") is not None:
+            return int(aftermovie_cfg["top_n_clips"])
+    except ConfigError:
+        pass
+    return 10
 
 
 def cmd_assemble(args: argparse.Namespace) -> int:
@@ -652,8 +652,12 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
     detections_path, clips_dir, output_path, latest_run = resolved
 
     top_n = _resolve_top_n(args, args.config)
-    music_volume = getattr(args, "music_volume", 0.15)
-    fade_duration = getattr(args, "fade_duration", 1.0)
+    music_volume = _resolve_aftermovie_setting(
+        args, args.config, "music_volume", "music_volume", 0.15
+    )
+    fade_duration = _resolve_aftermovie_setting(
+        args, args.config, "fade_duration", "fade_duration", 1.0
+    )
     cmd = [
         sys.executable,
         str(SCRIPTS_DIR / "07_create_aftermovie.py"),
@@ -742,8 +746,8 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument(
         "--top-n",
         type=int,
-        default=10,
-        help="Number of top-quality clips to include when assembling (default: 10)",
+        default=None,
+        help="Number of top-quality clips to include when assembling (default: 10, or config)",
     )
     scan_p.add_argument(
         "--assemble-mode",
@@ -772,8 +776,8 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_p.add_argument(
         "--top-n",
         type=int,
-        default=10,
-        help="Number of top-quality clips to assemble (default: 10)",
+        default=None,
+        help="Number of top-quality clips to assemble (default: 10, or config)",
     )
     assemble_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     assemble_p.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -811,20 +815,20 @@ def build_parser() -> argparse.ArgumentParser:
     aftermovie_p.add_argument(
         "--music-volume",
         type=float,
-        default=0.15,
-        help="Music ducking level (default: 0.15)",
+        default=None,
+        help="Music ducking level (default: 0.15, or config)",
     )
     aftermovie_p.add_argument(
         "--fade-duration",
         type=float,
-        default=1.0,
-        help="Transition crossfade duration in seconds (default: 1.0)",
+        default=None,
+        help="Transition crossfade duration in seconds (default: 1.0, or config)",
     )
     aftermovie_p.add_argument(
         "--top-n",
         type=int,
-        default=10,
-        help="Number of top-quality clips to include (default: 10)",
+        default=None,
+        help="Number of top-quality clips to include (default: 10, or config)",
     )
     aftermovie_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     aftermovie_p.add_argument("--debug", action="store_true", help="Enable debug logging")

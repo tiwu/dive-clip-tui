@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
 from utils.logging_setup import configure_logging
-from utils.run_archive import find_latest_run_dir
+from utils.run_archive import resolve_assembly_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +118,8 @@ def main() -> None:
     parser.add_argument(
         "--top-n",
         type=int,
-        default=10,
-        help="Number of top-quality clips to include (default: 10)",
+        default=None,
+        help="Number of top-quality clips to include (default: 10, or config)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
@@ -141,14 +141,12 @@ def main() -> None:
     general = config.get("general", {})
     output_dir = Path(general.get("output_dir", "./outputs"))
 
-    # Resolve detections input path
-    detections_path = Path(args.input) if args.input else output_dir / "detections_refined.json"
-    if not detections_path.exists() and not args.input:
-        latest_run = find_latest_run_dir(output_dir)
-        if (output_dir / "latest" / "detections_refined.json").exists():
-            detections_path = output_dir / "latest" / "detections_refined.json"
-        elif latest_run and (latest_run / "detections_refined.json").exists():
-            detections_path = latest_run / "detections_refined.json"
+    # Resolve detections input path and clips directory
+    detections_path, clips_dir, _ = resolve_assembly_artifacts(
+        output_dir,
+        input_detections=args.input,
+        clips_dir=args.clips_dir,
+    )
     if not detections_path.exists():
         alt = Path(__file__).resolve().parent.parent / "outputs" / "detections_refined.json"
         if alt.exists():
@@ -160,16 +158,6 @@ def main() -> None:
             )
             sys.exit(1)
 
-    # Resolve clips directory
-    clips_dir = Path(args.clips_dir) if args.clips_dir else output_dir / "highlights"
-    if not clips_dir.exists() and not args.clips_dir:
-        latest_run = find_latest_run_dir(output_dir)
-        if (detections_path.parent / "highlights").exists():
-            clips_dir = detections_path.parent / "highlights"
-        elif (output_dir / "latest" / "highlights").exists():
-            clips_dir = output_dir / "latest" / "highlights"
-        elif latest_run and (latest_run / "highlights").exists():
-            clips_dir = latest_run / "highlights"
     if not clips_dir.exists():
         logger.error(
             "Clips directory not found: %s. Run 05_render_clips.py first to render detection clips.",
@@ -185,9 +173,13 @@ def main() -> None:
         logger.info("No detections found to assemble.")
         sys.exit(0)
 
-    # Sort by quality score (descending) and take top-N
+    # Sort by quality score (descending) and take top-N (CLI flag > config > default 10)
+    aftermovie_cfg = (
+        config.get("aftermovie", {}) if isinstance(config.get("aftermovie"), dict) else {}
+    )
+    top_n = args.top_n if args.top_n is not None else int(aftermovie_cfg.get("top_n_clips", 10))
     sorted_dets = sorted(detections, key=lambda d: d.get("quality_score", 0), reverse=True)
-    top_dets = sorted_dets[: args.top_n]
+    top_dets = sorted_dets[:top_n]
 
     logger.info("Assembling top %d of %d detections", len(top_dets), len(detections))
 

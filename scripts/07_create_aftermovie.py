@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
 from utils.logging_setup import configure_logging
-from utils.run_archive import find_latest_run_dir
+from utils.run_archive import resolve_assembly_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -321,8 +321,8 @@ def main() -> None:
     parser.add_argument(
         "--top-n",
         type=int,
-        default=10,
-        help="Number of top-quality clips to include (default: 10)",
+        default=None,
+        help="Number of top-quality clips to include (default: 10, or config)",
     )
     parser.add_argument(
         "--music",
@@ -332,8 +332,8 @@ def main() -> None:
     parser.add_argument(
         "--music-volume",
         type=float,
-        default=0.15,
-        help="Background music volume relative to video audio (default: 0.15)",
+        default=None,
+        help="Background music volume relative to video audio (default: 0.15, or config)",
     )
     parser.add_argument(
         "--aspect-ratio",
@@ -344,8 +344,8 @@ def main() -> None:
     parser.add_argument(
         "--fade-duration",
         type=float,
-        default=1.0,
-        help="Cross-dissolve fade duration in seconds (default: 1.0)",
+        default=None,
+        help="Cross-dissolve fade duration in seconds (default: 1.0, or config)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
@@ -367,14 +367,12 @@ def main() -> None:
     general = config.get("general", {})
     output_dir = Path(general.get("output_dir", "./outputs"))
 
-    # Resolve detections input path
-    detections_path = Path(args.input) if args.input else output_dir / "detections_refined.json"
-    if not detections_path.exists() and not args.input:
-        latest_run = find_latest_run_dir(output_dir)
-        if (output_dir / "latest" / "detections_refined.json").exists():
-            detections_path = output_dir / "latest" / "detections_refined.json"
-        elif latest_run and (latest_run / "detections_refined.json").exists():
-            detections_path = latest_run / "detections_refined.json"
+    # Resolve detections input path and clips directory
+    detections_path, clips_dir, _ = resolve_assembly_artifacts(
+        output_dir,
+        input_detections=args.input,
+        clips_dir=args.clips_dir,
+    )
     if not detections_path.exists():
         alt = Path(__file__).resolve().parent.parent / "outputs" / "detections_refined.json"
         if alt.exists():
@@ -386,22 +384,27 @@ def main() -> None:
             )
             sys.exit(1)
 
-    # Resolve clips directory
-    clips_dir = Path(args.clips_dir) if args.clips_dir else output_dir / "highlights"
-    if not clips_dir.exists() and not args.clips_dir:
-        latest_run = find_latest_run_dir(output_dir)
-        if (detections_path.parent / "highlights").exists():
-            clips_dir = detections_path.parent / "highlights"
-        elif (output_dir / "latest" / "highlights").exists():
-            clips_dir = output_dir / "latest" / "highlights"
-        elif latest_run and (latest_run / "highlights").exists():
-            clips_dir = latest_run / "highlights"
     if not clips_dir.exists():
         logger.error(
             "Clips directory not found: %s. Run 05_render_clips.py first to render detection clips.",
             clips_dir,
         )
         sys.exit(1)
+
+    aftermovie_cfg = (
+        config.get("aftermovie", {}) if isinstance(config.get("aftermovie"), dict) else {}
+    )
+    top_n = args.top_n if args.top_n is not None else int(aftermovie_cfg.get("top_n_clips", 10))
+    music_volume = (
+        args.music_volume
+        if args.music_volume is not None
+        else float(aftermovie_cfg.get("music_volume", 0.15))
+    )
+    fade_duration = (
+        args.fade_duration
+        if args.fade_duration is not None
+        else float(aftermovie_cfg.get("fade_duration", 1.0))
+    )
 
     with open(detections_path, encoding="utf-8") as f:
         detections_data = json.load(f)
@@ -413,7 +416,7 @@ def main() -> None:
 
     # Sort by quality score (descending) and take top-N
     sorted_dets = sorted(detections, key=lambda d: d.get("quality_score", 0), reverse=True)
-    top_dets = sorted_dets[: args.top_n]
+    top_dets = sorted_dets[:top_n]
 
     logger.info("Creating aftermovie from top %d of %d detections", len(top_dets), len(detections))
 
@@ -446,32 +449,33 @@ def main() -> None:
                     logger.warning("  SKIP: source not found for %s", clip_id)
                     continue
                 if not render_clip_with_fade(
-                    source_path, start_time, end_time, source, fade_duration=args.fade_duration
+                    source_path, start_time, end_time, source, fade_duration=fade_duration
                 ):
                     continue
 
             # Apply fade-in/fade-out for cross-dissolve effect
             faded = tmp_dir / f"{clip_id}_faded.mp4"
-            duration_probe = subprocess.run(
-                [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration",
-                    "-of",
-                    "default=noprint_wrappers=1",
-                    str(source),
-                ],
-                capture_output=True,
-                text=True,
-            )
             try:
+                duration_probe = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v",
+                        "error",
+                        "-show_entries",
+                        "format=duration",
+                        "-of",
+                        "default=noprint_wrappers=1",
+                        str(source),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
                 dur = float(duration_probe.stdout.strip())
-            except ValueError:
+            except subprocess.TimeoutExpired, ValueError:
                 dur = 5.0
 
-            if not render_clip_with_fade(source, 0, dur, faded, fade_duration=args.fade_duration):
+            if not render_clip_with_fade(source, 0, dur, faded, fade_duration=fade_duration):
                 logger.warning("  SKIP: failed to apply fade to %s", source.name)
                 continue
 
@@ -507,10 +511,10 @@ def main() -> None:
             aspect_converted = assembled
 
         if add_background_music(
-            aspect_converted, music_path, output_path, args.music_volume, args.aspect_ratio
+            aspect_converted, music_path, output_path, music_volume, args.aspect_ratio
         ):
             if music_path:
-                logger.info("✓ Added background music (volume %s)", args.music_volume)
+                logger.info("✓ Added background music (volume %s)", music_volume)
             logger.info("✓ Aftermovie created: %s", output_path)
         else:
             logger.warning("Failed to add music. Outputting assembled video without music.")
