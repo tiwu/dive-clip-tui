@@ -105,7 +105,12 @@ def _run_background_render_worker(
                     data = json.load(f)
                 dets = data.get("detections", [])
                 if dets:
-                    render_detections(dets, highlights_dir, log_to_console=False)
+                    render_detections(
+                        dets,
+                        highlights_dir,
+                        log_to_console=False,
+                        stop_event=stop_event,
+                    )
             except Exception as exc:
                 logger.debug("Background render check: %s", exc)
         stop_event.wait(1.0)
@@ -322,7 +327,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             )
         finally:
             stop_render_event.set()
-            render_thread.join(timeout=2.0)
+            render_thread.join()
 
         if rc != 0:
             if rc == 130:

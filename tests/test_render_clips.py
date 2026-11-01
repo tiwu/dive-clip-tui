@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -423,3 +424,184 @@ def test_render_detections_quiet_mode(tmp_path: Path) -> None:
     assert failed == 0
     assert mock_info.called
     assert mock_info.call_args[1].get("extra", {}).get("no_console") is True
+
+
+def test_is_valid_clip(tmp_path: Path) -> None:
+    """is_valid_clip should accurately check ffprobe video stream and duration."""
+    clip = tmp_path / "test.mp4"
+
+    # Nonexistent
+    assert render.is_valid_clip(clip) is False
+
+    # 0-byte file
+    clip.touch()
+    assert render.is_valid_clip(clip) is False
+
+    # Mock ffprobe failure
+    clip.write_bytes(b"garbage")
+    mock_fail = MagicMock(returncode=1, stdout="", stderr="error")
+    with patch.object(render.subprocess, "run", return_value=mock_fail):
+        assert render.is_valid_clip(clip) is False
+
+    # Mock ffprobe success but no video stream
+    mock_no_stream = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"streams": [], "format": {"duration": "5.0"}}),
+    )
+    with patch.object(render.subprocess, "run", return_value=mock_no_stream):
+        assert render.is_valid_clip(clip) is False
+
+    # Mock ffprobe success but non-positive duration
+    mock_zero_duration = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"streams": [{"codec_name": "h264"}], "format": {"duration": "0.0"}}),
+    )
+    with patch.object(render.subprocess, "run", return_value=mock_zero_duration):
+        assert render.is_valid_clip(clip) is False
+
+    # Mock ffprobe success with video stream and positive duration
+    mock_valid = MagicMock(
+        returncode=0,
+        stdout=json.dumps({"streams": [{"codec_name": "h264"}], "format": {"duration": "5.2"}}),
+    )
+    with patch.object(render.subprocess, "run", return_value=mock_valid):
+        assert render.is_valid_clip(clip) is True
+
+
+def test_render_clip_atomic_staging_and_cleanup(tmp_path: Path) -> None:
+    """render_clip should write to temp file, validate, atomically replace, and clean on failure."""
+    source = tmp_path / "source.mp4"
+    source.touch()
+    output = tmp_path / "output.mp4"
+    temp_file = output.with_name(f".tmp_{output.name}")
+
+    # Success case: ffmpeg creates temp_file, validation succeeds, temp_file atomically promoted
+    def mock_ffmpeg_success(cmd, **kwargs):
+        temp_path = Path(cmd[-1])
+        temp_path.write_bytes(b"temp video content")
+        return MagicMock(returncode=0, stderr="")
+
+    with (
+        patch.object(render.subprocess, "run", side_effect=mock_ffmpeg_success),
+        patch.object(render, "is_valid_clip", return_value=True) as mock_valid,
+    ):
+        result = render.render_clip(source, 0.0, 5.0, output)
+        assert result is True
+        assert output.exists()
+        assert not temp_file.exists()
+        assert output.read_bytes() == b"temp video content"
+        mock_valid.assert_called_once_with(temp_file)
+
+    output.unlink()
+
+    # Validation failure case: temp file created by ffmpeg but invalid -> cleaned up, output not created
+    with (
+        patch.object(render.subprocess, "run", side_effect=mock_ffmpeg_success),
+        patch.object(render, "is_valid_clip", return_value=False),
+    ):
+        result = render.render_clip(source, 0.0, 5.0, output)
+        assert result is False
+        assert not output.exists()
+        assert not temp_file.exists()
+
+    # Timeout case: temp file created then timeout raised -> temp file cleaned up, output not created
+    def mock_ffmpeg_timeout(cmd, **kwargs):
+        temp_path = Path(cmd[-1])
+        temp_path.write_bytes(b"partial video content")
+        raise subprocess.TimeoutExpired("ffmpeg", 300)
+
+    with patch.object(render.subprocess, "run", side_effect=mock_ffmpeg_timeout):
+        result = render.render_clip(source, 0.0, 5.0, output)
+        assert result is False
+        assert not output.exists()
+        assert not temp_file.exists()
+
+    # KeyboardInterrupt case: temp file created then interrupt -> temp cleaned, re-raised
+    def mock_ffmpeg_interrupt(cmd, **kwargs):
+        temp_path = Path(cmd[-1])
+        temp_path.write_bytes(b"partial video content")
+        raise KeyboardInterrupt()
+
+    with (
+        patch.object(render.subprocess, "run", side_effect=mock_ffmpeg_interrupt),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        render.render_clip(source, 0.0, 5.0, output)
+    assert not output.exists()
+    assert not temp_file.exists()
+
+
+def test_render_detections_stop_event(tmp_path: Path) -> None:
+    """render_detections should halt scheduling when stop_event is set."""
+    import threading
+
+    source = tmp_path / "source.mp4"
+    source.touch()
+    highlights_dir = tmp_path / "highlights"
+
+    detections = [
+        {"clip_id": "c1", "file_path": str(source), "start_time": 0.0, "end_time": 5.0},
+        {"clip_id": "c2", "file_path": str(source), "start_time": 5.0, "end_time": 10.0},
+        {"clip_id": "c3", "file_path": str(source), "start_time": 10.0, "end_time": 15.0},
+    ]
+
+    stop_event = threading.Event()
+    rendered_clips = []
+
+    def mock_render(src, start, end, out, log_to_console=True):
+        rendered_clips.append(out.name)
+        # Signal stop after first clip renders
+        stop_event.set()
+        return True
+
+    with patch.object(render, "render_clip", side_effect=mock_render):
+        rendered_count, failed_count = render.render_detections(
+            detections, highlights_dir, stop_event=stop_event
+        )
+
+    # Only first clip was rendered because stop_event halted loop before c2
+    assert rendered_count == 1
+    assert failed_count == 0
+    assert len(rendered_clips) == 1
+
+
+def test_render_detections_retries_invalid_existing(tmp_path: Path) -> None:
+    """render_detections should re-render 0-byte or invalid clips when validate_existing=True."""
+    source = tmp_path / "source.mp4"
+    source.touch()
+    highlights_dir = tmp_path / "highlights"
+    highlights_dir.mkdir(parents=True)
+
+    # c1 is 0-byte empty file
+    c1_path = highlights_dir / "c1_0.0s-5.0s_unknown_q0.mp4"
+    c1_path.touch()
+
+    # c2 is non-empty but invalid
+    c2_path = highlights_dir / "c2_5.0s-10.0s_unknown_q0.mp4"
+    c2_path.write_bytes(b"corrupted")
+
+    detections = [
+        {"clip_id": "c1", "file_path": str(source), "start_time": 0.0, "end_time": 5.0},
+        {"clip_id": "c2", "file_path": str(source), "start_time": 5.0, "end_time": 10.0},
+    ]
+
+    rendered_clips = []
+
+    def mock_render(src, start, end, out, log_to_console=True):
+        rendered_clips.append(out.name)
+        out.write_bytes(b"valid video")
+        return True
+
+    # With validate_existing=True and is_valid_clip returning False for c2
+    with (
+        patch.object(render, "render_clip", side_effect=mock_render),
+        patch.object(render, "is_valid_clip", return_value=False),
+    ):
+        rendered_count, failed_count = render.render_detections(
+            detections, highlights_dir, validate_existing=True
+        )
+
+    assert rendered_count == 2
+    assert failed_count == 0
+    assert c1_path.name in rendered_clips
+    assert c2_path.name in rendered_clips
