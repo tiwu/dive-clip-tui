@@ -5,9 +5,9 @@ at a folder of videos, use Ollama and FFmpeg to find interesting moments, and
 render the detections as standalone MP4 clips. DaVinci Resolve is optional:
 the existing EDL/CSV marker workflow is still available for editors who want it.
 
-The project is CLI-first, with an experimental Textual terminal UI (TUI) for
-browsing manifests and reviewing detections. The core scan flow does not require
-cloud uploads, a subscription, API keys, or DaVinci Resolve.
+The project is CLI-first. The existing Textual terminal UI (TUI) is an
+unmaintained prototype; future UI work will start from scratch. The core scan
+flow does not require cloud uploads, a subscription, API keys, or DaVinci Resolve.
 
 ## Requirements
 
@@ -189,23 +189,17 @@ To resume an interrupted or completed run:
 Saves merge with the existing file on disk, so the orchestrator and the scan and
 render workers can share one state path without overwriting each other's work.
 
-## Terminal UI (experimental)
+## Legacy terminal UI
 
-Launch the Textual interface with:
+The old Textual prototype remains available but is not maintained. It cannot
+complete the review-to-render workflow. Use the CLI for pipeline work; see the
+[product roadmap](docs/roadmap/roadmap.md) for future UI direction.
+
+To launch the legacy interface:
 
 ```bash
 uv run dive-clip-tui
 ```
-
-The current TUI opens on the browse screen. Enter a footage folder containing
-`manifest.json`, or use the manifest under `outputs/`, to view clip metadata.
-From there, open the review screen to load `detections_refined.json` and filter
-detections by quality score.
-
-The TUI is still a prototype and does not yet provide the full review-to-render
-workflow: accepting detections and rendering clips are placeholders, and the
-pipeline screen is not yet reachable from the main interface. Use the CLI
-workflow above to run the pipeline.
 
 ## Optional: DaVinci Resolve markers
 
@@ -245,7 +239,7 @@ scripts/
   release.py               # Changelog, SemVer, and release automation helpers
   dive_clip.py             # Single-command ingest → scan → render CLI
 tui/
-  app.py                   # Textual TUI entry point
+  app.py                   # Legacy Textual TUI entry point
   screens/                 # Browse, review, and pipeline screens
 utils/
   checkpoint.py            # Pipeline checkpoint and intra-clip resume state
@@ -282,8 +276,8 @@ outputs/                   # Generated manifests, detections, and exports
 - The optional Resolve marker export supports frame-rate-aware timecodes,
   including 29.97 drop-frame and non-drop-frame formats.
 
-For the current implementation plan and project scope, see
-[`docs/roadmap/simple_plan.md`](docs/roadmap/simple_plan.md).
+For current project priorities, see
+[`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
 
 ## Contributing changes and releases
 

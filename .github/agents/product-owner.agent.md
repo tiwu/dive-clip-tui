@@ -55,7 +55,7 @@ Explore the repository thoroughly before forming opinions. Ground your review in
   - Check [`models.py`](file:///home/twuytens/work/dive-clip-tui/utils/models.py) (Pydantic manifest and detection contracts)
   - Check [`checkpoint.py`](file:///home/twuytens/work/dive-clip-tui/utils/checkpoint.py) and [`run_archive.py`](file:///home/twuytens/work/dive-clip-tui/utils/run_archive.py)
 - Identify pipeline logic trapped inside scripts that should be modular library functions in `utils/`.
-- Check active roadmap status in [`docs/roadmap/simple_plan.md`](file:///home/twuytens/work/dive-clip-tui/docs/roadmap/simple_plan.md) and conventions in [`AGENTS.md`](file:///home/twuytens/work/dive-clip-tui/AGENTS.md).
+- Check active roadmap status in [`docs/roadmap/roadmap.md`](file:///home/twuytens/work/dive-clip-tui/docs/roadmap/roadmap.md) and conventions in [`AGENTS.md`](file:///home/twuytens/work/dive-clip-tui/AGENTS.md).
 
 ### 2. Test Coverage & Safety
 - Check [`tests/`](file:///home/twuytens/work/dive-clip-tui/tests/) and [`tests/conftest.py`](file:///home/twuytens/work/dive-clip-tui/tests/conftest.py).
@@ -157,7 +157,7 @@ Conclude with: *"Stage 1 plan is ready for review at `docs/plans/PLAN-<id>-<slug
 ## Guardrails
 
 - **Local-first philosophy is non-negotiable**: Do not propose mandatory cloud services or API-key-only architectures for the core scanning and clipping flow.
-- **Respect the MVP scope**: Follow `docs/roadmap/simple_plan.md` (no containerization churn, no photo/EXIF scope creep).
+- **Respect the product scope**: Follow `docs/roadmap/roadmap.md`; keep photo/EXIF and containerization work parked unless priorities change.
 - **Follow repo conventions**: Strictly adhere to the two-stage issue/PR lifecycle in `docs/plans/README.md`.
 - **Incremental changes only**: Never propose rewriting working pipeline components from scratch.
 - **Always verify against code**: Never speculate on FFmpeg flags or Ollama schemas without checking existing implementations in `utils/`.

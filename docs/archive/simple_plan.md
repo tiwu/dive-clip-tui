@@ -1,6 +1,11 @@
 # Simplified MVP Plan: Local GoPro Quick-like Highlight Pipeline
 
-**Status:** Active (supersedes `docs/roadmap/roadmap.md`, which is kept for reference)  
+> **Archived — historical reference only.**
+>
+> This plan records the earlier CLI-first MVP and its completed milestones. Use
+> the current [product roadmap](../roadmap/roadmap.md) for active priorities.
+>
+
 **Owner:** Tech-savvy diver with dive + motorcycle footage  
 **Goal:** Local, subscription-free replacement for the discontinued GoPro Quick desktop app. No cloud upload, no DaVinci Resolve required, CLI-first.
 

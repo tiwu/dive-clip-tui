@@ -1,0 +1,56 @@
+schema_version: 1
+run_id: run-20261101-171142
+notes:
+  - Source videos remain local and are not included in this repository.
+  - Filenames and time ranges identify examples without storing machine-specific paths.
+cases:
+  - id: accidental-camera-drop
+    source_file: GX010875-bad.MP4
+    interval_seconds: [12.0, 14.0]
+    kind: false_positive
+    observed:
+      subject: corals
+      quality_score: 8
+      confidence: 0.95
+      rendered_file: clip_0d1044dfbbd01c35_12.0s-14.0s_corals_q8.mp4
+    expected:
+      include_as_highlight: false
+      reason: Accidental upside-down camera drop showing the diver's wetsuit.
+
+  - id: pufferfish-mislabeled-as-nudibranch
+    source_file: GX010782-puffer.MP4
+    interval_seconds: [44.0, 46.0]
+    kind: wrong_subject
+    observed:
+      subject: nudibranch
+      quality_score: 8
+      confidence: 0.95
+      rendered_file: clip_1806a28c33a8495d_44.0s-46.0s_nudibranch_q8.mp4
+    expected:
+      include_as_highlight: true
+      subject: pufferfish
+      reason: Same pufferfish seen in earlier highlights.
+
+  - id: missed-turtle-highlight
+    source_file: GX010830-turtle.MP4
+    interval_seconds: null
+    kind: false_negative
+    observed:
+      domain: underwater
+      accepted_detections: 0
+      note: One coarse candidate was rejected during fine scanning.
+    expected:
+      include_as_highlight: true
+      subject: turtle
+      needs_user_time_range: true
+
+  - id: flutefish-run-coverage-unconfirmed
+    source_file: GX010856-flutefish.MP4
+    interval_seconds: null
+    kind: unresolved_coverage
+    observed:
+      in_run_manifest: false
+      note: The source may have been added after this run.
+    expected:
+      verify_present_at_run_time: true
+      needs_user_time_range: true
