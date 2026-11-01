@@ -5,8 +5,9 @@ general:
   # Footage folder used when `dive-clip scan` is run without --input.
   # Keep input_dir and output_dir as separate folders that do not nest: ingest
   # walks the input tree recursively and would also pick up its own output.
-  # input_dir: "/Volumes/SAMSUNG T9/dive-processing-test/footage"
-  output_dir: "/Volumes/SAMSUNG T9/dive-processing-test/out"
+  # input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/in"
+  input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/x"  
+  output_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/out"
 
 ollama:
   # OLLAMA_HOST overrides this value when set (e.g. export OLLAMA_HOST=plotter.local:11434)
@@ -15,15 +16,16 @@ ollama:
   timeout_seconds: 120
 
 scan_parameters:
-  coarse_fps: 0.5                   # 1 frame per 2 seconds
+  coarse_fps: 0.5                   # 0.5 frames per second during coarse scan (1 frame every 2 seconds)
   coarse_scale: "640:-2"            # Downscale coarse frames for fast VLM screening
-  fine_fps: 2.0                     # 2 frames per second during highlight windows
-  fine_scale: "1280:-2"             # Native resolution for fine identification 
+  fine_fps: 1.0                     # 1 frame per second during highlight windows
+  fine_scale: "1280:-2"             # Resolution for fine identification 
                                     #   (or "iw/2:-2" for half resolution or "null" for no scaling)
   coarse_confidence_threshold: 0.80 # Minimum confidence to trigger fine scan
-  coarse_quality_threshold: 4      # Minimum score (1-10) to reject upside-down/dangling frames in coarse pass
+  coarse_quality_threshold: 4       # Minimum score (1-10) to reject upside-down/dangling frames in coarse pass
   fine_padding_seconds: 2           # Extra context before/after detected action
   quality_threshold: 8              # Min. score (1-10) to include in EDL/Storyline
+  checkpoint_interval_frames: 20    # Save intra-clip scan progress every N frames for fast resume
   # Temporary frame storage (RAM disk):
   # When true and /dev/shm is available (Linux), extracted frames are stored in shared
   # memory (/dev/shm) to maximize I/O throughput and eliminate SSD write wear during

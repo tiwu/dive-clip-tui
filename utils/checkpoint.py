@@ -11,9 +11,17 @@ plus its duration.
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+from utils.models import RefinedDetection
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> str:
@@ -149,3 +157,77 @@ class PipelineState:
         self.data = {}
         if self.state_path.exists():
             self.state_path.unlink()
+
+
+class CoarseFrameResult(BaseModel):
+    """Result of coarse screening on an individual video frame."""
+
+    timestamp: float
+    detected: bool
+    confidence: float
+    quality_score: int
+    subject: str = ""
+    candidate_window: tuple[float, float] | None = None
+    elapsed: float = 0.0
+
+
+class ClipScanCheckpoint(BaseModel):
+    """Fine-grained checkpoint of in-progress scan for a single video file."""
+
+    clip_id: str
+    file_name: str
+    pass_stage: Literal["coarse", "coarse_done", "fine", "completed"] = "coarse"
+    coarse_fps: float = 0.5
+    coarse_frames_analyzed: int = 0
+    coarse_results: dict[str, CoarseFrameResult] = Field(default_factory=dict)
+    candidate_windows: list[tuple[float, float]] = Field(default_factory=list)
+    coarse_confidences: list[float] = Field(default_factory=list)
+    coarse_detected: int = 0
+    coarse_failures: int = 0
+    coarse_elapsed_total: float = 0.0
+
+    fine_windows_completed: list[int] = Field(default_factory=list)
+    fine_frames_analyzed: int = 0
+    fine_passed: int = 0
+    fine_failures: int = 0
+    fine_elapsed_total: float = 0.0
+    fine_confidences: list[float] = Field(default_factory=list)
+    refined_detections: list[RefinedDetection] = Field(default_factory=list)
+
+    updated_at: str = Field(default_factory=_utc_now)
+
+    def save_atomic(self, path: Path) -> None:
+        """Atomically persist checkpoint state to disk."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.updated_at = _utc_now()
+        temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(self.model_dump(), f, indent=2, ensure_ascii=False)
+            temp_path.replace(path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
+    @classmethod
+    def load(cls, path: Path) -> ClipScanCheckpoint | None:
+        """Load checkpoint from disk, returning None if not found or corrupted."""
+        path = Path(path)
+        if not path.exists():
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            return cls.model_validate(data)
+        except Exception as exc:
+            logger.warning("Failed to load checkpoint from %s: %s", path, exc)
+            return None
+
+
+def remove_clip_checkpoint(path: Path) -> None:
+    """Safely remove a clip checkpoint file if it exists."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not remove checkpoint %s: %s", path, exc)
