@@ -14,7 +14,6 @@ import importlib.util
 import json
 import logging
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -39,6 +38,7 @@ from utils.run_archive import (  # noqa: E402
     resolve_run_dir,
     update_latest_symlink,
 )
+from utils.signals import setup_signal_handlers  # noqa: E402
 from utils.stats import (  # noqa: E402
     Phase0Stats,
     Phase1Stats,
@@ -841,19 +841,6 @@ def build_parser() -> argparse.ArgumentParser:
     aftermovie_p.set_defaults(func=cmd_aftermovie)
 
     return parser
-
-
-def setup_signal_handlers() -> None:
-    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
-
-    def _handler(signum: int, frame: object) -> None:
-        raise KeyboardInterrupt
-
-    try:
-        signal.signal(signal.SIGINT, _handler)
-        signal.signal(signal.SIGTERM, _handler)
-    except ValueError, AttributeError:
-        pass
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -34,7 +34,7 @@ def test_concat_clips_success(tmp_path: Path) -> None:
     mock_result.returncode = 0
     mock_result.stderr = ""
 
-    with patch.object(assemble.subprocess, "run", return_value=mock_result) as mock_run:
+    with patch("utils.ffmpeg_streamer.subprocess.run", return_value=mock_result) as mock_run:
         result = assemble.concat_clips([clip1, clip2], output)
 
     assert result is True
@@ -55,7 +55,7 @@ def test_concat_clips_failure(tmp_path: Path) -> None:
     mock_result.returncode = 1
     mock_result.stderr = "concat error"
 
-    with patch.object(assemble.subprocess, "run", return_value=mock_result):
+    with patch("utils.ffmpeg_streamer.subprocess.run", return_value=mock_result):
         result = assemble.concat_clips([clip1], output)
 
     assert result is False
@@ -67,8 +67,8 @@ def test_concat_clips_timeout(tmp_path: Path) -> None:
     clip1.touch()
     output = tmp_path / "output.mp4"
 
-    with patch.object(
-        assemble.subprocess, "run", side_effect=subprocess.TimeoutExpired("ffmpeg", 300)
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run", side_effect=subprocess.TimeoutExpired("ffmpeg", 300)
     ):
         result = assemble.concat_clips([clip1], output)
 
@@ -201,7 +201,7 @@ def test_main_renders_clips(tmp_path: Path) -> None:
         os.chdir(tmp_path)
 
         with (
-            patch.object(assemble.subprocess, "run", return_value=mock_result),
+            patch("utils.ffmpeg_streamer.subprocess.run", return_value=mock_result),
             contextlib.suppress(SystemExit),
         ):
             assemble.main()
@@ -229,7 +229,7 @@ def test_concat_clips_escapes_single_quotes(tmp_path: Path) -> None:
         written_content.append(list_file.read_text(encoding="utf-8"))
         return mock_result
 
-    with patch.object(assemble.subprocess, "run", side_effect=mock_run):
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=mock_run):
         assert assemble.concat_clips([clip1], output) is True
 
     assert len(written_content) == 1

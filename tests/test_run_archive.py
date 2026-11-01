@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from utils.run_archive import (
     archive_file,
     archive_run_artifacts,
@@ -195,3 +197,45 @@ def test_resolve_assembly_artifacts(tmp_path: Path) -> None:
     assert dets == custom_dets
     assert clips == custom_clips
     assert run_dir == run_1
+
+
+def test_resolve_and_validate_assembly_artifacts_success(tmp_path: Path) -> None:
+    """resolve_and_validate_assembly_artifacts succeeds when files exist."""
+    from utils.run_archive import resolve_and_validate_assembly_artifacts
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    dets_file = output_dir / "detections_refined.json"
+    dets_file.write_text("{}", encoding="utf-8")
+    clips_dir = output_dir / "highlights"
+    clips_dir.mkdir()
+
+    resolved_dets, resolved_clips, _run_dir = resolve_and_validate_assembly_artifacts(output_dir)
+    assert resolved_dets == dets_file
+    assert resolved_clips == clips_dir
+
+
+def test_resolve_and_validate_assembly_artifacts_missing_detections(tmp_path: Path) -> None:
+    """resolve_and_validate_assembly_artifacts raises FileNotFoundError when detections missing."""
+    from utils.run_archive import resolve_and_validate_assembly_artifacts
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    clips_dir = output_dir / "highlights"
+    clips_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError, match=r"detections_refined\.json not found"):
+        resolve_and_validate_assembly_artifacts(output_dir)
+
+
+def test_resolve_and_validate_assembly_artifacts_missing_clips(tmp_path: Path) -> None:
+    """resolve_and_validate_assembly_artifacts raises FileNotFoundError when clips dir missing."""
+    from utils.run_archive import resolve_and_validate_assembly_artifacts
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    dets_file = output_dir / "detections_refined.json"
+    dets_file.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="Clips directory not found"):
+        resolve_and_validate_assembly_artifacts(output_dir)

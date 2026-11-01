@@ -11,7 +11,6 @@ import argparse
 import json
 import logging
 import re
-import signal
 import subprocess
 import sys
 import time
@@ -23,21 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState
 from utils.config import ConfigError, load_config
 from utils.logging_setup import configure_logging
+from utils.signals import setup_signal_handlers
 
 logger = logging.getLogger(__name__)
-
-
-def setup_signal_handlers() -> None:
-    """Ensure SIGINT and SIGTERM raise KeyboardInterrupt for clean shutdown."""
-
-    def _handler(signum: int, frame: Any) -> None:
-        raise KeyboardInterrupt
-
-    try:
-        signal.signal(signal.SIGINT, _handler)
-        signal.signal(signal.SIGTERM, _handler)
-    except ValueError, AttributeError:
-        pass
 
 
 def slugify(text: str) -> str:

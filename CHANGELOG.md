@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add root `.jscpd.json` configuration for automated copy-paste and duplication detection across pipeline scripts, utilities, and TUI.
+
+### Changed
+- Consolidate duplicated signal handling, FFmpeg concatenation, and artifact resolution into shared `utils/` helpers.
+
 ## [0.19.0] - 2026-11-01
 
 ### Added
