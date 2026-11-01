@@ -362,11 +362,10 @@ def test_fallback_uses_broad_marine_in_coarse_pass(tmp_path: Path) -> None:
     ):
         result = scan.process_clip(clip, config, tmp_path / "work")
 
-    # Should have used broad marine template since tags are empty
+    # Should have used broad marine template in coarse pass since tags are empty
     assert len(captured_prompts) >= 1
-    prompt_used = captured_prompts[0]
-    assert BROAD_MARINE_TEMPLATE.coarse_prompt in prompt_used, (
-        f"Expected broad marine template prompt in coarse pass, got: {prompt_used[:80]}..."
+    assert any(BROAD_MARINE_TEMPLATE.coarse_prompt in p for p in captured_prompts), (
+        f"Expected broad marine template prompt in coarse pass, got prompts: {captured_prompts}"
     )
     assert len(result) > 0
 
@@ -1324,3 +1323,256 @@ def test_scan_main_emits_run_stats_json(tmp_path: Path, monkeypatch: pytest.Monk
     state_data = json.loads(state_path.read_text(encoding="utf-8"))
     assert "scan_stats" in state_data
     assert state_data["scan_stats"]["video_count"] == 1
+
+
+def test_process_clip_with_pass0_classification(tmp_path: Path) -> None:
+    """process_clip with domain='auto' should classify clip in Pass 0 and route prompts."""
+    from utils.stats import Phase0Stats
+
+    video = tmp_path / "moto.mp4"
+    video.touch()
+    clip = {
+        "clip_id": "moto_1",
+        "file_name": "moto.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+    }
+    config = {
+        "scan_parameters": {
+            "domain": "auto",
+            "classify_clips": "auto",
+            "classify_frames_count": 2,
+            "coarse_fps": 0.5,
+            "fine_fps": 1.0,
+            "coarse_confidence_threshold": 0.7,
+            "coarse_quality_threshold": 4,
+            "quality_threshold": 6,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+
+    coarse_frame = tmp_path / "c_frame.jpg"
+    coarse_frame.touch()
+    fine_frame = tmp_path / "f_frame.jpg"
+    fine_frame.touch()
+
+    def mock_extract(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        if start_seconds is not None:
+            return [{"frame_path": str(fine_frame), "timestamp": 2.0, "frame_number": 1}]
+        return [
+            {"frame_path": str(coarse_frame), "timestamp": 2.0, "frame_number": 1},
+            {"frame_path": str(coarse_frame), "timestamp": 4.0, "frame_number": 2},
+        ]
+
+    calls_by_phase: dict[str, list[dict]] = {"classify": [], "coarse": [], "fine": []}
+
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+        if phase == "classify":
+            calls_by_phase["classify"].append({"prompt": prompt})
+            return {
+                "domain": "motorcycle",
+                "confidence": 0.95,
+                "environment": "mountain road",
+                "primary_subjects": ["motorcycle", "twisties"],
+            }
+        if phase == "coarse":
+            calls_by_phase["coarse"].append({"prompt": prompt})
+            return {
+                "detected": True,
+                "confidence": 0.88,
+                "quality_score": 8,
+                "subject": "hairpin corner lean",
+                "category": "moto_riding",
+            }
+        if phase == "fine":
+            calls_by_phase["fine"].append({"prompt": prompt})
+            return {
+                "detected": True,
+                "confidence": 0.92,
+                "quality_score": 9,
+                "subject": "deep lean into hairpin",
+                "description": "Smooth aggressive lean through curve",
+            }
+        return None
+
+    p0_stats = Phase0Stats()
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        detections = scan.process_clip(
+            clip,
+            config,
+            tmp_path / "work",
+            phase0_stats=p0_stats,
+        )
+
+    assert len(detections) == 1
+    det = detections[0]
+    assert det.domain == "motorcycle"
+    assert det.template == "moto_riding"
+    assert det.color == "Orange"
+    assert "hairpin" in det.subject
+
+    assert len(calls_by_phase["classify"]) >= 1
+    assert len(calls_by_phase["coarse"]) >= 1
+    assert len(calls_by_phase["fine"]) >= 1
+
+    assert p0_stats.clips_classified == 1
+    assert p0_stats.domain_counts.get("motorcycle") == 1
+
+
+def test_process_clip_domain_override(tmp_path: Path) -> None:
+    """When scan_parameters.domain is explicitly set, Pass 0 is bypassed and domain coarse prompt is used."""
+    video = tmp_path / "moto.mp4"
+    video.touch()
+    clip = {
+        "clip_id": "moto_override",
+        "file_name": "moto.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+    }
+    config = {
+        "scan_parameters": {
+            "domain": "motorcycle",
+            "coarse_fps": 0.5,
+            "fine_fps": 1.0,
+            "coarse_confidence_threshold": 0.7,
+            "coarse_quality_threshold": 4,
+            "quality_threshold": 6,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+
+    frame = tmp_path / "f.jpg"
+    frame.touch()
+
+    calls: list[str] = []
+
+    def mock_extract(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return [{"frame_path": str(frame), "timestamp": 2.0, "frame_number": 1}]
+
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+        calls.append(phase)
+        return {
+            "detected": True,
+            "confidence": 0.85,
+            "quality_score": 8,
+            "subject": "riding",
+            "category": "moto_riding",
+        }
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        detections = scan.process_clip(clip, config, tmp_path / "work")
+
+    # Pass 0 ('classify') was bypassed because domain='motorcycle' was forced
+    assert "classify" not in calls
+    assert "coarse" in calls
+    assert len(detections) >= 1
+    assert detections[0].domain == "motorcycle"
+
+
+def test_process_clip_subject_routing_multicategory(tmp_path: Path) -> None:
+    """Candidate windows with distinct subjects in the same clip should route to matching fine templates."""
+    video = tmp_path / "moto_multi.mp4"
+    video.touch()
+    clip = {
+        "clip_id": "moto_multi",
+        "file_name": "moto_multi.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+    }
+    config = {
+        "scan_parameters": {
+            "domain": "motorcycle",
+            "coarse_fps": 0.5,
+            "fine_fps": 1.0,
+            "coarse_confidence_threshold": 0.7,
+            "coarse_quality_threshold": 4,
+            "fine_padding_seconds": 1,
+            "quality_threshold": 6,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+
+    c1 = tmp_path / "c1.jpg"
+    c2 = tmp_path / "c2.jpg"
+    c1.touch()
+    c2.touch()
+
+    # Two distinct windows far apart: t=2.0 (riding) and t=20.0 (scenic)
+    def mock_extract(
+        video_path, output_dir, fps=0.5, scale=None, start_seconds=None, duration_seconds=None
+    ):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        if start_seconds is not None:
+            # Fine pass: single frame per window
+            return [{"frame_path": str(c1), "timestamp": start_seconds + 0.5, "frame_number": 1}]
+        return [
+            {"frame_path": str(c1), "timestamp": 2.0, "frame_number": 1},
+            {"frame_path": str(c2), "timestamp": 20.0, "frame_number": 10},
+        ]
+
+    fine_prompts_seen: list[str] = []
+
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+        if phase == "coarse":
+            # If timestamp is around 2.0 -> cornering (moto_riding)
+            # If timestamp is around 20.0 -> mountain pass vista (moto_scenic)
+            if "frame_number" in str(img) or "c1" in str(img):
+                return {
+                    "detected": True,
+                    "confidence": 0.9,
+                    "quality_score": 8,
+                    "subject": "cornering hairpin",
+                    "category": "moto_riding",
+                }
+            return {
+                "detected": True,
+                "confidence": 0.9,
+                "quality_score": 8,
+                "subject": "mountain pass vista",
+                "category": "moto_scenic",
+            }
+        if phase == "fine":
+            fine_prompts_seen.append(prompt)
+            return {
+                "detected": True,
+                "confidence": 0.9,
+                "quality_score": 8,
+                "subject": "highlight",
+                "description": "fine highlight",
+            }
+        return None
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        detections = scan.process_clip(clip, config, tmp_path / "work")
+
+    assert len(detections) == 2
+    templates_used = {d.template for d in detections}
+    colors_used = {d.color for d in detections}
+    assert "moto_riding" in templates_used
+    assert "moto_scenic" in templates_used
+    assert "Orange" in colors_used
+    assert "Blue" in colors_used

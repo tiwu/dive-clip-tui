@@ -39,6 +39,7 @@ from utils.run_archive import (  # noqa: E402
     update_latest_symlink,
 )
 from utils.stats import (  # noqa: E402
+    Phase0Stats,
     Phase1Stats,
     Phase2Stats,
     PipelineStats,
@@ -380,16 +381,20 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     # Restore scan stats
     scan_data = state.get("scan_stats")
+    p0_stats = Phase0Stats()
     p1_stats = Phase1Stats()
     p2_stats = Phase2Stats()
     if not scan_data and (run_dir / "run_stats.json").exists():
         try:
             prior_stats = load_stats_json(run_dir / "run_stats.json")
+            p0_stats = prior_stats.phase0
             p1_stats = prior_stats.phase1
             p2_stats = prior_stats.phase2
         except Exception as exc:
             logger.debug("Could not restore prior scan stats from file: %s", exc)
     elif isinstance(scan_data, dict):
+        if isinstance(scan_data.get("phase0"), dict):
+            p0_stats = Phase0Stats.model_validate(scan_data["phase0"])
         if isinstance(scan_data.get("phase1"), dict):
             p1_stats = Phase1Stats.model_validate(scan_data["phase1"])
         if isinstance(scan_data.get("phase2"), dict):
@@ -431,6 +436,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         total_elapsed_seconds=round(pipeline_elapsed, 2),
         video_count=video_count,
         total_video_duration=round(total_video_duration, 2),
+        phase0=p0_stats,
         phase1=p1_stats,
         phase2=p2_stats,
         render=r_stats,

@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add 3-stage domain-aware VLM scanning pipeline (Pass 0 clip domain classification, Pass 1 domain coarse screening, and Pass 2 subject-routed fine evaluation) supporting underwater, motorcycle, and generic highlight footage with custom prompt configuration in `config.yaml`.
+
 ## [0.17.0] - 2026-11-01
 
 ### Added

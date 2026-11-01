@@ -106,6 +106,15 @@ uv run dive-clip scan --input ./footage --output ./highlights --debug
 This enables timestamped debug logs showing per-frame Ollama request timing,
 token counts, and full FFmpeg commands.
 
+### 3-stage scanning & domain awareness
+
+The scanner uses a 3-stage coarse-to-fine architecture:
+1. **Pass 0 (Video Classification)**: Samples representative frames to determine the video domain (`underwater`, `motorcycle`, or `generic`), unless specified via `scan_parameters.domain` or clip tags.
+2. **Pass 1 (Domain Coarse Scan)**: Screens frames at low FPS (default: 0.5 FPS) using a domain-specific prompt that filters out unusable camera angles (e.g. dangling on a BCD underwater vs. pointed at a fuel tank/ground on a motorcycle) while tagging detected subjects and categories.
+3. **Pass 2 (Subject-Routed Fine Scan)**: Dynamically routes each highlight candidate window to a specialized rubric (such as `pelagics`, `macro`, `diver`, `moto_riding`, `moto_scenic`, `moto_group`, or `generic_highlight`) for precise quality scoring and deduplication.
+
+Custom domains and prompt templates can also be configured or extended directly under `prompts:` in `config.yaml`.
+
 In debug mode the scanner also logs a verdict for every frame it analyzes, which
 is the main tool for tuning the confidence thresholds:
 

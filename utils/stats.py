@@ -87,6 +87,17 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m {secs:02d}s"
 
 
+class Phase0Stats(BaseModel):
+    """Statistics for Phase 0 clip domain classification."""
+
+    clips_classified: int = 0
+    frames_analyzed: int = 0
+    ollama_calls: int = 0
+    ollama_failures: int = 0
+    elapsed_seconds: float = 0.0
+    domain_counts: dict[str, int] = Field(default_factory=dict)
+
+
 class Phase1Stats(BaseModel):
     """Statistics for Phase 1 coarse scanning."""
 
@@ -135,6 +146,7 @@ class PipelineStats(BaseModel):
     total_elapsed_seconds: float = 0.0
     video_count: int = 0
     total_video_duration: float = 0.0
+    phase0: Phase0Stats = Field(default_factory=Phase0Stats)
     phase1: Phase1Stats = Field(default_factory=Phase1Stats)
     phase2: Phase2Stats = Field(default_factory=Phase2Stats)
     render: RenderStats = Field(default_factory=RenderStats)
@@ -150,7 +162,9 @@ class PipelineStats(BaseModel):
     @property
     def fps_throughput(self) -> float:
         """Total frames analyzed per second of elapsed execution."""
-        total_frames = self.phase1.frames_analyzed + self.phase2.frames_analyzed
+        total_frames = (
+            self.phase0.frames_analyzed + self.phase1.frames_analyzed + self.phase2.frames_analyzed
+        )
         if self.total_elapsed_seconds <= 0 or total_frames <= 0:
             return 0.0
         return total_frames / self.total_elapsed_seconds
@@ -191,6 +205,20 @@ def format_stats_table(stats: PipelineStats, title: str = "Pipeline Run Summary"
         f"Total duration: [bold]{format_duration(stats.total_video_duration)}[/]",
     )
     table.add_row("", "")
+
+    # Phase 0 (if any clips classified)
+    if stats.phase0.clips_classified > 0 or stats.phase0.frames_analyzed > 0:
+        p0 = stats.phase0
+        dom_parts = [f"{d}: {c}" for d, c in p0.domain_counts.items()]
+        dom_str = f" ({', '.join(dom_parts)})" if dom_parts else ""
+        p0_details = (
+            f"[bold]{p0.clips_classified}[/] clips classified{dom_str}\n"
+            f"[dim]{p0.frames_analyzed} frames analyzed  •  "
+            f"{p0.ollama_calls} Ollama calls ({p0.ollama_failures} failed)  •  "
+            f"Elapsed: {format_duration(p0.elapsed_seconds)}[/dim]"
+        )
+        table.add_row("🏷️ Phase 0 (Classify)", p0_details)
+        table.add_row("", "")
 
     # Phase 1
     p1 = stats.phase1
@@ -263,6 +291,20 @@ def format_stats_log(stats: PipelineStats) -> str:
             f"Source footage: {stats.video_count} videos, "
             f"duration {format_duration(stats.total_video_duration)}"
         ),
+    ]
+
+    if stats.phase0.clips_classified > 0 or stats.phase0.frames_analyzed > 0:
+        p0 = stats.phase0
+        dom_parts = [f"{d}: {c}" for d, c in p0.domain_counts.items()]
+        dom_str = f" ({', '.join(dom_parts)})" if dom_parts else ""
+        lines.append(
+            f"Phase 0 (Classify): {p0.clips_classified} clips classified{dom_str}, "
+            f"{p0.frames_analyzed} frames, "
+            f"{p0.ollama_calls} calls ({p0.ollama_failures} failed), "
+            f"elapsed {format_duration(p0.elapsed_seconds)}"
+        )
+
+    lines.extend([
         (
             f"Phase 1 (Coarse): {stats.phase1.candidate_windows} windows, "
             f"duration {format_duration(stats.phase1.candidate_duration)}, "
@@ -288,7 +330,7 @@ def format_stats_log(stats: PipelineStats) -> str:
             f"Total time: {format_duration(stats.total_elapsed_seconds)}, "
             f"Speed: {speed_text}, Throughput: {fps_text}"
         ),
-    ]
+    ])
 
     if stats.step_durations:
         steps_str = ", ".join(f"{k}: {format_duration(v)}" for k, v in stats.step_durations.items())

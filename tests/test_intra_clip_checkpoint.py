@@ -48,6 +48,8 @@ def test_clip_scan_checkpoint_save_atomic_and_load(tmp_path: Path) -> None:
     ckpt.coarse_frames_analyzed = 1
     ckpt.coarse_detected = 1
     ckpt.coarse_confidences.append(0.92)
+    ckpt.detected_domain = "motorcycle"
+    ckpt.window_routing = {"1": {"subject": "cornering", "category": "moto_riding"}}
 
     ckpt.save_atomic(ckpt_path)
     assert ckpt_path.exists()
@@ -57,6 +59,8 @@ def test_clip_scan_checkpoint_save_atomic_and_load(tmp_path: Path) -> None:
     assert loaded.clip_id == "clip_123"
     assert loaded.file_name == "dive_gopro.mp4"
     assert loaded.pass_stage == "coarse"
+    assert loaded.detected_domain == "motorcycle"
+    assert loaded.window_routing == {"1": {"subject": "cornering", "category": "moto_riding"}}
     assert "2.000" in loaded.coarse_results
     assert loaded.coarse_results["2.000"].detected is True
     assert loaded.coarse_results["2.000"].confidence == pytest.approx(0.92)

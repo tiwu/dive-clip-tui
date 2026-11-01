@@ -167,6 +167,7 @@ class CoarseFrameResult(BaseModel):
     confidence: float
     quality_score: int
     subject: str = ""
+    category: str = ""
     candidate_window: tuple[float, float] | None = None
     elapsed: float = 0.0
 
@@ -176,11 +177,13 @@ class ClipScanCheckpoint(BaseModel):
 
     clip_id: str
     file_name: str
-    pass_stage: Literal["coarse", "coarse_done", "fine", "completed"] = "coarse"
+    pass_stage: Literal["classify", "coarse", "coarse_done", "fine", "completed"] = "coarse"
+    detected_domain: str = ""
     coarse_fps: float = 0.5
     coarse_frames_analyzed: int = 0
     coarse_results: dict[str, CoarseFrameResult] = Field(default_factory=dict)
     candidate_windows: list[tuple[float, float]] = Field(default_factory=list)
+    window_routing: dict[str, dict[str, str]] = Field(default_factory=dict)
     coarse_confidences: list[float] = Field(default_factory=list)
     coarse_detected: int = 0
     coarse_failures: int = 0
