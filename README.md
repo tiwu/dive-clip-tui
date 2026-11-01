@@ -117,6 +117,26 @@ Even in the `generic` domain, the model identifies and preserves the concrete su
 
 Custom domains and prompt templates can be configured or extended directly under `prompts:` in `config.yaml`.
 
+### Running Pass 0 on its own (classify)
+
+To quickly classify an unorganized folder of unknown videos without running highlight detection:
+
+```bash
+uv run dive-clip classify --input ./footage --output ./outputs/classifications.json
+```
+
+Pass 0 samples only enough representative frames per clip (configured via `scan_parameters.classify_frames_count`, default 3) to identify the domain without scanning the entire video. Results display each clip's domain, mean confidence, and uncertainty status (flagged when frames disagree, when confidence is below 0.6, or when VLM responses are unusable).
+
+#### Reusing classifications in later scans
+
+To reuse confident domain labels and avoid reclassifying clips in a full scan:
+
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights --classifications ./outputs/classifications.json
+```
+
+Confident labels are reused by matching `clip_id`. Any uncertain labels are skipped and re-evaluated by Pass 0 during the scan. Without `--classifications`, `dive-clip scan` runs normal Pass 0 domain classification as usual.
+
 In debug mode the scanner also logs a verdict for every frame it analyzes, which
 is the main tool for tuning the confidence thresholds:
 

@@ -44,7 +44,13 @@ from utils.checkpoint import (
 from utils.config import ConfigError, load_config
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
 from utils.logging_setup import configure_logging, get_console
-from utils.models import DetectionsRefined, RefinedDetection
+from utils.models import (
+    ClassificationOutput,
+    ClipClassification,
+    ClipManifest,
+    DetectionsRefined,
+    RefinedDetection,
+)
 from utils.ollama_client import OllamaClient, resolve_host
 from utils.prompt_templates import (
     BUILTIN_DOMAINS,
@@ -92,22 +98,138 @@ def _summarize_scores(scores: list[float]) -> str:
     return f"{min(scores):.2f}/{sum(scores) / len(scores):.2f}/{max(scores):.2f}"
 
 
-def classify_clip_domain(
-    clip: dict,
-    sample_frames: list[dict],
+def get_clip_id(clip: dict[str, Any] | ClipManifest) -> str:
+    """Derive a stable clip identifier matching manifest and intra-clip checkpoints."""
+    if isinstance(clip, ClipManifest):
+        raw_clip_id = clip.clip_id
+        file_path = clip.file_path
+    else:
+        raw_clip_id = clip.get("clip_id")
+        file_path = clip.get("file_path", "")
+
+    if not raw_clip_id:
+        if file_path:
+            raw_clip_id = f"clip_{hashlib.sha256(str(file_path).encode('utf-8')).hexdigest()[:16]}"
+        else:
+            raw_clip_id = "clip"
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", str(raw_clip_id))[:64]
+
+
+def select_representative_frames(frames: list[dict], count: int) -> list[dict]:
+    """Select at most count evenly-spaced representative frames from extracted frames."""
+    if count <= 0:
+        return []
+    if len(frames) <= count:
+        return list(frames)
+    step = len(frames) / (count + 1)
+    indices = [int((i + 1) * step) for i in range(count)]
+    return [frames[idx] for idx in indices]
+
+
+def extract_classification_frames(
+    file_path: str | Path,
+    output_dir: Path,
+    count: int = 3,
+    scale: str | None = None,
+    fps: float | None = None,
+) -> list[dict]:
+    """Extract representative frames for domain classification, bounded by count."""
+    if count <= 0:
+        return []
+    actual_fps = fps or 0.25
+    frames = extract_frames(
+        video_path=file_path,
+        output_dir=output_dir,
+        fps=actual_fps,
+        scale=scale,
+    )
+    return select_representative_frames(frames, count)
+
+
+def aggregate_frame_classifications(
+    frame_results: list[dict[str, Any]],
+) -> tuple[str, float | None, bool, str | None]:
+    """Aggregate frame-level classification results into winning domain, confidence, and uncertainty.
+
+    Returns:
+        (winning_domain, mean_confidence, is_uncertain, reason)
+    """
+    if not frame_results:
+        return "generic", None, True, "no usable responses"
+
+    domain_counts: dict[str, int] = {}
+    domain_confidences: dict[str, list[float]] = {}
+
+    for item in frame_results:
+        dom = str(item.get("domain", "")).strip().lower()
+        if not dom:
+            dom = "generic"
+        try:
+            conf = float(item["confidence"])
+        except KeyError, ValueError, TypeError:
+            conf = 0.5
+        domain_counts[dom] = domain_counts.get(dom, 0) + 1
+        domain_confidences.setdefault(dom, []).append(conf)
+
+    unique_domains = list(domain_counts.keys())
+    winning_domain = max(
+        unique_domains,
+        key=lambda d: (domain_counts[d], sum(domain_confidences[d])),
+    )
+    winning_confs = domain_confidences[winning_domain]
+    mean_confidence = round(sum(winning_confs) / len(winning_confs), 3)
+
+    has_disagreement = len(unique_domains) > 1
+    has_low_confidence = mean_confidence < 0.6
+
+    if has_disagreement and has_low_confidence:
+        return (
+            winning_domain,
+            mean_confidence,
+            True,
+            f"sampled frames disagree on domain and low confidence ({mean_confidence:.2f} < 0.6)",
+        )
+    if has_disagreement:
+        return winning_domain, mean_confidence, True, "sampled frames disagree on domain"
+    if has_low_confidence:
+        return (
+            winning_domain,
+            mean_confidence,
+            True,
+            f"low confidence ({mean_confidence:.2f} < 0.6)",
+        )
+
+    return winning_domain, mean_confidence, False, None
+
+
+def classify_clip(
+    clip: dict[str, Any] | ClipManifest,
+    sample_frames: list[dict[str, Any]],
     client: OllamaClient,
     ollama_host: str,
     ollama_model: str,
     ollama_timeout: int,
     registry: dict[str, Any],
     phase0_stats: Phase0Stats | None = None,
-) -> str:
-    """Classify video domain by evaluating sample frames with the VLM."""
+) -> ClipClassification:
+    """Classify video domain across sample frames, returning a validated ClipClassification."""
+    file_name = clip.file_name if isinstance(clip, ClipManifest) else clip.get("file_name", "")
+    file_path = clip.file_path if isinstance(clip, ClipManifest) else clip.get("file_path", "")
+    clip_id = get_clip_id(clip)
+
     if not sample_frames:
-        return "generic"
+        return ClipClassification(
+            clip_id=clip_id,
+            file_name=file_name,
+            file_path=str(file_path),
+            domain="generic",
+            confidence=None,
+            uncertain=True,
+            reason="no usable responses",
+        )
 
     prompt = build_classification_prompt(registry)
-    domain_scores: dict[str, float] = {}
+    usable_results: list[dict[str, Any]] = []
 
     for frame in sample_frames:
         start_time = time.perf_counter()
@@ -126,13 +248,25 @@ def classify_clip_domain(
             phase0_stats.elapsed_seconds += elapsed
             phase0_stats.ollama_calls += 1
 
-        if not result:
+        if not result or not isinstance(result, dict):
             if phase0_stats is not None:
                 phase0_stats.ollama_failures += 1
             continue
 
         raw_domain = str(result.get("domain", "")).strip().lower()
-        confidence = float(result.get("confidence", 0.5) or 0.5)
+        conf_raw = result.get("confidence")
+        if not raw_domain or conf_raw is None:
+            if phase0_stats is not None:
+                phase0_stats.ollama_failures += 1
+            continue
+
+        try:
+            confidence = float(conf_raw)
+        except ValueError, TypeError:
+            if phase0_stats is not None:
+                phase0_stats.ollama_failures += 1
+            continue
+
         matched_domain = None
         for dom in registry:
             if dom in raw_domain or raw_domain in dom:
@@ -141,15 +275,198 @@ def classify_clip_domain(
         if not matched_domain:
             matched_domain = "generic"
 
-        domain_scores[matched_domain] = domain_scores.get(matched_domain, 0.0) + max(
-            0.1, confidence
+        usable_results.append({
+            "domain": matched_domain,
+            "confidence": max(0.0, min(1.0, confidence)),
+        })
+
+    winning_domain, mean_conf, is_uncertain, reason = aggregate_frame_classifications(
+        usable_results
+    )
+
+    return ClipClassification(
+        clip_id=clip_id,
+        file_name=file_name,
+        file_path=str(file_path),
+        domain=winning_domain,
+        confidence=mean_conf,
+        uncertain=is_uncertain,
+        reason=reason,
+    )
+
+
+def classify_clip_domain(
+    clip: dict,
+    sample_frames: list[dict],
+    client: OllamaClient,
+    ollama_host: str,
+    ollama_model: str,
+    ollama_timeout: int,
+    registry: dict[str, Any],
+    phase0_stats: Phase0Stats | None = None,
+) -> str:
+    """Classify video domain by evaluating sample frames with the VLM."""
+    classification = classify_clip(
+        clip=clip,
+        sample_frames=sample_frames,
+        client=client,
+        ollama_host=ollama_host,
+        ollama_model=ollama_model,
+        ollama_timeout=ollama_timeout,
+        registry=registry,
+        phase0_stats=phase0_stats,
+    )
+    return classification.domain
+
+
+def load_and_validate_classifications(
+    classifications_path: Path | str,
+) -> list[ClipClassification]:
+    """Load and validate classifications from a JSON file, returning ClipClassification records."""
+    path = Path(classifications_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Classifications file not found: {path}")
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        if "classifications" in data:
+            output = ClassificationOutput.model_validate(data)
+            return output.classifications
+        return [ClipClassification.model_validate(data)]
+    if isinstance(data, list):
+        return [ClipClassification.model_validate(item) for item in data]
+
+    raise ValueError(f"Invalid classification format in {path}: expected dict or list")
+
+
+def merge_classifications_into_manifest(
+    clips: list[dict[str, Any]],
+    classifications: list[ClipClassification],
+) -> tuple[int, int, list[str]]:
+    """Merge confident classifications into in-memory clips; ignore uncertain ones.
+
+    Returns:
+        (reused_count, ignored_uncertain_count, unmatched_clip_ids)
+    """
+    class_map = {c.clip_id: c for c in classifications}
+    reused_count = 0
+    ignored_uncertain_count = 0
+    manifest_clip_ids = set()
+
+    for clip in clips:
+        cid = get_clip_id(clip)
+        manifest_clip_ids.add(cid)
+        if cid in class_map:
+            record = class_map[cid]
+            if not record.uncertain and record.domain:
+                clip["domain"] = record.domain
+                reused_count += 1
+                logger.info(
+                    "[Pass 0] Reused confident domain '%s' (conf=%.2f) for %s from classifications",
+                    record.domain,
+                    record.confidence or 0.0,
+                    clip.get("file_name", cid),
+                )
+            else:
+                ignored_uncertain_count += 1
+                logger.info(
+                    "[Pass 0] Ignored uncertain classification '%s' for %s (reason: %s); will classify in Pass 0",
+                    record.domain,
+                    clip.get("file_name", cid),
+                    record.reason or "uncertain",
+                )
+
+    unmatched_ids = [c.clip_id for c in classifications if c.clip_id not in manifest_clip_ids]
+    if unmatched_ids:
+        logger.warning(
+            "Found %d classification record(s) not matching any input clip: %s",
+            len(unmatched_ids),
+            ", ".join(unmatched_ids[:5]),
         )
 
-    if not domain_scores:
-        return "generic"
+    return reused_count, ignored_uncertain_count, unmatched_ids
 
-    best_domain = max(domain_scores.items(), key=lambda item: item[1])[0]
-    return best_domain
+
+def classify_footage(
+    clips: list[dict[str, Any]],
+    config: dict[str, Any],
+    work_dir: Path | None = None,
+    client: OllamaClient | None = None,
+) -> list[ClipClassification]:
+    """Run Pass 0 standalone domain classification across all clips in a folder/manifest."""
+    if not clips:
+        return []
+
+    scan_params = config.get("scan_parameters", {})
+    processing_cfg = config.get("processing", {})
+    use_ramdisk = bool(
+        scan_params.get(
+            "use_ramdisk",
+            processing_cfg.get("use_ramdisk", True),
+        )
+    )
+    temp_work_dir = False
+    if work_dir is None:
+        work_dir = get_work_dir(use_ramdisk=use_ramdisk)
+        temp_work_dir = True
+
+    ollama_cfg = config.get("ollama", {})
+    ollama_host = resolve_host(ollama_cfg.get("host"))
+    ollama_model = ollama_cfg.get("model", "qwen2.5-vl:7b")
+    ollama_timeout = ollama_cfg.get("timeout_seconds", 90)
+    ollama_client = client or OllamaClient(ollama_host, ollama_model, ollama_timeout)
+
+    registry = load_custom_templates(config)
+    classify_frames_count = scan_params.get("classify_frames_count", 3)
+    coarse_scale = scan_params.get("coarse_scale", "426:-2")
+
+    results: list[ClipClassification] = []
+
+    try:
+        for idx, clip in enumerate(clips, start=1):
+            file_path = clip.get("file_path", "")
+            clip_name = clip.get("file_name", Path(file_path).name if file_path else f"clip_{idx}")
+            clip_id = get_clip_id(clip)
+            clip_work = work_dir / f"classify_{clip_id}"
+            clip_work.mkdir(parents=True, exist_ok=True)
+
+            logger.info("Classifying clip %d/%d: %s", idx, len(clips), clip_name)
+            try:
+                sample_frames = extract_classification_frames(
+                    file_path=file_path,
+                    output_dir=clip_work,
+                    count=classify_frames_count,
+                    scale=coarse_scale,
+                )
+                classification = classify_clip(
+                    clip=clip,
+                    sample_frames=sample_frames,
+                    client=ollama_client,
+                    ollama_host=ollama_host,
+                    ollama_model=ollama_model,
+                    ollama_timeout=ollama_timeout,
+                    registry=registry,
+                )
+            except Exception as exc:
+                logger.warning("Error classifying %s: %s", clip_name, exc)
+                classification = ClipClassification(
+                    clip_id=clip_id,
+                    file_name=clip_name,
+                    file_path=str(file_path),
+                    domain="generic",
+                    confidence=None,
+                    uncertain=True,
+                    reason=f"error: {exc}",
+                )
+            results.append(classification)
+            cleanup_work_dir(clip_work)
+    finally:
+        if temp_work_dir:
+            cleanup_work_dir(work_dir)
+
+    return results
 
 
 class StatusColumn(ProgressColumn):
@@ -205,10 +522,7 @@ def process_clip(
         logger.warning("File not found: %s", file_path)
         return []
 
-    raw_clip_id = clip.get("clip_id") or (
-        f"clip_{hashlib.sha256(file_path.encode('utf-8')).hexdigest()[:16]}"
-    )
-    clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
+    clip_id = get_clip_id(clip)
     clip_work_dir = work_dir / clip_id
     clip_work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -356,12 +670,7 @@ def process_clip(
 
         # Execute Pass 0 VLM classification if domain is still unknown
         if detected_domain is None and classify_clips != "off" and coarse_frames:
-            if len(coarse_frames) <= classify_frames_count:
-                sample_frames = list(coarse_frames)
-            else:
-                step = len(coarse_frames) / (classify_frames_count + 1)
-                indices = [int((i + 1) * step) for i in range(classify_frames_count)]
-                sample_frames = [coarse_frames[idx] for idx in indices]
+            sample_frames = select_representative_frames(coarse_frames, classify_frames_count)
 
             logger.info(
                 "[Pass 0] Classifying domain for %s across %d sample frames...",
@@ -992,6 +1301,12 @@ def main() -> None:
         action="store_true",
         help="Archive detections into a new timestamped directory under <output>/runs/run-<timestamp>/",
     )
+    parser.add_argument(
+        "--classifications",
+        type=Path,
+        default=None,
+        help="Path to pre-computed classifications JSON to reuse confident domain labels",
+    )
     args = parser.parse_args()
 
     configure_logging(debug=args.debug, log_file=args.log_file)
@@ -1087,6 +1402,22 @@ def main() -> None:
             logger.warning("Could not load existing detections from %s: %s", output_path, exc)
 
     clips = manifest.get("clips", [])
+    if args.classifications is not None:
+        try:
+            loaded_classifications = load_and_validate_classifications(args.classifications)
+            reused_cnt, ignored_cnt, unmatched = merge_classifications_into_manifest(
+                clips, loaded_classifications
+            )
+            logger.info(
+                "Classifications processed: %d confident reused, %d uncertain ignored, %d unmatched",
+                reused_cnt,
+                ignored_cnt,
+                len(unmatched),
+            )
+        except Exception as exc:
+            logger.error("Failed to load classifications from %s: %s", args.classifications, exc)
+            sys.exit(1)
+
     if args.resume and state is not None:
         for clip in clips:
             cname = clip.get("file_name", "unknown")
