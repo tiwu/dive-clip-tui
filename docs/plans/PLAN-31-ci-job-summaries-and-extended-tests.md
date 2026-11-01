@@ -78,4 +78,4 @@
 - [x] Changed Python files pass Ruff lint and formatting checks
 - [x] `CHANGELOG.md` updated under `[Unreleased]`
 - [x] Issue #31 approved with `agent:approved`
-- [ ] PR submitted with `Closes #31` and plan linked
+- [x] PR submitted with `Closes #31` and plan linked
