@@ -131,3 +131,30 @@ def test_update_latest_symlink_exfat_fallback(tmp_path: Path) -> None:
     fallback_file = out_dir / "latest.txt"
     assert fallback_file.exists()
     assert "run-20261101-100000" in fallback_file.read_text(encoding="utf-8")
+
+
+def test_archive_run_artifacts_with_aftermovie(tmp_path: Path) -> None:
+    """archive_run_artifacts copies aftermovie_path into run_dir when present."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    aftermovie = output_dir / "aftermovie.mp4"
+    aftermovie.write_bytes(b"fake mp4 data")
+
+    run_dir = output_dir / "runs" / "run-20261101-120000"
+    archived = archive_run_artifacts(
+        run_dir,
+        aftermovie_path=aftermovie,
+    )
+
+    assert "aftermovie" in archived
+    assert archived["aftermovie"] == run_dir / "aftermovie.mp4"
+    assert (run_dir / "aftermovie.mp4").read_bytes() == b"fake mp4 data"
+
+    # Missing aftermovie file is safely ignored
+    missing_run_dir = output_dir / "runs" / "run-20261101-130000"
+    archived_missing = archive_run_artifacts(
+        missing_run_dir,
+        aftermovie_path=output_dir / "nonexistent.mp4",
+    )
+    assert "aftermovie" not in archived_missing

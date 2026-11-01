@@ -671,3 +671,350 @@ def test_cmd_scan_emits_pipeline_statistics(tmp_path: Path) -> None:
     assert stats_data["phase2"]["detections_dedup"] == 1
     assert stats_data["render"]["clips_rendered"] == 1
     assert stats_data["render"]["total_duration"] == 4.0
+
+
+def test_build_parser_scan_assemble_flags() -> None:
+    """build_parser should support --assemble, --music, --top-n, and --assemble-mode on scan."""
+    parser = build_parser()
+    default_args = parser.parse_args(["scan", "--input", "/in", "--output", "/out"])
+    assert default_args.assemble is False
+    assert default_args.music is None
+    assert default_args.top_n == 10
+    assert default_args.assemble_mode == "aftermovie"
+
+    custom_args = parser.parse_args([
+        "scan",
+        "--input",
+        "/in",
+        "--output",
+        "/out",
+        "--assemble",
+        "--music",
+        "/tmp/track.mp3",
+        "--top-n",
+        "5",
+        "--assemble-mode",
+        "simple",
+    ])
+    assert custom_args.assemble is True
+    assert custom_args.music == "/tmp/track.mp3"
+    assert custom_args.top_n == 5
+    assert custom_args.assemble_mode == "simple"
+
+
+def test_build_parser_assemble_and_aftermovie_subcommands() -> None:
+    """build_parser should register assemble and aftermovie subcommands."""
+    parser = build_parser()
+
+    asm_args = parser.parse_args(["assemble", "--top-n", "8"])
+    assert asm_args.command == "assemble"
+    assert asm_args.top_n == 8
+    assert asm_args.input is None
+    assert asm_args.clips_dir is None
+    assert asm_args.output is None
+    assert asm_args.config == "config.yaml"
+
+    afm_args = parser.parse_args([
+        "aftermovie",
+        "--music",
+        "song.mp3",
+        "--music-volume",
+        "0.25",
+        "--fade-duration",
+        "1.5",
+        "--top-n",
+        "12",
+    ])
+    assert afm_args.command == "aftermovie"
+    assert afm_args.music == "song.mp3"
+    assert afm_args.music_volume == 0.25
+    assert afm_args.fade_duration == 1.5
+    assert afm_args.top_n == 12
+
+
+def test_cmd_scan_with_assemble_runs_aftermovie(tmp_path: Path) -> None:
+    """cmd_scan with --assemble should execute Step 4/4 aftermovie assembly and archive output."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+    music_file = tmp_path / "music.mp3"
+    music_file.write_bytes(b"mp3")
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        str(input_folder),
+        "--output",
+        str(output_folder),
+        "--assemble",
+        "--music",
+        str(music_file),
+        "--top-n",
+        "7",
+    ])
+
+    def side_effect(cmd, *a, **kw):
+        if "00_ingest_media.py" in cmd[1]:
+            Path(cmd[cmd.index("--output") + 1]).write_text('{"clips": []}', encoding="utf-8")
+        elif "02_scan_footage.py" in cmd[1]:
+            run_path = Path(cmd[cmd.index("--run-dir") + 1])
+            (run_path / "detections_refined.json").write_text(
+                '{"detections": []}', encoding="utf-8"
+            )
+        elif "07_create_aftermovie.py" in cmd[1]:
+            out_file = Path(cmd[cmd.index("--output") + 1])
+            out_file.write_bytes(b"aftermovie video")
+        return MagicMock(returncode=0)
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=side_effect) as mock_run:
+        assert cmd_scan(args) == 0
+
+    assert mock_run.call_count == 4
+    assemble_cmd = mock_run.call_args_list[3].args[0]
+    assert "07_create_aftermovie.py" in assemble_cmd[1]
+    assert "--music" in assemble_cmd
+    assert assemble_cmd[assemble_cmd.index("--music") + 1] == str(music_file)
+    assert "--top-n" in assemble_cmd
+    assert assemble_cmd[assemble_cmd.index("--top-n") + 1] == "7"
+    assert assemble_cmd[assemble_cmd.index("--output") + 1] == str(output_folder / "aftermovie.mp4")
+
+    latest = find_latest_run_dir(output_folder)
+    assert latest is not None
+    assert (output_folder / "aftermovie.mp4").exists()
+    assert (latest / "aftermovie.mp4").exists()
+    state = json.loads((latest / "pipeline_state.json").read_text(encoding="utf-8"))
+    assert state.get("assemble_done") is True
+
+
+def test_cmd_scan_with_assemble_simple_mode(tmp_path: Path) -> None:
+    """cmd_scan with --assemble --assemble-mode simple should invoke 06_assemble_video.py."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        str(input_folder),
+        "--output",
+        str(output_folder),
+        "--assemble",
+        "--assemble-mode",
+        "simple",
+    ])
+
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run:
+        assert cmd_scan(args) == 0
+
+    assert mock_run.call_count == 4
+    assemble_cmd = mock_run.call_args_list[3].args[0]
+    assert "06_assemble_video.py" in assemble_cmd[1]
+    assert assemble_cmd[assemble_cmd.index("--output") + 1] == str(
+        output_folder / "highlight_reel.mp4"
+    )
+
+
+def test_cmd_scan_assemble_resume_skips_completed(tmp_path: Path) -> None:
+    """cmd_scan --assemble --resume should skip assembly when assemble_done is true."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    run_dir = output_folder / "runs" / "run-20261101-100000"
+    run_dir.mkdir(parents=True)
+    state_path = run_dir / "pipeline_state.json"
+    state_path.write_text(
+        json.dumps({
+            "ingest_done": True,
+            "scan_done": True,
+            "render_done": True,
+            "assemble_done": True,
+        }),
+        encoding="utf-8",
+    )
+    (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    (run_dir / "detections_refined.json").write_text("{}", encoding="utf-8")
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        str(input_folder),
+        "--output",
+        str(output_folder),
+        "--assemble",
+        "--resume",
+    ])
+
+    with patch("scripts.dive_clip.subprocess.run") as mock_run:
+        assert cmd_scan(args) == 0
+
+    mock_run.assert_not_called()
+
+
+def test_cmd_scan_assemble_summary_panel_includes_aftermovie_path(tmp_path: Path) -> None:
+    """Summary panel should display the final assembled video path when --assemble is enabled."""
+    from rich.panel import Panel
+
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        str(input_folder),
+        "--output",
+        str(output_folder),
+        "--assemble",
+    ])
+
+    with (
+        patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)),
+        patch("scripts.dive_clip.get_console") as mock_get_console,
+    ):
+        mock_console = MagicMock()
+        mock_console.is_terminal = True
+        mock_get_console.return_value = mock_console
+        assert cmd_scan(args) == 0
+
+    panels = [
+        call.args[0]
+        for call in mock_console.print.call_args_list
+        if call.args and isinstance(call.args[0], Panel)
+    ]
+    expected_path = str(output_folder / "aftermovie.mp4")
+    assert any(expected_path in str(p.renderable) for p in panels)
+
+
+def test_cmd_assemble_subcommand_resolves_latest_run(tmp_path: Path) -> None:
+    """dive-clip assemble should auto-resolve detections and highlights from latest run."""
+    output_folder = tmp_path / "outputs"
+    run_dir = output_folder / "runs" / "run-20261101-120000"
+    highlights_dir = run_dir / "highlights"
+    highlights_dir.mkdir(parents=True)
+    detections_file = run_dir / "detections_refined.json"
+    detections_file.write_text('{"detections": []}', encoding="utf-8")
+
+    from utils.run_archive import update_latest_symlink
+
+    update_latest_symlink(output_folder, run_dir)
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_folder}"\n', encoding="utf-8")
+
+    parser = build_parser()
+    args = parser.parse_args(["assemble", "--config", str(config_file), "--top-n", "6"])
+
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run:
+        assert args.func(args) == 0
+
+    assert mock_run.call_count == 1
+    cmd = mock_run.call_args.args[0]
+    assert "06_assemble_video.py" in cmd[1]
+    assert Path(cmd[cmd.index("--input") + 1]).resolve() == detections_file.resolve()
+    assert Path(cmd[cmd.index("--clips-dir") + 1]).resolve() == highlights_dir.resolve()
+    assert Path(cmd[cmd.index("--output") + 1]) == output_folder / "highlight_reel.mp4"
+    assert cmd[cmd.index("--top-n") + 1] == "6"
+
+
+def test_cmd_aftermovie_subcommand_resolves_latest_run(tmp_path: Path) -> None:
+    """dive-clip aftermovie should auto-resolve latest run and pass music and fade args."""
+    output_folder = tmp_path / "outputs"
+    run_dir = output_folder / "runs" / "run-20261101-120000"
+    highlights_dir = run_dir / "highlights"
+    highlights_dir.mkdir(parents=True)
+    detections_file = run_dir / "detections_refined.json"
+    detections_file.write_text('{"detections": []}', encoding="utf-8")
+
+    from utils.run_archive import update_latest_symlink
+
+    update_latest_symlink(output_folder, run_dir)
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_folder}"\n', encoding="utf-8")
+    music_file = tmp_path / "bg.mp3"
+    music_file.write_bytes(b"mp3")
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "aftermovie",
+        "--config",
+        str(config_file),
+        "--music",
+        str(music_file),
+        "--music-volume",
+        "0.2",
+        "--fade-duration",
+        "1.5",
+        "--top-n",
+        "8",
+    ])
+
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run:
+        assert args.func(args) == 0
+
+    assert mock_run.call_count == 1
+    cmd = mock_run.call_args.args[0]
+    assert "07_create_aftermovie.py" in cmd[1]
+    assert Path(cmd[cmd.index("--input") + 1]).resolve() == detections_file.resolve()
+    assert Path(cmd[cmd.index("--clips-dir") + 1]).resolve() == highlights_dir.resolve()
+    assert Path(cmd[cmd.index("--output") + 1]) == output_folder / "aftermovie.mp4"
+    assert cmd[cmd.index("--music") + 1] == str(music_file)
+    assert cmd[cmd.index("--music-volume") + 1] == "0.2"
+    assert cmd[cmd.index("--fade-duration") + 1] == "1.5"
+    assert cmd[cmd.index("--top-n") + 1] == "8"
+
+
+def test_cmd_scan_assemble_failure_preserves_prior_steps(tmp_path: Path) -> None:
+    """If Step 4 assembly fails, cmd_scan returns non-zero while preserving prior outputs."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        str(input_folder),
+        "--output",
+        str(output_folder),
+        "--assemble",
+    ])
+
+    def side_effect(cmd, *a, **kw):
+        if "00_ingest_media.py" in cmd[1]:
+            Path(cmd[cmd.index("--output") + 1]).write_text('{"clips": []}', encoding="utf-8")
+        elif "02_scan_footage.py" in cmd[1]:
+            run_path = Path(cmd[cmd.index("--run-dir") + 1])
+            (run_path / "detections_refined.json").write_text(
+                '{"detections": []}', encoding="utf-8"
+            )
+        elif "07_create_aftermovie.py" in cmd[1]:
+            return MagicMock(returncode=1)
+        return MagicMock(returncode=0)
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=side_effect):
+        assert cmd_scan(args) == 1
+
+    latest = find_latest_run_dir(output_folder)
+    assert latest is not None
+    state = json.loads((latest / "pipeline_state.json").read_text(encoding="utf-8"))
+    assert state.get("ingest_done") is True
+    assert state.get("scan_done") is True
+    assert state.get("render_done") is True
+    assert state.get("assemble_done") is False

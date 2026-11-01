@@ -29,7 +29,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
-from utils.config import ConfigError, load_general_config  # noqa: E402
+from utils.config import ConfigError, load_config, load_general_config  # noqa: E402
 from utils.logging_setup import configure_logging, get_console  # noqa: E402
 from utils.run_archive import (  # noqa: E402
     archive_run_artifacts,
@@ -251,6 +251,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
     highlights_dir.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Ingest
+    should_assemble = bool(getattr(args, "assemble", False))
+    total_steps = 4 if should_assemble else 3
+
     ingest_cmd = [
         sys.executable,
         str(SCRIPTS_DIR / "00_ingest_media.py"),
@@ -268,7 +271,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         state.mark_step_started("ingest")
         rc = run(
             ingest_cmd,
-            "Step 1/3: Ingest media (manifest)",
+            f"Step 1/{total_steps}: Ingest media (manifest)",
         )
         if rc != 0:
             if rc == 130:
@@ -278,7 +281,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return rc
         state.mark_step_done("ingest")
     else:
-        logger.info("Step 1/3: Ingest media (manifest) — SKIPPED (already done)")
+        logger.info("Step 1/%d: Ingest media (manifest) — SKIPPED (already done)", total_steps)
 
     # Step 2: Scan
     scan_cmd = [
@@ -314,7 +317,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         try:
             rc = run(
                 scan_cmd,
-                "Step 2/3: Scan footage (AI detections)",
+                f"Step 2/{total_steps}: Scan footage (AI detections)",
             )
         finally:
             stop_render_event.set()
@@ -328,7 +331,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return rc
         state.mark_step_done("scan")
     else:
-        logger.info("Step 2/3: Scan footage (AI detections) — SKIPPED (already done)")
+        logger.info("Step 2/%d: Scan footage (AI detections) — SKIPPED (already done)", total_steps)
 
     # Step 3: Render
     render_cmd = [
@@ -352,7 +355,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         state.mark_step_started("render")
         rc = run(
             render_cmd,
-            "Step 3/3: Render clips (MP4 highlights)",
+            f"Step 3/{total_steps}: Render clips (MP4 highlights)",
         )
         if rc != 0:
             if rc == 130:
@@ -362,7 +365,70 @@ def cmd_scan(args: argparse.Namespace) -> int:
             return rc
         state.mark_step_done("render")
     else:
-        logger.info("Step 3/3: Render clips (MP4 highlights) — SKIPPED (already done)")
+        logger.info(
+            "Step 3/%d: Render clips (MP4 highlights) — SKIPPED (already done)", total_steps
+        )
+
+    # Step 4: Assemble (optional)
+    assembled_video_path: Path | None = None
+    if should_assemble:
+        assemble_mode = getattr(args, "assemble_mode", None) or "aftermovie"
+        raw_top_n = getattr(args, "top_n", None)
+        if raw_top_n in (None, 10) and "--top-n" not in sys.argv:
+            full_cfg = load_config(config, default_to_empty=True)
+            aftermovie_cfg = full_cfg.get("aftermovie")
+            if isinstance(aftermovie_cfg, dict) and aftermovie_cfg.get("top_n_clips") is not None:
+                top_n = int(aftermovie_cfg["top_n_clips"])
+            else:
+                top_n = int(raw_top_n or 10)
+        else:
+            top_n = int(raw_top_n or 10)
+        if assemble_mode == "simple":
+            assembled_video_path = output_folder / "highlight_reel.mp4"
+            assemble_script = SCRIPTS_DIR / "06_assemble_video.py"
+            step_4_desc = f"Step 4/{total_steps}: Assemble highlight video"
+        else:
+            assembled_video_path = output_folder / "aftermovie.mp4"
+            assemble_script = SCRIPTS_DIR / "07_create_aftermovie.py"
+            step_4_desc = f"Step 4/{total_steps}: Assemble aftermovie"
+
+        assemble_cmd = [
+            sys.executable,
+            str(assemble_script),
+            "--config",
+            config,
+            "--input",
+            str(detections_path),
+            "--clips-dir",
+            str(highlights_dir),
+            "--output",
+            str(assembled_video_path),
+            "--top-n",
+            str(top_n),
+            "--log-file",
+            str(log_path),
+        ]
+        music_arg = getattr(args, "music", None)
+        if assemble_mode != "simple" and music_arg:
+            assemble_cmd.extend(["--music", str(music_arg)])
+        if debug_mode:
+            assemble_cmd.append("--debug")
+
+        if not state.is_step_done("assemble"):
+            state.mark_step_started("assemble")
+            rc = run(
+                assemble_cmd,
+                step_4_desc,
+            )
+            if rc != 0:
+                if rc == 130:
+                    logger.warning("Pipeline interrupted by user.")
+                    return 130
+                logger.error("Assemble failed with exit code %d. Aborting.", rc)
+                return rc
+            state.mark_step_done("assemble")
+        else:
+            logger.info("%s — SKIPPED (already done)", step_4_desc)
 
     pipeline_elapsed = time.perf_counter() - pipeline_start_time
 
@@ -424,7 +490,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         )
 
     step_durations = {}
-    for step in ("ingest", "scan", "render"):
+    for step in ("ingest", "scan", "render", "assemble"):
         dur = state.get(f"{step}_duration_seconds")
         if dur is not None:
             step_durations[step] = float(dur)
@@ -454,24 +520,163 @@ def cmd_scan(args: argparse.Namespace) -> int:
         detections_path=detections_path,
         log_file=log_path,
         stats_path=stats_path,
+        aftermovie_path=assembled_video_path,
     )
     update_latest_symlink(output_folder, run_dir)
 
     if console.is_terminal:
         console.print(format_stats_table(pipeline_stats, title="Dive Clip Pipeline Summary"))
+        panel_lines = [
+            "[bold green]Pipeline complete![/bold green]",
+            f"[bold white]Highlights in:[/] [cyan]{highlights_dir}[/]",
+        ]
+        if should_assemble and assembled_video_path is not None:
+            panel_lines.append(
+                f"[bold white]Assembled video:[/] [bold cyan]{assembled_video_path}[/]"
+            )
+        panel_lines.extend([
+            f"[bold white]Run archive:[/]   [cyan]{run_dir}[/]",
+            f"[bold white]Run statistics:[/] [cyan]{stats_path}[/]",
+        ])
         console.print(
             Panel(
-                f"[bold green]Pipeline complete![/bold green]\n"
-                f"[bold white]Highlights in:[/] [cyan]{highlights_dir}[/]\n"
-                f"[bold white]Run archive:[/]   [cyan]{run_dir}[/]\n"
-                f"[bold white]Run statistics:[/] [cyan]{stats_path}[/]",
+                "\n".join(panel_lines),
                 border_style="green",
             )
         )
     logger.info("✓ Pipeline complete. Highlights in: %s", highlights_dir)
+    if should_assemble and assembled_video_path is not None:
+        logger.info("✓ Final video assembled: %s", assembled_video_path)
     logger.info("Run artifacts in: %s", run_dir)
     logger.info(format_stats_log(pipeline_stats))
     return 0
+
+
+def resolve_assembly_inputs(
+    args: argparse.Namespace,
+    default_filename: str,
+) -> tuple[Path, Path, Path, Path | None] | None:
+    """Resolve detections path, clips dir, output path, and latest run dir for assembly."""
+    try:
+        general = load_general_config(args.config)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return None
+
+    output_dir = Path(general.get("output_dir") or "./outputs")
+    raw_output = getattr(args, "output", None)
+    if raw_output:
+        output_path = Path(raw_output)
+        if output_path.is_dir():
+            output_dir = output_path
+            output_path = output_dir / default_filename
+    else:
+        output_path = output_dir / default_filename
+
+    latest_link = output_dir / "latest"
+    latest_run: Path | None = (
+        latest_link.resolve() if latest_link.exists() else find_latest_run_dir(output_dir)
+    )
+
+    raw_input = getattr(args, "input", None)
+    if raw_input:
+        detections_path = Path(raw_input)
+    elif (latest_link / "detections_refined.json").exists():
+        detections_path = (latest_link / "detections_refined.json").resolve()
+    elif latest_run and (latest_run / "detections_refined.json").exists():
+        detections_path = latest_run / "detections_refined.json"
+    else:
+        detections_path = output_dir / "detections_refined.json"
+
+    raw_clips_dir = getattr(args, "clips_dir", None)
+    if raw_clips_dir:
+        clips_dir = Path(raw_clips_dir)
+    elif (detections_path.parent / "highlights").exists():
+        clips_dir = detections_path.parent / "highlights"
+    elif (latest_link / "highlights").exists():
+        clips_dir = (latest_link / "highlights").resolve()
+    elif latest_run and (latest_run / "highlights").exists():
+        clips_dir = latest_run / "highlights"
+    else:
+        clips_dir = output_dir / "highlights"
+
+    return detections_path, clips_dir, output_path, latest_run
+
+
+def cmd_assemble(args: argparse.Namespace) -> int:
+    """Concatenate rendered highlight clips into a highlight reel."""
+    resolved = resolve_assembly_inputs(args, "highlight_reel.mp4")
+    if resolved is None:
+        return 1
+    detections_path, clips_dir, output_path, latest_run = resolved
+
+    top_n = getattr(args, "top_n", 10) or 10
+    cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / "06_assemble_video.py"),
+        "--config",
+        args.config,
+        "--input",
+        str(detections_path),
+        "--clips-dir",
+        str(clips_dir),
+        "--output",
+        str(output_path),
+        "--top-n",
+        str(top_n),
+    ]
+    log_file = getattr(args, "log_file", None)
+    if log_file:
+        cmd.extend(["--log-file", str(log_file)])
+    if getattr(args, "debug", False):
+        cmd.append("--debug")
+
+    rc = run(cmd, "Assemble highlight video")
+    if rc == 0 and latest_run is not None:
+        archive_run_artifacts(latest_run, aftermovie_path=output_path)
+    return rc
+
+
+def cmd_aftermovie(args: argparse.Namespace) -> int:
+    """Create an aftermovie with cross-dissolve transitions and optional music."""
+    resolved = resolve_assembly_inputs(args, "aftermovie.mp4")
+    if resolved is None:
+        return 1
+    detections_path, clips_dir, output_path, latest_run = resolved
+
+    top_n = getattr(args, "top_n", 10) or 10
+    music_volume = getattr(args, "music_volume", 0.15)
+    fade_duration = getattr(args, "fade_duration", 1.0)
+    cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / "07_create_aftermovie.py"),
+        "--config",
+        args.config,
+        "--input",
+        str(detections_path),
+        "--clips-dir",
+        str(clips_dir),
+        "--output",
+        str(output_path),
+        "--top-n",
+        str(top_n),
+        "--music-volume",
+        str(music_volume),
+        "--fade-duration",
+        str(fade_duration),
+    ]
+    if getattr(args, "music", None):
+        cmd.extend(["--music", str(args.music)])
+    log_file = getattr(args, "log_file", None)
+    if log_file:
+        cmd.extend(["--log-file", str(log_file)])
+    if getattr(args, "debug", False):
+        cmd.append("--debug")
+
+    rc = run(cmd, "Create aftermovie")
+    if rc == 0 and latest_run is not None:
+        archive_run_artifacts(latest_run, aftermovie_path=output_path)
+    return rc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -516,7 +721,113 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Logfile path (defaults to <output>/runs/run-<timestamp>/run.log)",
     )
+    scan_p.add_argument(
+        "--assemble",
+        action="store_true",
+        default=False,
+        help="Assemble rendered clips into a highlight video or aftermovie after scanning",
+    )
+    scan_p.add_argument(
+        "--music",
+        default=None,
+        help="Path to background music track for aftermovie assembly",
+    )
+    scan_p.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Number of top-quality clips to include when assembling (default: 10)",
+    )
+    scan_p.add_argument(
+        "--assemble-mode",
+        choices=["aftermovie", "simple"],
+        default="aftermovie",
+        help="Assembly mode when --assemble is enabled (default: aftermovie)",
+    )
     scan_p.set_defaults(func=cmd_scan)
+
+    assemble_p = sub.add_parser("assemble", help="Concatenate top-N rendered clips into a video")
+    assemble_p.add_argument(
+        "--input",
+        default=None,
+        help="Path to detections_refined.json (defaults to <output>/latest/detections_refined.json)",
+    )
+    assemble_p.add_argument(
+        "--clips-dir",
+        default=None,
+        help="Path to rendered highlights (defaults to <output>/latest/highlights or <output>/highlights)",
+    )
+    assemble_p.add_argument(
+        "--output",
+        default=None,
+        help="Path to output MP4 file (defaults to <output>/highlight_reel.mp4)",
+    )
+    assemble_p.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Number of top-quality clips to assemble (default: 10)",
+    )
+    assemble_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    assemble_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    assemble_p.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional logfile path",
+    )
+    assemble_p.set_defaults(func=cmd_assemble)
+
+    aftermovie_p = sub.add_parser(
+        "aftermovie", help="Create an aftermovie with crossfades and background music"
+    )
+    aftermovie_p.add_argument(
+        "--input",
+        default=None,
+        help="Path to detections_refined.json (defaults to <output>/latest/detections_refined.json)",
+    )
+    aftermovie_p.add_argument(
+        "--clips-dir",
+        default=None,
+        help="Path to rendered highlights (defaults to <output>/latest/highlights or <output>/highlights)",
+    )
+    aftermovie_p.add_argument(
+        "--output",
+        default=None,
+        help="Path to output MP4 file (defaults to <output>/aftermovie.mp4)",
+    )
+    aftermovie_p.add_argument(
+        "--music",
+        default=None,
+        help="Path to background music track (optional)",
+    )
+    aftermovie_p.add_argument(
+        "--music-volume",
+        type=float,
+        default=0.15,
+        help="Music ducking level (default: 0.15)",
+    )
+    aftermovie_p.add_argument(
+        "--fade-duration",
+        type=float,
+        default=1.0,
+        help="Transition crossfade duration in seconds (default: 1.0)",
+    )
+    aftermovie_p.add_argument(
+        "--top-n",
+        type=int,
+        default=10,
+        help="Number of top-quality clips to include (default: 10)",
+    )
+    aftermovie_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    aftermovie_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    aftermovie_p.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional logfile path",
+    )
+    aftermovie_p.set_defaults(func=cmd_aftermovie)
 
     return parser
 

@@ -18,6 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
+from utils.logging_setup import configure_logging
+from utils.run_archive import find_latest_run_dir
 
 
 def setup_signal_handlers() -> None:
@@ -116,8 +118,16 @@ def main() -> None:
         default=10,
         help="Number of top-quality clips to include (default: 10)",
     )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional logfile path",
+    )
     args = parser.parse_args()
     setup_signal_handlers()
+    configure_logging(debug=args.debug, log_file=args.log_file)
 
     try:
         config = load_config(args.config)
@@ -130,6 +140,12 @@ def main() -> None:
 
     # Resolve detections input path
     detections_path = Path(args.input) if args.input else output_dir / "detections_refined.json"
+    if not detections_path.exists() and not args.input:
+        latest_run = find_latest_run_dir(output_dir)
+        if (output_dir / "latest" / "detections_refined.json").exists():
+            detections_path = output_dir / "latest" / "detections_refined.json"
+        elif latest_run and (latest_run / "detections_refined.json").exists():
+            detections_path = latest_run / "detections_refined.json"
     if not detections_path.exists():
         alt = Path(__file__).resolve().parent.parent / "outputs" / "detections_refined.json"
         if alt.exists():
@@ -141,6 +157,14 @@ def main() -> None:
 
     # Resolve clips directory
     clips_dir = Path(args.clips_dir) if args.clips_dir else output_dir / "highlights"
+    if not clips_dir.exists() and not args.clips_dir:
+        latest_run = find_latest_run_dir(output_dir)
+        if (detections_path.parent / "highlights").exists():
+            clips_dir = detections_path.parent / "highlights"
+        elif (output_dir / "latest" / "highlights").exists():
+            clips_dir = output_dir / "latest" / "highlights"
+        elif latest_run and (latest_run / "highlights").exists():
+            clips_dir = latest_run / "highlights"
     if not clips_dir.exists():
         print(f"ERROR: Clips directory not found: {clips_dir}")
         print("Run 05_render_clips.py first to render detection clips.")
