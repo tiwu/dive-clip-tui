@@ -10,7 +10,7 @@
 
 ## 1. Problem Statement & Motivation
 
-Currently, when a clip has no matching content tags, the scan pipeline falls back to a prompt that may assume pelagic (open-water) marine life. This is too narrow and misses common benthic (reef/floor) and cryptic species. A broad marine-biology fallback prompt should consider the full spectrum of marine life — common and rare, pelagic and benthic — so untagged clips are scanned with comprehensive coverage.
+Currently, when a clip has no matching content tags, the scan pipeline falls back to a prompt that may assume pelagic (open-water) marine life. This is too narrow and misses common benthic (reef/floor) and cryptic species. A broad marine-biology fallback prompt should consider the full spectrum of marine life — common and rare, pelagic and benthic — so untagged clips are scanned with broad coverage.
 
 ---
 
@@ -39,7 +39,7 @@ Currently, when a clip has no matching content tags, the scan pipeline falls bac
    - Add or update focused tests in `tests/test_scan_footage.py` for fallback selection logic in both coarse and fine passes
 
 2. **Green (Implementation)**:
-   - Update `utils/prompt_templates.py`: define the broad fallback prompt with comprehensive marine-life coverage
+   - Update `utils/prompt_templates.py`: define the broad fallback prompt with full marine-life coverage
    - Update `scripts/02_scan_footage.py`: use the broad template as fallback in both coarse and fine scan passes
 
 3. **Refactor & Quality**:

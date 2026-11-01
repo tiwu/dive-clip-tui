@@ -68,7 +68,7 @@ This breaks the "one-command watchable video" promise. Users need:
 - Maintain strictly local-first processing (FFmpeg only).
 - Preserve existing checkpoint and resume guarantees in `utils/checkpoint.py`.
 - Graceful error handling: if assembly fails (e.g., FFmpeg timeout or no clips found), scan returns an informative error code without corrupting prior scan/render outputs.
-- Comprehensive test coverage with unit and CLI mocks.
+- Full test coverage with unit and CLI mocks.
 
 ---
 
