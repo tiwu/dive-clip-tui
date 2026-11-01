@@ -109,21 +109,30 @@ token counts, and full FFmpeg commands.
 ### 3-stage scanning & domain awareness
 
 The scanner uses a 3-stage coarse-to-fine architecture:
-1. **Pass 0 (Video Classification)**: Samples representative frames to determine the video domain (`underwater`, `motorcycle`, or `generic`), unless specified via `scan_parameters.domain` or clip tags.
-2. **Pass 1 (Domain Coarse Scan)**: Screens frames at low FPS (default: 0.5 FPS) using a domain-specific prompt that filters out unusable camera angles (e.g. dangling on a BCD underwater vs. pointed at a fuel tank/ground on a motorcycle) while tagging detected subjects and categories.
+1. **Pass 0 (Video Classification)**: Samples representative frames from the coarse frame batch to classify the clip domain (`underwater`, `motorcycle`, `generic`, or custom domains), unless overridden by `scan_parameters.domain` or clip tags.
+2. **Pass 1 (Domain Coarse Scan)**: Screens frames at low FPS (default: 0.5 FPS) using a domain-specific screening prompt that filters out unusable camera angles (e.g. dangling on a BCD underwater vs. pointed at a fuel tank/ground on a motorcycle) while tagging detected subjects and categories.
 3. **Pass 2 (Subject-Routed Fine Scan)**: Dynamically routes each highlight candidate window to a specialized rubric (such as `pelagics`, `macro`, `diver`, `moto_riding`, `moto_scenic`, `moto_group`, or `generic_highlight`) for precise quality scoring and deduplication.
 
-Custom domains and prompt templates can also be configured or extended directly under `prompts:` in `config.yaml`.
+Even in the `generic` domain, the model identifies and preserves the concrete subject and action (e.g. `"downhill mountain bike jump"`, `"scenic mountain pass"`, `"dog catching frisbee"`) alongside detailed descriptions, making it easy to discover what subjects exist in your footage and add custom templates for them.
+
+Custom domains and prompt templates can be configured or extended directly under `prompts:` in `config.yaml`.
 
 In debug mode the scanner also logs a verdict for every frame it analyzes, which
 is the main tool for tuning the confidence thresholds:
 
-```
-[Pass 1] Analyzing frame 12 of 50
-[coarse] Ollama response in 8.4s: 4210 prompt tokens, 57 generated tokens
-[Pass 1] Frame 12 @ 24.0s: detected=True confidence=0.82 passes_threshold=True subject=shark (8.4s)
-[Pass 1] Summary clip001.mp4: 50 frames, 47 detected, 44 over threshold 0.65,
-  confidence min/avg/max = 0.05/0.78/0.95, 1 failed calls, 421.3s total
+```text
+[Pass 0] Extracting frames @ 0.5 FPS: clip001.mp4
+[Pass 0] Extracted 150 frames from clip001.mp4
+[Pass 0] Classifying domain for clip001.mp4 across 3 sample frames...
+[Pass 0] Classified clip001.mp4 as domain 'underwater'
+[Pass 1] Coarse scan @ 0.5 FPS (underwater): clip001.mp4
+[Pass 1] Analyzing frame 12 of 150
+[coarse] Ollama response in 4.2s: 4210 prompt tokens, 57 generated tokens
+[Pass 1] Frame 12 @ 24.0s: detected=True confidence=0.82 quality=8 passes_threshold=True subject=shark category=pelagics (4.2s)
+[Pass 1] Summary clip001.mp4: 150 frames, 47 detected, 44 over threshold 0.80,
+  confidence min/avg/max = 0.05/0.78/0.95, 0 failed calls, 120.3s total
+[Pass 2] Fine scan @ 1.0 FPS: clip001.mp4 (1 windows)
+[Pass 2] Window 1 of 1: 20.0s-32.0s (12.0s) @ 1.0 FPS [template: pelagics, domain: underwater]
 ```
 
 Each pass ends with a summary line at info level, so a normal run (without
@@ -145,19 +154,22 @@ The individual step scripts accept `--log-file` too, so a hand-run
 `scripts/02_scan_footage.py` can log somewhere other than the default output
 folder.
 
-The pipeline writes a JSON manifest, refined detections, and rendered MP4 clips
-to the configured output location.
+The pipeline writes a JSON manifest, refined detections, rendered MP4 clips, and
+end-of-run statistics to the configured output location.
 
 ### Pipeline state file & run archives
 
 `dive-clip scan` organizes each execution into a self-contained snapshot under
 `<output>/runs/<run_id>/` (with an `<output>/latest` symlink pointing to the most
 recent run). Each run directory contains `pipeline_state.json`, `manifest.json`,
-`detections_refined.json`, `run.log`, and the extracted `highlights/` clips.
+`detections_refined.json`, `run_stats.json`, `run.log`, and the extracted `highlights/` clips.
 
-Progress is recorded in `pipeline_state.json` and saved after every clip and scan window,
-so an interrupted run leaves an up-to-date checkpoint. The file also preserves full run
-context (`run_id`, `input_dir`, `output_dir`, `config_path`) and timing:
+Progress is recorded in `pipeline_state.json` and saved after every clip and scan window.
+Additionally, intra-clip progress is checkpointed periodically (every `checkpoint_interval_frames`,
+default: 20) in `scan_checkpoint.json` inside each clip's temporary work directory, so an interrupted
+run on long video files resumes without re-evaluating previously scanned frames.
+
+The state file preserves full run context (`run_id`, `input_dir`, `output_dir`, `config_path`) and timing:
 
 | Field | Meaning |
 | --- | --- |
@@ -167,6 +179,8 @@ context (`run_id`, `input_dir`, `output_dir`, `config_path`) and timing:
 | `<step>_started_at` / `<step>_finished_at` | Step start and end timestamps (UTC, ISO 8601) |
 | `<step>_duration_seconds` | Wall-clock duration of the completed step |
 | `<step>_progress` | Per-step list of completed clip names |
+
+At the end of scanning, a Rich summary table is displayed in the terminal and saved to `run_stats.json`, detailing total run duration, throughput (FPS), phase breakdown (Pass 0 domain counts, Pass 1 frames scanned, Pass 2 windows), and highlight counts.
 
 To resume an interrupted or completed run:
 - `dive-clip scan --output ./outputs --resume`: Resumes the most recent run automatically, restoring footage path and settings.
@@ -184,7 +198,7 @@ uv run dive-clip-tui
 ```
 
 The current TUI opens on the browse screen. Enter a footage folder containing
-`manifest_raw.json`, or use the manifest under `outputs/`, to view clip metadata.
+`manifest.json`, or use the manifest under `outputs/`, to view clip metadata.
 From there, open the review screen to load `detections_refined.json` and filter
 detections by quality score.
 
@@ -222,22 +236,29 @@ not required to run the local scan and render flow.
 scripts/
   00_ingest_media.py       # Find videos and write a metadata manifest
   01_extract_manifest.py   # Export clip metadata from DaVinci Resolve
-  02_scan_footage.py       # Scan footage with Ollama
+  02_scan_footage.py       # Scan footage with Ollama (Pass 0, 1, and 2)
   03_generate_edl.py       # Create EDL and CSV timeline markers
   04_plan_storyline.py     # Optional story plan generation
   05_render_clips.py       # Render detection windows as MP4 clips
   06_assemble_video.py     # Assemble rendered clips
-  07_create_aftermovie.py  # Create an aftermovie
+  07_create_aftermovie.py  # Create an aftermovie with music/transitions
+  release.py               # Changelog, SemVer, and release automation helpers
   dive_clip.py             # Single-command ingest → scan → render CLI
 tui/
   app.py                   # Textual TUI entry point
   screens/                 # Browse, review, and pipeline screens
 utils/
-  checkpoint.py            # Pipeline resume state
-  ffmpeg_streamer.py       # Frame sampling and temporary storage
+  checkpoint.py            # Pipeline checkpoint and intra-clip resume state
+  config.py                # Configuration loading and validation
+  ffmpeg_streamer.py       # Frame sampling and temporary storage (/dev/shm)
+  logging_setup.py         # Shared console and file logging setup
   models.py                # Pydantic manifest and detection models
-  prompt_templates.py      # Prompts by subject/category
+  ollama_client.py         # Ollama API client and metrics
+  prompt_templates.py      # Domain prompts and subject-routed templates
+  run_archive.py           # Self-contained run snapshots and latest symlink
+  stats.py                 # Scan throughput, phase metrics, and summary tables
   timecode_math.py         # Frame-rate and SMPTE timecode helpers
+  version.py               # Dynamic package version helper
 outputs/                   # Generated manifests, detections, and exports
 ```
 

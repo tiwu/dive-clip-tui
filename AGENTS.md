@@ -22,7 +22,7 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 - `docs/plans/` - folder for architecture plans
 - `docs/plans/README.md` — required issue, plan, PR, changelog, and release workflow
 - `config.yaml` — paths, thresholds, Ollama endpoints, API keys
-- `projectplan_technische_specificatie.md` — technical specification
+- `docs/archive/projectplan_technische_specificatie.md` — technical specification (archived)
 
 ---
 
@@ -54,12 +54,16 @@ videos → AI finds the interesting bits → get back a watchable highlight vide
 │   └── dive_clip.py          # Single CLI entry point (ingest → scan → render)
 ├── utils/                    # Shared helpers
 │   ├── checkpoint.py         # Pipeline checkpoint / resume state
+│   ├── config.py             # Config validation and loading
 │   ├── ffmpeg_streamer.py    # Frame sampling helpers (/dev/shm & buffers)
 │   ├── logging_setup.py      # Shared stderr + per-run logfile configuration
 │   ├── models.py             # Pydantic data models (manifest, detections)
 │   ├── ollama_client.py      # Shared Ollama requests and metrics
-│   ├── prompt_templates.py   # Dynamic prompts per keyword category
-│   └── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
+│   ├── prompt_templates.py   # Domain prompts and subject-routed templates
+│   ├── run_archive.py        # Run directory snapshots and latest symlink
+│   ├── stats.py              # Scan throughput and pipeline metrics
+│   ├── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
+│   └── version.py            # Dynamic package version helper
 ├── tui/                      # Textual-based terminal UI
 │   ├── app.py                # Main TUI application
 │   └── screens/              # browse.py, pipeline.py, review.py
