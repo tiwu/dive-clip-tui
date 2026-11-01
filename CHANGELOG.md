@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-01
+
 ### Changed
 - Align coarse frame extraction logging with Pass 0 domain classification so logs and pipeline activities remain strictly chronological.
 
