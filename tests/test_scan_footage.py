@@ -1325,8 +1325,11 @@ def test_scan_main_emits_run_stats_json(tmp_path: Path, monkeypatch: pytest.Monk
     assert state_data["scan_stats"]["video_count"] == 1
 
 
-def test_process_clip_with_pass0_classification(tmp_path: Path) -> None:
-    """process_clip with domain='auto' should classify clip in Pass 0 and route prompts."""
+def test_process_clip_with_pass0_classification(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """process_clip with domain='auto' should classify clip in Pass 0, extracting frames under [Pass 0] before [Pass 1] scan."""
+    caplog.set_level(logging.INFO)
     from utils.stats import Phase0Stats
 
     video = tmp_path / "moto.mp4"
@@ -1427,9 +1430,16 @@ def test_process_clip_with_pass0_classification(tmp_path: Path) -> None:
     assert p0_stats.clips_classified == 1
     assert p0_stats.domain_counts.get("motorcycle") == 1
 
+    # Verify frame extraction logging is under [Pass 0] and Pass 1 follows domain resolution
+    assert "[Pass 0] Extracting frames @ 0.5 FPS: moto.mp4" in caplog.text
+    assert "[Pass 0] Extracted 2 frames from moto.mp4" in caplog.text
+    assert "[Pass 0] Classified moto.mp4 as domain 'motorcycle'" in caplog.text
+    assert "[Pass 1] Coarse scan @ 0.5 FPS (motorcycle): moto.mp4" in caplog.text
 
-def test_process_clip_domain_override(tmp_path: Path) -> None:
+
+def test_process_clip_domain_override(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """When scan_parameters.domain is explicitly set, Pass 0 is bypassed and domain coarse prompt is used."""
+    caplog.set_level(logging.INFO)
     video = tmp_path / "moto.mp4"
     video.touch()
     clip = {
@@ -1485,6 +1495,12 @@ def test_process_clip_domain_override(tmp_path: Path) -> None:
     assert "coarse" in calls
     assert len(detections) >= 1
     assert detections[0].domain == "motorcycle"
+
+    # Verify frame extraction was logged under [Pass 1] since domain was already resolved
+    assert "[Pass 0] Using configured domain 'motorcycle' for moto.mp4" in caplog.text
+    assert "[Pass 1] Coarse scan @ 0.5 FPS (motorcycle): moto.mp4" in caplog.text
+    assert "[Pass 1] Extracted 1 frames from moto.mp4" in caplog.text
+    assert "[Pass 0] Extracting frames" not in caplog.text
 
 
 def test_process_clip_subject_routing_multicategory(tmp_path: Path) -> None:
