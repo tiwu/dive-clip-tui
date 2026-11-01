@@ -841,6 +841,7 @@ def test_cmd_scan_assemble_resume_skips_completed(tmp_path: Path) -> None:
     )
     (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
     (run_dir / "detections_refined.json").write_text("{}", encoding="utf-8")
+    (output_folder / "aftermovie.mp4").write_bytes(b"video")
 
     parser = build_parser()
     args = parser.parse_args([
@@ -857,6 +858,48 @@ def test_cmd_scan_assemble_resume_skips_completed(tmp_path: Path) -> None:
         assert cmd_scan(args) == 0
 
     mock_run.assert_not_called()
+
+
+def test_cmd_scan_assemble_reruns_when_video_missing(tmp_path: Path) -> None:
+    """cmd_scan --assemble --resume should re-run Step 4 if aftermovie.mp4 was deleted."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    run_dir = output_folder / "runs" / "run-20261101-100000"
+    run_dir.mkdir(parents=True)
+    state_path = run_dir / "pipeline_state.json"
+    state_path.write_text(
+        json.dumps({
+            "ingest_done": True,
+            "scan_done": True,
+            "render_done": True,
+            "assemble_done": True,
+        }),
+        encoding="utf-8",
+    )
+    (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    (run_dir / "detections_refined.json").write_text("{}", encoding="utf-8")
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        str(input_folder),
+        "--output",
+        str(output_folder),
+        "--assemble",
+        "--resume",
+    ])
+
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run:
+        assert cmd_scan(args) == 0
+
+    assert mock_run.call_count == 1
+    assert "07_create_aftermovie.py" in mock_run.call_args.args[0][1]
 
 
 def test_cmd_scan_assemble_summary_panel_includes_aftermovie_path(tmp_path: Path) -> None:
@@ -1018,3 +1061,26 @@ def test_cmd_scan_assemble_failure_preserves_prior_steps(tmp_path: Path) -> None
     assert state.get("scan_done") is True
     assert state.get("render_done") is True
     assert state.get("assemble_done") is False
+
+
+def test_cmd_aftermovie_reads_top_n_from_config(tmp_path: Path) -> None:
+    """dive-clip aftermovie and assemble should fall back to aftermovie.top_n_clips in config."""
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    config_file = tmp_path / "config.aftermovie.yaml"
+    config_file.write_text(
+        f'general:\n  output_dir: "{output_folder}"\naftermovie:\n  top_n_clips: 15\n',
+        encoding="utf-8",
+    )
+
+    parser = build_parser()
+    args = parser.parse_args(["aftermovie", "--config", str(config_file)])
+
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run:
+        assert args.func(args) == 0
+
+    cmd = mock_run.call_args.args[0]
+    assert cmd[cmd.index("--top-n") + 1] == "15"

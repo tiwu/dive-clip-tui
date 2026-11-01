@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -21,6 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.config import ConfigError, load_config
 from utils.logging_setup import configure_logging
 from utils.run_archive import find_latest_run_dir
+
+logger = logging.getLogger(__name__)
 
 
 def setup_signal_handlers() -> None:
@@ -90,14 +94,14 @@ def render_clip_with_fade(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        print(f"WARNING: FFmpeg timeout rendering {output_path.name}")
+        logger.warning("FFmpeg timeout rendering %s", output_path.name)
         return False
     except Exception as exc:
-        print(f"WARNING: FFmpeg error: {exc}")
+        logger.warning("FFmpeg error: %s", exc)
         return False
 
     if result.returncode != 0:
-        print(f"WARNING: FFmpeg failed for {output_path.name}: {result.stderr.strip()[:200]}")
+        logger.warning("FFmpeg failed for %s: %s", output_path.name, result.stderr.strip()[:200])
         return False
 
     return True
@@ -139,16 +143,16 @@ def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        print(f"WARNING: FFmpeg timeout concatenating to {output_path.name}")
+        logger.warning("FFmpeg timeout concatenating to %s", output_path.name)
         return False
     except Exception as exc:
-        print(f"WARNING: FFmpeg error: {exc}")
+        logger.warning("FFmpeg error: %s", exc)
         return False
 
     list_path.unlink(missing_ok=True)
 
     if result.returncode != 0:
-        print(f"WARNING: FFmpeg concat failed: {result.stderr.strip()[:200]}")
+        logger.warning("FFmpeg concat failed: %s", result.stderr.strip()[:200])
         return False
 
     return True
@@ -182,8 +186,6 @@ def convert_aspect_ratio(
     vf = aspect_ratio_filter(aspect_ratio)
     if vf is None:
         # No conversion needed — just copy
-        import shutil
-
         shutil.copy2(video_path, output_path)
         return True
 
@@ -210,14 +212,14 @@ def convert_aspect_ratio(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        print(f"WARNING: FFmpeg timeout converting aspect ratio: {output_path.name}")
+        logger.warning("FFmpeg timeout converting aspect ratio: %s", output_path.name)
         return False
     except Exception as exc:
-        print(f"WARNING: FFmpeg error: {exc}")
+        logger.warning("FFmpeg error: %s", exc)
         return False
 
     if result.returncode != 0:
-        print(f"WARNING: FFmpeg aspect ratio conversion failed: {result.stderr.strip()[:200]}")
+        logger.warning("FFmpeg aspect ratio conversion failed: %s", result.stderr.strip()[:200])
         return False
 
     return True
@@ -283,14 +285,14 @@ def add_background_music(
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        print(f"WARNING: FFmpeg timeout adding music to {output_path.name}")
+        logger.warning("FFmpeg timeout adding music to %s", output_path.name)
         return False
     except Exception as exc:
-        print(f"WARNING: FFmpeg error: {exc}")
+        logger.warning("FFmpeg error: %s", exc)
         return False
 
     if result.returncode != 0:
-        print(f"WARNING: FFmpeg music mix failed: {result.stderr.strip()[:200]}")
+        logger.warning("FFmpeg music mix failed: %s", result.stderr.strip()[:200])
         return False
 
     return True
@@ -359,7 +361,7 @@ def main() -> None:
     try:
         config = load_config(args.config)
     except ConfigError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        logger.error("%s", exc)
         sys.exit(1)
 
     general = config.get("general", {})
@@ -378,8 +380,10 @@ def main() -> None:
         if alt.exists():
             detections_path = alt
         else:
-            print(f"ERROR: detections_refined.json not found at {detections_path}")
-            print("Run 02_scan_footage.py first.")
+            logger.error(
+                "detections_refined.json not found at %s. Run 02_scan_footage.py first.",
+                detections_path,
+            )
             sys.exit(1)
 
     # Resolve clips directory
@@ -393,23 +397,25 @@ def main() -> None:
         elif latest_run and (latest_run / "highlights").exists():
             clips_dir = latest_run / "highlights"
     if not clips_dir.exists():
-        print(f"ERROR: Clips directory not found: {clips_dir}")
-        print("Run 05_render_clips.py first to render detection clips.")
+        logger.error(
+            "Clips directory not found: %s. Run 05_render_clips.py first to render detection clips.",
+            clips_dir,
+        )
         sys.exit(1)
 
-    with open(detections_path) as f:
+    with open(detections_path, encoding="utf-8") as f:
         detections_data = json.load(f)
 
     detections = detections_data.get("detections", [])
     if not detections:
-        print("No detections found to assemble.")
+        logger.info("No detections found to assemble.")
         sys.exit(0)
 
     # Sort by quality score (descending) and take top-N
     sorted_dets = sorted(detections, key=lambda d: d.get("quality_score", 0), reverse=True)
     top_dets = sorted_dets[: args.top_n]
 
-    print(f"Creating aftermovie from top {len(top_dets)} of {len(detections)} detections")
+    logger.info("Creating aftermovie from top %d of %d detections", len(top_dets), len(detections))
 
     # Render each clip with fade-in/fade-out (cross-dissolve effect)
     tmp_dir = output_dir / ".aftermovie_tmp"
@@ -437,7 +443,7 @@ def main() -> None:
                 source_path = Path(det.get("file_path", ""))
                 source = tmp_dir / f"{clip_id}_rendered.mp4"
                 if not source_path.exists():
-                    print(f"  SKIP: source not found for {clip_id}")
+                    logger.warning("  SKIP: source not found for %s", clip_id)
                     continue
                 if not render_clip_with_fade(
                     source_path, start_time, end_time, source, fade_duration=args.fade_duration
@@ -466,23 +472,25 @@ def main() -> None:
                 dur = 5.0
 
             if not render_clip_with_fade(source, 0, dur, faded, fade_duration=args.fade_duration):
-                print(f"  SKIP: failed to apply fade to {source.name}")
+                logger.warning("  SKIP: failed to apply fade to %s", source.name)
                 continue
 
             clip_files.append(faded)
-            print(f"  [{len(clip_files)}/{len(top_dets)}] {subject} (quality {quality}/10)")
+            logger.info(
+                "  [%d/%d] %s (quality %s/10)", len(clip_files), len(top_dets), subject, quality
+            )
 
         if not clip_files:
-            print("No clip files found to assemble.")
+            logger.error("No clip files found to assemble.")
             sys.exit(1)
 
         # Concatenate all faded clips
         assembled = tmp_dir / "assembled.mp4"
         if not concat_clips(clip_files, assembled):
-            print("\n✗ Assembly failed.")
+            logger.error("✗ Assembly failed.")
             sys.exit(1)
 
-        print(f"\n✓ Assembled {len(clip_files)} clips with cross-dissolve transitions")
+        logger.info("✓ Assembled %d clips with cross-dissolve transitions", len(clip_files))
 
         # Add background music with ducking
         music_path = Path(args.music) if args.music else None
@@ -491,9 +499,9 @@ def main() -> None:
         # Apply aspect ratio conversion if needed
         aspect_converted = tmp_dir / "aspect_converted.mp4"
         if args.aspect_ratio != "16:9":
-            print(f"\nConverting to aspect ratio {args.aspect_ratio}...")
+            logger.info("Converting to aspect ratio %s...", args.aspect_ratio)
             if not convert_aspect_ratio(assembled, aspect_converted, args.aspect_ratio):
-                print("WARNING: Aspect ratio conversion failed, using original.")
+                logger.warning("Aspect ratio conversion failed, using original.")
                 aspect_converted = assembled
         else:
             aspect_converted = assembled
@@ -502,23 +510,19 @@ def main() -> None:
             aspect_converted, music_path, output_path, args.music_volume, args.aspect_ratio
         ):
             if music_path:
-                print(f"✓ Added background music (volume {args.music_volume})")
-            print(f"\n✓ Aftermovie created: {output_path}")
+                logger.info("✓ Added background music (volume %s)", args.music_volume)
+            logger.info("✓ Aftermovie created: %s", output_path)
         else:
-            print("\n✗ Failed to add music. Outputting assembled video without music.")
-            import shutil
-
+            logger.warning("Failed to add music. Outputting assembled video without music.")
             shutil.copy2(assembled, output_path)
-            print(f"\n✓ Aftermovie created (no music): {output_path}")
+            logger.info("✓ Aftermovie created (no music): %s", output_path)
 
     except KeyboardInterrupt:
-        print("\nAftermovie creation interrupted by user (Ctrl+C). Cleaning up...")
+        logger.warning("Aftermovie creation interrupted by user (Ctrl+C). Cleaning up...")
         sys.exit(130)
     finally:
         # Clean up temp files
-        import shutil as _shutil
-
-        _shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

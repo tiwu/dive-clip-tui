@@ -373,16 +373,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
     assembled_video_path: Path | None = None
     if should_assemble:
         assemble_mode = getattr(args, "assemble_mode", None) or "aftermovie"
-        raw_top_n = getattr(args, "top_n", None)
-        if raw_top_n in (None, 10) and "--top-n" not in sys.argv:
-            full_cfg = load_config(config, default_to_empty=True)
-            aftermovie_cfg = full_cfg.get("aftermovie")
-            if isinstance(aftermovie_cfg, dict) and aftermovie_cfg.get("top_n_clips") is not None:
-                top_n = int(aftermovie_cfg["top_n_clips"])
-            else:
-                top_n = int(raw_top_n or 10)
-        else:
-            top_n = int(raw_top_n or 10)
+        top_n = _resolve_top_n(args, config)
         if assemble_mode == "simple":
             assembled_video_path = output_folder / "highlight_reel.mp4"
             assemble_script = SCRIPTS_DIR / "06_assemble_video.py"
@@ -414,7 +405,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         if debug_mode:
             assemble_cmd.append("--debug")
 
-        if not state.is_step_done("assemble"):
+        if not state.is_step_done("assemble") or not assembled_video_path.exists():
             state.mark_step_started("assemble")
             rc = run(
                 assemble_cmd,
@@ -603,6 +594,22 @@ def resolve_assembly_inputs(
     return detections_path, clips_dir, output_path, latest_run
 
 
+def _resolve_top_n(args: argparse.Namespace, config_path: str | Path) -> int:
+    """Resolve top_n from CLI args, falling back to aftermovie.top_n_clips in config."""
+    raw_top_n = getattr(args, "top_n", None)
+    if raw_top_n is not None and raw_top_n != 10:
+        return int(raw_top_n)
+    if "--top-n" not in sys.argv:
+        try:
+            full_cfg = load_config(config_path, default_to_empty=True)
+            aftermovie_cfg = full_cfg.get("aftermovie")
+            if isinstance(aftermovie_cfg, dict) and aftermovie_cfg.get("top_n_clips") is not None:
+                return int(aftermovie_cfg["top_n_clips"])
+        except ConfigError:
+            pass
+    return int(raw_top_n or 10)
+
+
 def cmd_assemble(args: argparse.Namespace) -> int:
     """Concatenate rendered highlight clips into a highlight reel."""
     resolved = resolve_assembly_inputs(args, "highlight_reel.mp4")
@@ -610,7 +617,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
         return 1
     detections_path, clips_dir, output_path, latest_run = resolved
 
-    top_n = getattr(args, "top_n", 10) or 10
+    top_n = _resolve_top_n(args, args.config)
     cmd = [
         sys.executable,
         str(SCRIPTS_DIR / "06_assemble_video.py"),
@@ -644,7 +651,7 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
         return 1
     detections_path, clips_dir, output_path, latest_run = resolved
 
-    top_n = getattr(args, "top_n", 10) or 10
+    top_n = _resolve_top_n(args, args.config)
     music_volume = getattr(args, "music_volume", 0.15)
     fade_duration = getattr(args, "fade_duration", 1.0)
     cmd = [
