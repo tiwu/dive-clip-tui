@@ -48,11 +48,16 @@ from utils.logging_setup import configure_logging, get_console
 from utils.models import DetectionsRefined, RefinedDetection
 from utils.ollama_client import OllamaClient, resolve_host
 from utils.prompt_templates import (
-    BROAD_MARINE_TEMPLATE,
+    BUILTIN_DOMAINS,
+    build_classification_prompt,
     get_template_for_keywords,
+    load_custom_templates,
+    resolve_domain_from_keywords,
+    resolve_template_for_subject,
 )
 from utils.run_archive import archive_run_artifacts, get_run_dir
 from utils.stats import (
+    Phase0Stats,
     Phase1Stats,
     Phase2Stats,
     PipelineStats,
@@ -100,6 +105,66 @@ def _summarize_scores(scores: list[float]) -> str:
     return f"{min(scores):.2f}/{sum(scores) / len(scores):.2f}/{max(scores):.2f}"
 
 
+def classify_clip_domain(
+    clip: dict,
+    sample_frames: list[dict],
+    client: OllamaClient,
+    ollama_host: str,
+    ollama_model: str,
+    ollama_timeout: int,
+    registry: dict[str, Any],
+    phase0_stats: Phase0Stats | None = None,
+) -> str:
+    """Classify video domain by evaluating sample frames with the VLM."""
+    if not sample_frames:
+        return "generic"
+
+    prompt = build_classification_prompt(registry)
+    domain_scores: dict[str, float] = {}
+
+    for frame in sample_frames:
+        start_time = time.perf_counter()
+        result = call_ollama(
+            ollama_host,
+            ollama_model,
+            frame["frame_path"],
+            prompt,
+            ollama_timeout,
+            client=client,
+            phase="classify",
+        )
+        elapsed = time.perf_counter() - start_time
+        if phase0_stats is not None:
+            phase0_stats.frames_analyzed += 1
+            phase0_stats.elapsed_seconds += elapsed
+            phase0_stats.ollama_calls += 1
+
+        if not result:
+            if phase0_stats is not None:
+                phase0_stats.ollama_failures += 1
+            continue
+
+        raw_domain = str(result.get("domain", "")).strip().lower()
+        confidence = float(result.get("confidence", 0.5) or 0.5)
+        matched_domain = None
+        for dom in registry:
+            if dom in raw_domain or raw_domain in dom:
+                matched_domain = dom
+                break
+        if not matched_domain:
+            matched_domain = "generic"
+
+        domain_scores[matched_domain] = domain_scores.get(matched_domain, 0.0) + max(
+            0.1, confidence
+        )
+
+    if not domain_scores:
+        return "generic"
+
+    best_domain = max(domain_scores.items(), key=lambda item: item[1])[0]
+    return best_domain
+
+
 class StatusColumn(ProgressColumn):
     """Renders optional status field safely."""
 
@@ -138,8 +203,13 @@ def process_clip(
     phase2_stats: Phase2Stats | None = None,
     checkpoints_dir: Path | None = None,
     resume: bool = False,
+    phase0_stats: Phase0Stats | None = None,
 ) -> list[RefinedDetection]:
-    """Process a single clip through coarse-to-fine scanning.
+    """Process a single clip through 3-stage domain-aware scanning.
+
+    Pass 0: Video domain classification (sample frames).
+    Pass 1: Domain coarse scan (candidate windows & subject identification).
+    Pass 2: Subject-routed fine scan (quality scoring & refined highlight windows).
 
     Returns a list of refined detections (may be empty).
     """
@@ -174,9 +244,10 @@ def process_clip(
             checkpoint = ClipScanCheckpoint.load(checkpoint_file)
             if checkpoint is not None:
                 logger.info(
-                    "Resumed %s from intra-clip checkpoint (stage=%s, %d coarse frames evaluated)",
+                    "Resumed %s from intra-clip checkpoint (stage=%s, domain=%s, %d coarse frames evaluated)",
                     clip["file_name"],
                     checkpoint.pass_stage,
+                    checkpoint.detected_domain or "unknown",
                     len(checkpoint.coarse_results),
                 )
         if checkpoint is None:
@@ -194,8 +265,49 @@ def process_clip(
 
     tags = clip.get("tags", [])
 
-    # ---------- Pass 1: Coarse scan ----------
+    # ---------- Pass 0: Domain Resolution / Classification ----------
+    registry = load_custom_templates(config)
+    configured_domain = scan_params.get("domain")
+    classify_clips = scan_params.get("classify_clips")
+    if classify_clips is None:
+        classify_clips = "auto" if configured_domain == "auto" else "off"
+    classify_frames_count = max(1, int(scan_params.get("classify_frames_count", 3)))
+
+    detected_domain: str | None = None
+    if checkpoint is not None and checkpoint.detected_domain:
+        detected_domain = checkpoint.detected_domain
+        logger.info(
+            "[Pass 0] Resumed detected domain '%s' for %s from checkpoint",
+            detected_domain,
+            clip["file_name"],
+        )
+    elif configured_domain and configured_domain != "auto":
+        detected_domain = configured_domain
+        logger.info(
+            "[Pass 0] Using configured domain '%s' for %s",
+            detected_domain,
+            clip["file_name"],
+        )
+    elif clip.get("domain"):
+        detected_domain = clip["domain"]
+        logger.info(
+            "[Pass 0] Using clip manifest domain '%s' for %s",
+            detected_domain,
+            clip["file_name"],
+        )
+    elif classify_clips != "always" and tags:
+        inferred = resolve_domain_from_keywords(tags, registry)
+        if inferred:
+            detected_domain = inferred
+            logger.info(
+                "[Pass 0] Inferred domain '%s' from clip tags for %s",
+                detected_domain,
+                clip["file_name"],
+            )
+
+    # ---------- Pass 1: Coarse scan setup ----------
     candidate_windows: list[tuple[float, float]] = []
+    coarse_hits: list[tuple[float, tuple[float, float], str, str, float]] = []
     coarse_confidences: list[float] = []
     coarse_detected = 0
     coarse_failures = 0
@@ -207,6 +319,7 @@ def process_clip(
         "completed",
     )
 
+    coarse_frames: list[dict] = []
     if skip_coarse_inference and checkpoint is not None:
         logger.info(
             "[Pass 1] Skipping coarse scan for %s (already completed in checkpoint)",
@@ -237,13 +350,59 @@ def process_clip(
             phase1_stats.frames_extracted += len(coarse_frames)
         logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
 
-        template = get_template_for_keywords(tags)
-        coarse_prompt = template.coarse_prompt if template else BROAD_MARINE_TEMPLATE.coarse_prompt
+        # Execute Pass 0 VLM classification if domain is still unknown
+        if detected_domain is None and classify_clips != "off" and coarse_frames:
+            if len(coarse_frames) <= classify_frames_count:
+                sample_frames = list(coarse_frames)
+            else:
+                step = len(coarse_frames) / (classify_frames_count + 1)
+                indices = [int((i + 1) * step) for i in range(classify_frames_count)]
+                sample_frames = [coarse_frames[idx] for idx in indices]
 
+            logger.info(
+                "[Pass 0] Classifying domain for %s across %d sample frames...",
+                clip["file_name"],
+                len(sample_frames),
+            )
+            detected_domain = classify_clip_domain(
+                clip,
+                sample_frames,
+                client,
+                ollama_host,
+                ollama_model,
+                ollama_timeout,
+                registry,
+                phase0_stats=phase0_stats,
+            )
+            if phase0_stats is not None:
+                phase0_stats.clips_classified += 1
+                phase0_stats.domain_counts[detected_domain] = (
+                    phase0_stats.domain_counts.get(detected_domain, 0) + 1
+                )
+            logger.info(
+                "[Pass 0] Classified %s as domain '%s'",
+                clip["file_name"],
+                detected_domain,
+            )
+
+    if detected_domain is None:
+        detected_domain = "underwater"
+
+    if checkpoint is not None:
+        checkpoint.detected_domain = detected_domain
+
+    dom_config = registry.get(
+        detected_domain, registry.get("underwater", BUILTIN_DOMAINS["underwater"])
+    )
+
+    matched_template = get_template_for_keywords(tags, dom_config.templates) if tags else None
+    coarse_prompt = matched_template.coarse_prompt if matched_template else dom_config.coarse_prompt
+
+    if not skip_coarse_inference:
         task_id = None
         if progress is not None and coarse_frames:
             task_id = progress.add_task(
-                f"[cyan]Pass 1:[/] {clip['file_name']}",
+                f"[cyan]Pass 1 ({detected_domain}):[/] {clip['file_name']}",
                 total=len(coarse_frames),
                 status="(0 hits)",
             )
@@ -263,6 +422,13 @@ def process_clip(
                             phase1_stats.detections_detected += 1
                     if cached.candidate_window is not None:
                         candidate_windows.append(cached.candidate_window)
+                        coarse_hits.append((
+                            ts,
+                            cached.candidate_window,
+                            cached.subject,
+                            cached.category,
+                            cached.confidence,
+                        ))
                     if progress is not None and task_id is not None:
                         progress.advance(task_id)
                         progress.update(task_id, status=f"({len(candidate_windows)} hits)")
@@ -300,6 +466,8 @@ def process_clip(
                 detected = bool(result.get("detected"))
                 confidence = float(result.get("confidence", 0.0) or 0.0)
                 quality_score = int(result.get("quality_score", 0) or 0)
+                subject = str(result.get("subject", "") or "")
+                category = str(result.get("category", "") or "")
                 coarse_confidences.append(confidence)
                 if detected:
                     coarse_detected += 1
@@ -314,6 +482,7 @@ def process_clip(
                 if frame_passes:
                     cand_win = (max(0, ts - fine_padding), ts + fine_padding)
                     candidate_windows.append(cand_win)
+                    coarse_hits.append((ts, cand_win, subject, category, confidence))
                 else:
                     cand_win = None
 
@@ -323,14 +492,15 @@ def process_clip(
 
                 logger.debug(
                     "[Pass 1] Frame %d @ %.1fs: detected=%s confidence=%.2f quality=%d passes_threshold=%s "
-                    "subject=%s (%.1fs)",
+                    "subject=%s category=%s (%.1fs)",
                     frame_index,
                     frame["timestamp"],
                     detected,
                     confidence,
                     quality_score,
                     frame_passes,
-                    result.get("subject", "-"),
+                    subject or "-",
+                    category or "-",
                     elapsed,
                 )
 
@@ -340,7 +510,8 @@ def process_clip(
                         detected=detected,
                         confidence=confidence,
                         quality_score=quality_score,
-                        subject=result.get("subject", "") if result else "",
+                        subject=subject,
+                        category=category,
                         candidate_window=cand_win,
                         elapsed=elapsed,
                     )
@@ -417,6 +588,32 @@ def process_clip(
         phase1_stats.candidate_duration += sum(end - start for start, end in merged)
         phase1_stats.elapsed_seconds += coarse_elapsed_total
 
+    # Reconstruct coarse_hits from checkpoint if resuming
+    if not coarse_hits and checkpoint is not None:
+        coarse_hits.extend(
+            (r.timestamp, r.candidate_window, r.subject, r.category, r.confidence)
+            for r in checkpoint.coarse_results.values()
+            if r.detected and r.candidate_window is not None
+        )
+
+    window_routing: dict[str, dict[str, str]] = (
+        dict(checkpoint.window_routing)
+        if checkpoint is not None and checkpoint.window_routing
+        else {}
+    )
+    for window_index, (win_start, win_end) in enumerate(merged, start=1):
+        win_key = str(window_index)
+        if win_key not in window_routing:
+            matching_hits = [h for h in coarse_hits if (win_start - 0.5 <= h[0] <= win_end + 0.5)]
+            if matching_hits:
+                best_hit = max(matching_hits, key=lambda h: h[4])
+                window_routing[win_key] = {"subject": best_hit[2], "category": best_hit[3]}
+            else:
+                window_routing[win_key] = {"subject": "", "category": ""}
+
+    if checkpoint is not None:
+        checkpoint.window_routing = window_routing
+
     # ---------- Pass 2: Fine scan ----------
     logger.info(
         "[Pass 2] Fine scan @ %.1f FPS: %s (%d windows)", fine_fps, clip["file_name"], len(merged)
@@ -439,10 +636,6 @@ def process_clip(
         fine_elapsed_total = checkpoint.fine_elapsed_total
         fine_confidences = list(checkpoint.fine_confidences)
 
-    template = get_template_for_keywords(tags)
-    fine_prompt = template.fine_prompt if template else BROAD_MARINE_TEMPLATE.fine_prompt
-    color = template.color if template else BROAD_MARINE_TEMPLATE.color
-
     try:
         for window_index, (win_start, win_end) in enumerate(merged, start=1):
             if checkpoint is not None and window_index in checkpoint.fine_windows_completed:
@@ -453,16 +646,31 @@ def process_clip(
                 )
                 continue
 
+            win_route = window_routing.get(str(window_index), {})
+            win_subject = win_route.get("subject", "")
+            win_category = win_route.get("category", "")
+            window_template = resolve_template_for_subject(
+                subject=win_subject,
+                category=win_category,
+                domain=detected_domain,
+                tags=tags,
+                registry=registry,
+            )
+            fine_prompt = window_template.fine_prompt
+            color = window_template.color
+
             duration = win_end - win_start
             win_dir = clip_work_dir / "fine" / f"win_{int(win_start)}_{int(win_end)}"
             logger.info(
-                "[Pass 2] Window %d of %d: %.1fs-%.1fs (%.1fs) @ %.1f FPS",
+                "[Pass 2] Window %d of %d: %.1fs-%.1fs (%.1fs) @ %.1f FPS [template: %s, domain: %s]",
                 window_index,
                 len(merged),
                 win_start,
                 win_end,
                 duration,
                 fine_fps,
+                window_template.name,
+                detected_domain,
             )
             if state is not None:
                 state.set_activity(
@@ -568,12 +776,13 @@ def process_clip(
                                 fps=str(clip.get("fps") or "25.0"),
                                 start_time=max(0, frame["timestamp"] - 1),
                                 end_time=frame["timestamp"] + 1,
-                                subject=result.get("subject", "unknown"),
+                                subject=result.get("subject", win_subject or "unknown"),
                                 confidence=confidence,
                                 quality_score=quality_score,
                                 description=result.get("description", ""),
                                 color=color,
-                                template=template.name if template else "generic",
+                                template=window_template.name,
+                                domain=detected_domain,
                             )
                         )
                     except (ValueError, TypeError) as exc:
@@ -871,14 +1080,18 @@ def main() -> None:
                 completed_clips.add(cname)
 
     scan_start_time = time.perf_counter()
+    p0_stats = Phase0Stats()
     p1_stats = Phase1Stats()
     p2_stats = Phase2Stats()
     if args.resume and state is not None:
         prev_scan_stats = state.get("scan_stats")
         if isinstance(prev_scan_stats, dict):
             try:
+                prev_p0 = prev_scan_stats.get("phase0")
                 prev_p1 = prev_scan_stats.get("phase1")
                 prev_p2 = prev_scan_stats.get("phase2")
+                if isinstance(prev_p0, dict):
+                    p0_stats = Phase0Stats.model_validate(prev_p0)
                 if isinstance(prev_p1, dict):
                     p1_stats = Phase1Stats.model_validate(prev_p1)
                 if isinstance(prev_p2, dict):
@@ -917,6 +1130,7 @@ def main() -> None:
                     phase2_stats=p2_stats,
                     checkpoints_dir=checkpoints_dir,
                     resume=args.resume,
+                    phase0_stats=p0_stats,
                 )
                 refined.detections.extend(detections)
                 refined.total_detections += len(detections)
@@ -938,6 +1152,10 @@ def main() -> None:
         save_detections_atomic(output_path, refined)
 
         # Record Ollama calls for each phase
+        classify_stats = ollama_client.metrics.by_phase.get("classify")
+        if classify_stats:
+            p0_stats.ollama_calls = max(p0_stats.ollama_calls, classify_stats.calls)
+            p0_stats.ollama_failures = max(p0_stats.ollama_failures, classify_stats.failures)
         coarse_stats = ollama_client.metrics.by_phase.get("coarse")
         if coarse_stats:
             p1_stats.ollama_calls += coarse_stats.calls
@@ -955,6 +1173,7 @@ def main() -> None:
             video_count=len(clips),
             total_video_duration=round(total_video_duration, 2),
             total_elapsed_seconds=round(scan_elapsed, 2),
+            phase0=p0_stats,
             phase1=p1_stats,
             phase2=p2_stats,
             step_durations={"scan": round(scan_elapsed, 2)},

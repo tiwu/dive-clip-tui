@@ -16,6 +16,9 @@ ollama:
   timeout_seconds: 120
 
 scan_parameters:
+  domain: "auto"                    # "auto" (Pass 0 classifies clip), "underwater", "motorcycle", or "generic"
+  classify_clips: "auto"            # "auto" (run Pass 0 unless domain/tags set), "always", or "off"
+  classify_frames_count: 3          # Number of sample frames per clip for Pass 0 domain classification
   coarse_fps: 0.5                   # 0.5 frames per second during coarse scan (1 frame every 2 seconds)
   coarse_scale: "640:-2"            # Downscale coarse frames for fast VLM screening
   fine_fps: 1.0                     # 1 frame per second during highlight windows
@@ -37,3 +40,15 @@ cloud_storyline:
   provider: "claude"                # "claude" or "gemini"
   model: "claude-3-5-sonnet-latest"
   target_edit_duration_minutes: 4
+
+# Custom domains and prompt templates (optional):
+# prompts:
+#   domains:
+#     cycling:
+#       description: "Bicycle and mountain biking footage"
+#       keywords: ["cycling", "bicycle", "mtb", "gravel"]
+#   templates:
+#     - name: "custom_highlight"
+#       domain: "generic"
+#       keywords: ["action", "stunt"]
+#       color: "Magenta"

@@ -179,3 +179,170 @@ def test_broad_marine_template_includes_examples() -> None:
             f"Expected '{example}' in coarse prompt"
         )
         assert example in BROAD_MARINE_TEMPLATE.fine_prompt, f"Expected '{example}' in fine prompt"
+
+
+def test_builtin_domains_structure() -> None:
+    """BUILTIN_DOMAINS should define underwater, motorcycle, and generic domains."""
+    from utils.prompt_templates import BUILTIN_DOMAINS
+
+    assert "underwater" in BUILTIN_DOMAINS
+    assert "motorcycle" in BUILTIN_DOMAINS
+    assert "generic" in BUILTIN_DOMAINS
+
+    uw = BUILTIN_DOMAINS["underwater"]
+    assert uw.fallback_template.name == "broad_marine"
+    assert len(uw.templates) == 3
+
+    moto = BUILTIN_DOMAINS["motorcycle"]
+    assert moto.fallback_template.name == "broad_motorcycle"
+    assert len(moto.templates) == 3
+
+    gen = BUILTIN_DOMAINS["generic"]
+    assert gen.fallback_template.name == "generic_highlight"
+
+
+def test_motorcycle_templates_and_rubrics() -> None:
+    """Motorcycle templates should define distinct keywords and fine rubric checks."""
+    from utils.prompt_templates import (
+        BROAD_MOTORCYCLE_TEMPLATE,
+        MOTO_GROUP_TEMPLATE,
+        MOTO_RIDING_TEMPLATE,
+        MOTO_SCENIC_TEMPLATE,
+        MOTORCYCLE_COARSE_PROMPT,
+    )
+
+    templates = [MOTO_RIDING_TEMPLATE, MOTO_SCENIC_TEMPLATE, MOTO_GROUP_TEMPLATE]
+    assert MOTO_RIDING_TEMPLATE.color == "Orange"
+    assert MOTO_SCENIC_TEMPLATE.color == "Blue"
+    assert MOTO_GROUP_TEMPLATE.color == "Green"
+    assert BROAD_MOTORCYCLE_TEMPLATE.color == "Orange"
+
+    for tmpl in templates:
+        assert tmpl.domain == "motorcycle"
+        prompt_lower = tmpl.fine_prompt.lower()
+        assert "quality_score" in prompt_lower
+        assert (
+            "stability" in prompt_lower or "steady" in prompt_lower or "vibration" in prompt_lower
+        )
+
+    assert (
+        "ground" in MOTORCYCLE_COARSE_PROMPT.lower()
+        or "fuel tank" in MOTORCYCLE_COARSE_PROMPT.lower()
+    )
+
+
+def test_classification_prompt_generation() -> None:
+    """Classification prompt should contain target domains."""
+    from utils.prompt_templates import VIDEO_CLASSIFICATION_PROMPT, build_classification_prompt
+
+    assert "underwater" in VIDEO_CLASSIFICATION_PROMPT
+    assert "motorcycle" in VIDEO_CLASSIFICATION_PROMPT
+    assert "generic" in VIDEO_CLASSIFICATION_PROMPT
+
+    custom_prompt = build_classification_prompt(["underwater", "motorcycle", "snowboarding"])
+    assert "snowboarding" in custom_prompt
+
+
+def test_resolve_domain_from_keywords() -> None:
+    """resolve_domain_from_keywords should identify domain from tags/keywords."""
+    from utils.prompt_templates import resolve_domain_from_keywords
+
+    assert resolve_domain_from_keywords(["turtle", "coral"]) == "underwater"
+    assert resolve_domain_from_keywords(["scuba", "reef"]) == "underwater"
+    assert resolve_domain_from_keywords(["motorcycle", "twisties"]) == "motorcycle"
+    assert resolve_domain_from_keywords(["riding", "hairpin"]) == "motorcycle"
+    assert resolve_domain_from_keywords(["unknown_tag"]) is None
+    assert resolve_domain_from_keywords([]) is None
+
+
+def test_resolve_template_for_subject_underwater() -> None:
+    """resolve_template_for_subject should route underwater subjects accurately."""
+    from utils.prompt_templates import resolve_template_for_subject
+
+    # Direct category match
+    t1 = resolve_template_for_subject(subject="unknown", category="pelagics", domain="underwater")
+    assert t1.name == "pelagics"
+
+    # Subject keyword match
+    t2 = resolve_template_for_subject(subject="green sea turtle swimming", domain="underwater")
+    assert t2.name == "pelagics"
+
+    t3 = resolve_template_for_subject(subject="tiny nudibranch on sponge", domain="underwater")
+    assert t3.name == "macro"
+
+    t4 = resolve_template_for_subject(subject="diver inspecting swimthrough", domain="underwater")
+    assert t4.name == "diver"
+
+    # Fallback in underwater domain
+    t5 = resolve_template_for_subject(subject="mysterious dark cave", domain="underwater")
+    assert t5.name == "broad_marine"
+
+
+def test_resolve_template_for_subject_motorcycle() -> None:
+    """resolve_template_for_subject should route motorcycle subjects accurately."""
+    from utils.prompt_templates import resolve_template_for_subject
+
+    t1 = resolve_template_for_subject(subject="sharp lean in corner", domain="motorcycle")
+    assert t1.name == "moto_riding"
+
+    t2 = resolve_template_for_subject(subject="beautiful mountain pass vista", domain="motorcycle")
+    assert t2.name == "moto_scenic"
+
+    t3 = resolve_template_for_subject(subject="fellow rider wave in formation", domain="motorcycle")
+    assert t3.name == "moto_group"
+
+    t4 = resolve_template_for_subject(subject="empty highway cruise", domain="motorcycle")
+    assert t4.name == "broad_motorcycle"
+
+
+def test_resolve_template_for_subject_generic() -> None:
+    """resolve_template_for_subject should route generic domain to generic_highlight."""
+    from utils.prompt_templates import resolve_template_for_subject
+
+    t1 = resolve_template_for_subject(subject="person skateboarding", domain="generic")
+    assert t1.name == "generic_highlight"
+
+
+def test_load_custom_templates() -> None:
+    """load_custom_templates should merge user-defined domains and template overrides."""
+    from utils.prompt_templates import load_custom_templates
+
+    config = {
+        "prompts": {
+            "domains": {
+                "cycling": {
+                    "description": "Bicycle and mountain bike footage",
+                    "keywords": ["cycling", "mtb", "gravel"],
+                    "coarse_prompt": "Screen cycling frames",
+                    "fallback_color": "Green",
+                    "templates": [
+                        {
+                            "name": "downhill_trail",
+                            "keywords": ["downhill", "jump", "singletrack"],
+                            "fine_prompt": "Evaluate downhill jump",
+                            "color": "Red",
+                        }
+                    ],
+                }
+            },
+            "templates": [
+                {
+                    "name": "wreck_specialist",
+                    "domain": "underwater",
+                    "keywords": ["wreck", "shipwreck"],
+                    "fine_prompt": "Evaluate shipwreck shot",
+                    "color": "Green",
+                }
+            ],
+        }
+    }
+
+    reg = load_custom_templates(config)
+    assert "cycling" in reg
+    assert reg["cycling"].description == "Bicycle and mountain bike footage"
+    assert len(reg["cycling"].templates) == 1
+    assert reg["cycling"].templates[0].name == "downhill_trail"
+
+    # Custom template added to underwater domain
+    uw_names = [t.name for t in reg["underwater"].templates]
+    assert "wreck_specialist" in uw_names

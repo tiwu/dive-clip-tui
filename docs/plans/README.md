@@ -6,16 +6,17 @@ This directory contains version-controlled architectural specifications and impl
 
 ```text
 Stage 1 — Plan the change
-1. User queues an issue with the 'agent:plan' label.
-2. Agent writes docs/plans/PLAN-<id>-<slug>.md, links it from the issue, and sets 'agent:plan-review'.
-3. The plan records the change category, proposed SemVer impact, and a draft changelog entry.
-4. User reviews and approves the plan by setting 'agent:approved'.
+1. User queues an issue with 'agent:plan' or initiates planning in chat (e.g. '/plan').
+2. If no issue exists yet, agent creates one via 'gh issue create --label "agent:plan-review"'.
+3. Agent writes docs/plans/PLAN-<id>-<slug>.md, embeds/links it in the issue body, and sets 'agent:plan-review'.
+4. The plan records the change category, proposed SemVer impact, and a draft changelog entry.
+5. Agent stops and waits for the user to approve the plan ('agent:approved' or explicit chat approval).
 
 Stage 2 — Implement and release
-5. Agent sets 'agent:in-progress', creates feature/issue-<id>-<slug>, implements the approved scope, and opens a linked PR.
-6. PR adds a user-facing CHANGELOG.md entry under [Unreleased] and may set one SemVer label.
-7. CI runs tests, lint, formatting, and changelog validation; agent marks passing PR 'agent:review-ready'.
-8. User reviews and merges the PR; the issue closes and the release workflow processes the merge.
+6. Agent sets 'agent:in-progress', creates feature/issue-<id>-<slug>, implements the approved scope, and opens a linked PR.
+7. PR adds a user-facing CHANGELOG.md entry under [Unreleased] and may set one SemVer label.
+8. CI runs tests, lint, formatting, and changelog validation; agent marks passing PR 'agent:review-ready'.
+9. User reviews and merges the PR; the issue closes and the release workflow processes the merge.
 ```
 
 ### Label Taxonomy

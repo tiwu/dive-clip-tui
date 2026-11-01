@@ -14,6 +14,7 @@ class ClipManifest(BaseModel):
     fps: str = Field(default="25.0", description="Clip frame rate as string")
     resolution: str = Field(default="1920x1080", description="WidthxHeight")
     tags: list[str] = Field(default_factory=list, description="Resolve keywords")
+    domain: str = Field(default="", description="Detected or configured video domain")
     duration: str = Field(default="", description="Clip duration")
     start_timecode: str = Field(default="", description="Starting timecode")
     end_timecode: str = Field(default="", description="Ending timecode")
@@ -37,6 +38,7 @@ class Detection(BaseModel):
     description: str = Field(..., description="Human-readable description")
     frame_number: int = Field(..., ge=0, description="Frame number in source clip")
     template: str = Field(default="", description="Which prompt template matched")
+    domain: str = Field(default="", description="Detected or configured video domain")
 
 
 class RefinedDetection(BaseModel):
@@ -54,6 +56,7 @@ class RefinedDetection(BaseModel):
     description: str
     color: str = Field(default="", description="Marker color: Cyan, Yellow, Green")
     template: str = Field(default="")
+    domain: str = Field(default="", description="Detected or configured video domain")
 
 
 class DetectionsRefined(BaseModel):
