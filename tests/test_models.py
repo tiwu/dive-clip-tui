@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from pydantic import ValidationError
+import json
+
 import pytest
+from pydantic import ValidationError
 
 from utils.models import (
+    ClassificationOutput,
+    ClipClassification,
     ClipManifest,
     Detection,
     DetectionsRefined,
@@ -226,3 +230,71 @@ def test_model_from_dict() -> None:
     }
     clip = ClipManifest(**data)
     assert clip.tags == ["turtle"]
+
+
+def test_clip_classification_valid() -> None:
+    """ClipClassification should accept valid fields."""
+    c = ClipClassification(
+        clip_id="clip_1",
+        file_name="clip_1.mp4",
+        file_path="/videos/clip_1.mp4",
+        domain="underwater",
+        confidence=0.88,
+        uncertain=False,
+    )
+    assert c.clip_id == "clip_1"
+    assert c.domain == "underwater"
+    assert c.confidence == 0.88
+    assert c.uncertain is False
+    assert c.reason is None
+
+
+def test_clip_classification_uncertain() -> None:
+    """ClipClassification should support uncertain classifications with reason and None confidence."""
+    c = ClipClassification(
+        clip_id="clip_2",
+        file_name="clip_2.mp4",
+        file_path="/videos/clip_2.mp4",
+        domain="generic",
+        confidence=None,
+        uncertain=True,
+        reason="no usable responses",
+    )
+    assert c.domain == "generic"
+    assert c.confidence is None
+    assert c.uncertain is True
+    assert c.reason == "no usable responses"
+
+
+def test_clip_classification_validation_error() -> None:
+    """ClipClassification should reject invalid fields."""
+    with pytest.raises(ValidationError):
+        # Missing required fields
+        ClipClassification(file_name="clip.mp4")
+
+    with pytest.raises(ValidationError):
+        # Confidence out of range
+        ClipClassification(
+            clip_id="c1",
+            file_name="c.mp4",
+            file_path="/c.mp4",
+            domain="generic",
+            confidence=1.5,
+        )
+
+
+def test_classification_output() -> None:
+    """ClassificationOutput should wrap a list of ClipClassification records."""
+    c1 = ClipClassification(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        domain="motorcycle",
+        confidence=0.92,
+    )
+    output = ClassificationOutput(total_clips=1, classifications=[c1])
+    assert output.total_clips == 1
+    assert len(output.classifications) == 1
+    dumped = json.loads(output.model_dump_json())
+    assert dumped["total_clips"] == 1
+    assert dumped["classifications"][0]["domain"] == "motorcycle"

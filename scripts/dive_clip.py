@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
 from utils.config import ConfigError, load_config, load_general_config  # noqa: E402
 from utils.logging_setup import configure_logging, get_console  # noqa: E402
+from utils.models import ClassificationOutput  # noqa: E402
 from utils.run_archive import (  # noqa: E402
     archive_run_artifacts,
     find_latest_run_dir,
@@ -77,6 +78,30 @@ def run(cmd: list[str], description: str) -> int:
     except KeyboardInterrupt:
         logger.warning("Interrupted by user.")
         return 130
+
+
+def _load_ingest_module() -> Any:
+    """Dynamically load scripts/00_ingest_media.py."""
+    spec = importlib.util.spec_from_file_location(
+        "scripts_00_ingest_media", SCRIPTS_DIR / "00_ingest_media.py"
+    )
+    if spec and spec.loader:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    raise ImportError("Could not load scripts/00_ingest_media.py")
+
+
+def _load_scan_module() -> Any:
+    """Dynamically load scripts/02_scan_footage.py."""
+    spec = importlib.util.spec_from_file_location(
+        "scripts_02_scan_footage", SCRIPTS_DIR / "02_scan_footage.py"
+    )
+    if spec and spec.loader:
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    raise ImportError("Could not load scripts/02_scan_footage.py")
 
 
 def _run_background_render_worker(
@@ -168,6 +193,12 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     config = args.config
     debug_mode = args.debug
+
+    if getattr(args, "classifications", None):
+        c_path = Path(args.classifications)
+        if not c_path.exists():
+            logger.error("Classifications file not found: %s", c_path)
+            return 1
 
     resume_target = getattr(args, "resume", False)
     is_resuming = resume_target is not False
@@ -314,6 +345,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         scan_cmd.append("--debug")
     if is_resuming:
         scan_cmd.append("--resume")
+    if getattr(args, "classifications", None):
+        scan_cmd.extend(["--classifications", str(Path(args.classifications).resolve())])
 
     if not state.is_step_done("scan") or not detections_path.exists():
         state.mark_step_started("scan")
@@ -1054,6 +1087,124 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_classify(args: argparse.Namespace) -> int:
+    """Run standalone Pass 0 domain classification on video footage."""
+    try:
+        general = load_general_config(args.config)
+        config = load_config(args.config)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    input_value = args.input or general.get("input_dir")
+    if not input_value:
+        logger.error(
+            "No input folder given. Pass --input or set general.input_dir in %s.",
+            args.config,
+        )
+        return 2
+
+    input_folder = Path(input_value)
+    if not input_folder.exists():
+        logger.error("Input folder does not exist: %s", input_folder)
+        return 1
+
+    if args.output:
+        out_p = Path(args.output)
+        output_file = out_p if out_p.suffix == ".json" else out_p / "classifications.json"
+    else:
+        output_dir = Path(general.get("output_dir") or "./outputs")
+        output_file = output_dir / "classifications.json"
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    log_path = args.log_file or (output_file.parent / "classify.log")
+    configure_logging(debug=args.debug, log_file=log_path)
+
+    console = get_console()
+    if console.is_terminal:
+        console.print(
+            Panel(
+                f"[bold white]Input:[/]  [yellow]{input_folder}[/]\n"
+                f"[bold white]Output:[/] [yellow]{output_file}[/]\n"
+                f"[bold white]Config:[/] [yellow]{args.config}[/]",
+                title="[bold cyan]Dive Clip Pass 0 Domain Classification[/bold cyan]",
+                border_style="cyan",
+            )
+        )
+
+    logger.info("Ingesting media from %s", input_folder)
+    try:
+        ingest_mod = _load_ingest_module()
+        clips = ingest_mod.ingest_folder(input_folder)
+    except Exception as exc:
+        logger.error("Failed to ingest folder %s: %s", input_folder, exc)
+        return 1
+
+    if not clips:
+        logger.warning("No video files found in %s", input_folder)
+        empty_out = ClassificationOutput(total_clips=0, classifications=[])
+        output_file.write_text(empty_out.model_dump_json(indent=2), encoding="utf-8")
+        logger.info("Empty classifications saved to %s", output_file)
+        return 0
+
+    logger.info("Classifying %d clip(s)...", len(clips))
+    try:
+        scan_mod = _load_scan_module()
+        classifications = scan_mod.classify_footage(clips, config)
+    except Exception as exc:
+        logger.error("Classification failed: %s", exc)
+        return 1
+
+    output_obj = ClassificationOutput(
+        total_clips=len(classifications),
+        classifications=classifications,
+    )
+    output_file.write_text(output_obj.model_dump_json(indent=2), encoding="utf-8")
+    logger.info("Saved classifications to %s", output_file)
+
+    # Print results table
+    table = Table(title="Pass 0 Domain Classification Results")
+    table.add_column("Clip", style="bold white")
+    table.add_column("Domain", style="cyan")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Status", justify="center")
+    table.add_column("Reason / Notes", style="dim")
+
+    confident_count = 0
+    uncertain_count = 0
+    domain_counts: dict[str, int] = {}
+
+    for c in classifications:
+        status_str = "[yellow]Uncertain[/yellow]" if c.uncertain else "[green]Confident[/green]"
+        conf_str = f"{c.confidence:.2f}" if c.confidence is not None else "n/a"
+        table.add_row(
+            c.file_name,
+            c.domain,
+            conf_str,
+            status_str,
+            c.reason or "",
+        )
+        if c.uncertain:
+            uncertain_count += 1
+        else:
+            confident_count += 1
+        domain_counts[c.domain] = domain_counts.get(c.domain, 0) + 1
+
+    console.print(table)
+
+    summary_lines = [
+        f"Total videos classified: {len(classifications)}",
+        f"Confident: {confident_count} | Uncertain: {uncertain_count}",
+        f"Domains: {', '.join(f'{k} ({v})' for k, v in sorted(domain_counts.items()))}",
+        f"Saved to: {output_file}",
+    ]
+    console.print(
+        Panel("\n".join(summary_lines), title="Classification Summary", border_style="blue")
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     version = get_version()
     parser = argparse.ArgumentParser(description="dive-clip — Local footage curation pipeline")
@@ -1119,7 +1270,35 @@ def build_parser() -> argparse.ArgumentParser:
         default="aftermovie",
         help="Assembly mode when --assemble is enabled (default: aftermovie)",
     )
+    scan_p.add_argument(
+        "--classifications",
+        default=None,
+        help="Path to pre-computed classifications JSON to reuse confident domain labels",
+    )
     scan_p.set_defaults(func=cmd_scan)
+
+    classify_p = sub.add_parser(
+        "classify", help="Run Pass 0 domain classification without highlight detection"
+    )
+    classify_p.add_argument(
+        "--input",
+        default=None,
+        help="Path to footage folder (defaults to general.input_dir in the config)",
+    )
+    classify_p.add_argument(
+        "--output",
+        default=None,
+        help="Path to output classifications JSON (defaults to <general.output_dir>/classifications.json)",
+    )
+    classify_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    classify_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    classify_p.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional logfile path",
+    )
+    classify_p.set_defaults(func=cmd_classify)
 
     assemble_p = sub.add_parser("assemble", help="Concatenate top-N rendered clips into a video")
     assemble_p.add_argument(

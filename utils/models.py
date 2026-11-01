@@ -65,3 +65,24 @@ class DetectionsRefined(BaseModel):
     total_clips: int = Field(..., ge=0)
     total_detections: int = Field(..., ge=0)
     detections: list[RefinedDetection] = Field(default_factory=list)
+
+
+class ClipClassification(BaseModel):
+    """Pass 0 domain classification result for a single video clip."""
+
+    clip_id: str = Field(..., description="Unique clip identifier")
+    file_name: str = Field(..., description="Original file name")
+    file_path: str = Field(..., description="Absolute file path")
+    domain: str = Field(..., description="Classified domain or generic")
+    confidence: float | None = Field(
+        default=None, ge=0, le=1, description="Mean confidence score for the winning domain"
+    )
+    uncertain: bool = Field(default=False, description="Whether classification is uncertain")
+    reason: str | None = Field(default=None, description="Reason for uncertainty, if any")
+
+
+class ClassificationOutput(BaseModel):
+    """Top-level classification output file schema."""
+
+    total_clips: int = Field(..., ge=0)
+    classifications: list[ClipClassification] = Field(default_factory=list)
