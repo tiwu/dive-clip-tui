@@ -6,6 +6,10 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add intra-clip progress checkpointing for long video scans, periodically saving Pass 1 and Pass 2 frame evaluations to disk so interrupted scans can resume without re-running completed frames.
+
+
 ## [0.16.0] - 2026-11-01
 
 ### Added

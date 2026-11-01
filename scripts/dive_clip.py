@@ -13,6 +13,7 @@ import argparse
 import importlib.util
 import json
 import logging
+import shutil
 import signal
 import subprocess
 import sys
@@ -185,6 +186,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
     if args.reset:
         state.reset()
+        checkpoints_dir = run_dir / "checkpoints"
+        if checkpoints_dir.exists():
+            shutil.rmtree(checkpoints_dir, ignore_errors=True)
         logger.info("Pipeline state reset.")
 
     # Resolve input folder (from CLI args, prior run metadata, or config)

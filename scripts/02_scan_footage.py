@@ -36,7 +36,12 @@ from rich.text import Text
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils.checkpoint import PipelineState
+from utils.checkpoint import (
+    ClipScanCheckpoint,
+    CoarseFrameResult,
+    PipelineState,
+    remove_clip_checkpoint,
+)
 from utils.config import ConfigError, load_config
 from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
 from utils.logging_setup import configure_logging, get_console
@@ -131,6 +136,8 @@ def process_clip(
     progress: Progress | None = None,
     phase1_stats: Phase1Stats | None = None,
     phase2_stats: Phase2Stats | None = None,
+    checkpoints_dir: Path | None = None,
+    resume: bool = False,
 ) -> list[RefinedDetection]:
     """Process a single clip through coarse-to-fine scanning.
 
@@ -157,6 +164,27 @@ def process_clip(
     coarse_quality_threshold = scan_params.get("coarse_quality_threshold", 4)
     fine_padding = scan_params.get("fine_padding_seconds", 4)
     quality_threshold = scan_params.get("quality_threshold", 7)
+    checkpoint_interval = scan_params.get("checkpoint_interval_frames", 20)
+
+    checkpoint: ClipScanCheckpoint | None = None
+    checkpoint_file: Path | None = None
+    if checkpoints_dir is not None:
+        checkpoint_file = checkpoints_dir / f"{clip_id}.json"
+        if resume and checkpoint_file.exists():
+            checkpoint = ClipScanCheckpoint.load(checkpoint_file)
+            if checkpoint is not None:
+                logger.info(
+                    "Resumed %s from intra-clip checkpoint (stage=%s, %d coarse frames evaluated)",
+                    clip["file_name"],
+                    checkpoint.pass_stage,
+                    len(checkpoint.coarse_results),
+                )
+        if checkpoint is None:
+            checkpoint = ClipScanCheckpoint(
+                clip_id=clip_id,
+                file_name=clip["file_name"],
+                coarse_fps=coarse_fps,
+            )
 
     ollama_cfg = config.get("ollama", {})
     ollama_host = resolve_host(ollama_cfg.get("host"))
@@ -167,111 +195,199 @@ def process_clip(
     tags = clip.get("tags", [])
 
     # ---------- Pass 1: Coarse scan ----------
-    logger.info("[Pass 1] Coarse scan @ %.1f FPS: %s", coarse_fps, clip["file_name"])
-    if state is not None:
-        state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
-
-    coarse_frames = extract_frames(
-        video_path=file_path,
-        output_dir=clip_work_dir / "coarse",
-        fps=coarse_fps,
-        scale=coarse_scale,
-    )
-    if phase1_stats is not None:
-        phase1_stats.frames_extracted += len(coarse_frames)
-    logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
-
-    template = get_template_for_keywords(tags)
-    coarse_prompt = template.coarse_prompt if template else BROAD_MARINE_TEMPLATE.coarse_prompt
-
     candidate_windows: list[tuple[float, float]] = []
     coarse_confidences: list[float] = []
     coarse_detected = 0
     coarse_failures = 0
     coarse_elapsed_total = 0.0
 
-    task_id = None
-    if progress is not None and coarse_frames:
-        task_id = progress.add_task(
-            f"[cyan]Pass 1:[/] {clip['file_name']}",
-            total=len(coarse_frames),
-            status="(0 hits)",
+    skip_coarse_inference = checkpoint is not None and checkpoint.pass_stage in (
+        "coarse_done",
+        "fine",
+        "completed",
+    )
+
+    if skip_coarse_inference and checkpoint is not None:
+        logger.info(
+            "[Pass 1] Skipping coarse scan for %s (already completed in checkpoint)",
+            clip["file_name"],
         )
+        candidate_windows = list(checkpoint.candidate_windows)
+        coarse_confidences = list(checkpoint.coarse_confidences)
+        coarse_detected = checkpoint.coarse_detected
+        coarse_failures = checkpoint.coarse_failures
+        coarse_elapsed_total = checkpoint.coarse_elapsed_total
+        if phase1_stats is not None:
+            phase1_stats.frames_analyzed += checkpoint.coarse_frames_analyzed
+            phase1_stats.detections_detected += coarse_detected
+        coarse_frames_count = checkpoint.coarse_frames_analyzed
+    else:
+        logger.info("[Pass 1] Coarse scan @ %.1f FPS: %s", coarse_fps, clip["file_name"])
+        if state is not None:
+            state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
 
-    try:
-        for frame_index, frame in enumerate(coarse_frames, start=1):
-            if phase1_stats is not None:
-                phase1_stats.frames_analyzed += 1
-            logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
+        coarse_frames = extract_frames(
+            video_path=file_path,
+            output_dir=clip_work_dir / "coarse",
+            fps=coarse_fps,
+            scale=coarse_scale,
+        )
+        coarse_frames_count = len(coarse_frames)
+        if phase1_stats is not None:
+            phase1_stats.frames_extracted += len(coarse_frames)
+        logger.info("[Pass 1] Extracted %d frames from %s", len(coarse_frames), clip["file_name"])
 
-            start_time = time.perf_counter()
-            result = call_ollama(
-                ollama_host,
-                ollama_model,
-                frame["frame_path"],
-                coarse_prompt,
-                ollama_timeout,
-                client=client,
-                phase="coarse",
+        template = get_template_for_keywords(tags)
+        coarse_prompt = template.coarse_prompt if template else BROAD_MARINE_TEMPLATE.coarse_prompt
+
+        task_id = None
+        if progress is not None and coarse_frames:
+            task_id = progress.add_task(
+                f"[cyan]Pass 1:[/] {clip['file_name']}",
+                total=len(coarse_frames),
+                status="(0 hits)",
             )
-            elapsed = time.perf_counter() - start_time
-            coarse_elapsed_total += elapsed
 
-            if result is None:
-                coarse_failures += 1
-                logger.debug(
-                    "[Pass 1] Frame %d @ %.1fs: no result (%.1fs)",
-                    frame_index,
-                    frame["timestamp"],
-                    elapsed,
+        try:
+            for frame_index, frame in enumerate(coarse_frames, start=1):
+                ts = frame["timestamp"]
+                frame_key = f"{round(ts, 3):.3f}"
+                if checkpoint is not None and frame_key in checkpoint.coarse_results:
+                    cached = checkpoint.coarse_results[frame_key]
+                    if phase1_stats is not None:
+                        phase1_stats.frames_analyzed += 1
+                    coarse_confidences.append(cached.confidence)
+                    if cached.detected:
+                        coarse_detected += 1
+                        if phase1_stats is not None:
+                            phase1_stats.detections_detected += 1
+                    if cached.candidate_window is not None:
+                        candidate_windows.append(cached.candidate_window)
+                    if progress is not None and task_id is not None:
+                        progress.advance(task_id)
+                        progress.update(task_id, status=f"({len(candidate_windows)} hits)")
+                    continue
+
+                if phase1_stats is not None:
+                    phase1_stats.frames_analyzed += 1
+                logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
+
+                start_time = time.perf_counter()
+                result = call_ollama(
+                    ollama_host,
+                    ollama_model,
+                    frame["frame_path"],
+                    coarse_prompt,
+                    ollama_timeout,
+                    client=client,
+                    phase="coarse",
                 )
+                elapsed = time.perf_counter() - start_time
+                coarse_elapsed_total += elapsed
+
+                if result is None:
+                    coarse_failures += 1
+                    logger.debug(
+                        "[Pass 1] Frame %d @ %.1fs: no result (%.1fs)",
+                        frame_index,
+                        frame["timestamp"],
+                        elapsed,
+                    )
+                    if progress is not None and task_id is not None:
+                        progress.advance(task_id)
+                    continue
+
+                detected = bool(result.get("detected"))
+                confidence = float(result.get("confidence", 0.0) or 0.0)
+                quality_score = int(result.get("quality_score", 0) or 0)
+                coarse_confidences.append(confidence)
+                if detected:
+                    coarse_detected += 1
+                    if phase1_stats is not None:
+                        phase1_stats.detections_detected += 1
+
+                frame_passes = (
+                    detected
+                    and confidence >= coarse_threshold
+                    and quality_score >= coarse_quality_threshold
+                )
+                if frame_passes:
+                    cand_win = (max(0, ts - fine_padding), ts + fine_padding)
+                    candidate_windows.append(cand_win)
+                else:
+                    cand_win = None
+
                 if progress is not None and task_id is not None:
                     progress.advance(task_id)
-                continue
+                    progress.update(task_id, status=f"({len(candidate_windows)} hits)")
 
-            detected = bool(result.get("detected"))
-            confidence = float(result.get("confidence", 0.0) or 0.0)
-            quality_score = int(result.get("quality_score", 0) or 0)
-            coarse_confidences.append(confidence)
-            if detected:
-                coarse_detected += 1
-                if phase1_stats is not None:
-                    phase1_stats.detections_detected += 1
+                logger.debug(
+                    "[Pass 1] Frame %d @ %.1fs: detected=%s confidence=%.2f quality=%d passes_threshold=%s "
+                    "subject=%s (%.1fs)",
+                    frame_index,
+                    frame["timestamp"],
+                    detected,
+                    confidence,
+                    quality_score,
+                    frame_passes,
+                    result.get("subject", "-"),
+                    elapsed,
+                )
 
-            frame_passes = (
-                detected
-                and confidence >= coarse_threshold
-                and quality_score >= coarse_quality_threshold
+                if checkpoint is not None:
+                    checkpoint.coarse_results[frame_key] = CoarseFrameResult(
+                        timestamp=ts,
+                        detected=detected,
+                        confidence=confidence,
+                        quality_score=quality_score,
+                        subject=result.get("subject", "") if result else "",
+                        candidate_window=cand_win,
+                        elapsed=elapsed,
+                    )
+                    checkpoint.coarse_frames_analyzed = len(checkpoint.coarse_results)
+                    checkpoint.candidate_windows = candidate_windows
+                    checkpoint.coarse_confidences = coarse_confidences
+                    checkpoint.coarse_detected = coarse_detected
+                    checkpoint.coarse_failures = coarse_failures
+                    checkpoint.coarse_elapsed_total = coarse_elapsed_total
+
+                    if (
+                        len(checkpoint.coarse_results) % checkpoint_interval == 0
+                        and checkpoint_file is not None
+                    ):
+                        checkpoint.save_atomic(checkpoint_file)
+        except KeyboardInterrupt:
+            logger.warning(
+                "\nScan interrupted during Pass 1 for %s. Saving intra-clip checkpoint...",
+                clip["file_name"],
             )
-            if frame_passes:
-                ts = frame["timestamp"]
-                candidate_windows.append((max(0, ts - fine_padding), ts + fine_padding))
-
+            if checkpoint is not None and checkpoint_file is not None:
+                checkpoint.candidate_windows = candidate_windows
+                checkpoint.coarse_confidences = coarse_confidences
+                checkpoint.coarse_detected = coarse_detected
+                checkpoint.coarse_failures = coarse_failures
+                checkpoint.coarse_elapsed_total = coarse_elapsed_total
+                checkpoint.save_atomic(checkpoint_file)
+            raise
+        finally:
             if progress is not None and task_id is not None:
-                progress.advance(task_id)
-                progress.update(task_id, status=f"({len(candidate_windows)} hits)")
+                progress.remove_task(task_id)
 
-            logger.debug(
-                "[Pass 1] Frame %d @ %.1fs: detected=%s confidence=%.2f quality=%d passes_threshold=%s "
-                "subject=%s (%.1fs)",
-                frame_index,
-                frame["timestamp"],
-                detected,
-                confidence,
-                quality_score,
-                frame_passes,
-                result.get("subject", "-"),
-                elapsed,
-            )
-    finally:
-        if progress is not None and task_id is not None:
-            progress.remove_task(task_id)
+        if checkpoint is not None:
+            checkpoint.pass_stage = "coarse_done"
+            checkpoint.candidate_windows = candidate_windows
+            checkpoint.coarse_confidences = coarse_confidences
+            checkpoint.coarse_detected = coarse_detected
+            checkpoint.coarse_failures = coarse_failures
+            checkpoint.coarse_elapsed_total = coarse_elapsed_total
+            if checkpoint_file is not None:
+                checkpoint.save_atomic(checkpoint_file)
 
     logger.info(
         "[Pass 1] Summary %s: %d frames, %d detected, %d over threshold %.2f, "
         "confidence min/avg/max = %s, %d failed calls, %.1fs total",
         clip["file_name"],
-        len(coarse_frames),
+        coarse_frames_count,
         coarse_detected,
         len(candidate_windows),
         coarse_threshold,
@@ -314,140 +430,183 @@ def process_clip(
     fine_elapsed_total = 0.0
     fine_confidences: list[float] = []
 
+    if checkpoint is not None:
+        checkpoint.pass_stage = "fine"
+        all_detections = list(checkpoint.refined_detections)
+        fine_frames_analyzed = checkpoint.fine_frames_analyzed
+        fine_passed = checkpoint.fine_passed
+        fine_failures = checkpoint.fine_failures
+        fine_elapsed_total = checkpoint.fine_elapsed_total
+        fine_confidences = list(checkpoint.fine_confidences)
+
     template = get_template_for_keywords(tags)
     fine_prompt = template.fine_prompt if template else BROAD_MARINE_TEMPLATE.fine_prompt
     color = template.color if template else BROAD_MARINE_TEMPLATE.color
 
-    for window_index, (win_start, win_end) in enumerate(merged, start=1):
-        duration = win_end - win_start
-        win_dir = clip_work_dir / "fine" / f"win_{int(win_start)}_{int(win_end)}"
-        logger.info(
-            "[Pass 2] Window %d of %d: %.1fs-%.1fs (%.1fs) @ %.1f FPS",
-            window_index,
-            len(merged),
-            win_start,
-            win_end,
-            duration,
-            fine_fps,
-        )
-        if state is not None:
-            state.set_activity(
-                f"scan: {clip['file_name']} window {window_index}/{len(merged)} @{win_start:.0f}s"
-            )
-
-        fine_frames = extract_frames(
-            video_path=file_path,
-            output_dir=win_dir,
-            fps=fine_fps,
-            scale=fine_scale,
-            start_seconds=win_start,
-            duration_seconds=duration,
-        )
-        if phase2_stats is not None:
-            phase2_stats.frames_extracted += len(fine_frames)
-        logger.info(
-            "[Pass 2] Window %d of %d: extracted %d frames",
-            window_index,
-            len(merged),
-            len(fine_frames),
-        )
-        fine_frames_analyzed += len(fine_frames)
-
-        fine_task_id = None
-        if progress is not None and fine_frames:
-            fine_task_id = progress.add_task(
-                f"[green]Pass 2 (win {window_index}/{len(merged)}):[/] {clip['file_name']}",
-                total=len(fine_frames),
-                status=f"({fine_passed} hits)",
-            )
-
-        try:
-            for frame_index, frame in enumerate(fine_frames, start=1):
-                if phase2_stats is not None:
-                    phase2_stats.frames_analyzed += 1
-                logger.debug(
-                    "[Pass 2] Window %d of %d: analyzing frame %d of %d",
+    try:
+        for window_index, (win_start, win_end) in enumerate(merged, start=1):
+            if checkpoint is not None and window_index in checkpoint.fine_windows_completed:
+                logger.info(
+                    "[Pass 2] Skipping window %d of %d (already completed in checkpoint)",
                     window_index,
                     len(merged),
-                    frame_index,
-                    len(fine_frames),
                 )
-                start_time = time.perf_counter()
-                result = call_ollama(
-                    ollama_host,
-                    ollama_model,
-                    frame["frame_path"],
-                    fine_prompt,
-                    ollama_timeout,
-                    client=client,
-                    phase="fine",
-                )
-                elapsed = time.perf_counter() - start_time
-                fine_elapsed_total += elapsed
+                continue
 
-                if result is None:
-                    fine_failures += 1
+            duration = win_end - win_start
+            win_dir = clip_work_dir / "fine" / f"win_{int(win_start)}_{int(win_end)}"
+            logger.info(
+                "[Pass 2] Window %d of %d: %.1fs-%.1fs (%.1fs) @ %.1f FPS",
+                window_index,
+                len(merged),
+                win_start,
+                win_end,
+                duration,
+                fine_fps,
+            )
+            if state is not None:
+                state.set_activity(
+                    f"scan: {clip['file_name']} window {window_index}/{len(merged)} @{win_start:.0f}s"
+                )
+
+            fine_frames = extract_frames(
+                video_path=file_path,
+                output_dir=win_dir,
+                fps=fine_fps,
+                scale=fine_scale,
+                start_seconds=win_start,
+                duration_seconds=duration,
+            )
+            if phase2_stats is not None:
+                phase2_stats.frames_extracted += len(fine_frames)
+            logger.info(
+                "[Pass 2] Window %d of %d: extracted %d frames",
+                window_index,
+                len(merged),
+                len(fine_frames),
+            )
+            fine_frames_analyzed += len(fine_frames)
+
+            fine_task_id = None
+            if progress is not None and fine_frames:
+                fine_task_id = progress.add_task(
+                    f"[green]Pass 2 (win {window_index}/{len(merged)}):[/] {clip['file_name']}",
+                    total=len(fine_frames),
+                    status=f"({fine_passed} hits)",
+                )
+
+            try:
+                for frame_index, frame in enumerate(fine_frames, start=1):
+                    if phase2_stats is not None:
+                        phase2_stats.frames_analyzed += 1
                     logger.debug(
-                        "[Pass 2] Frame @ %.2fs: no result (%.1fs)", frame["timestamp"], elapsed
+                        "[Pass 2] Window %d of %d: analyzing frame %d of %d",
+                        window_index,
+                        len(merged),
+                        frame_index,
+                        len(fine_frames),
                     )
+                    start_time = time.perf_counter()
+                    result = call_ollama(
+                        ollama_host,
+                        ollama_model,
+                        frame["frame_path"],
+                        fine_prompt,
+                        ollama_timeout,
+                        client=client,
+                        phase="fine",
+                    )
+                    elapsed = time.perf_counter() - start_time
+                    fine_elapsed_total += elapsed
+
+                    if result is None:
+                        fine_failures += 1
+                        logger.debug(
+                            "[Pass 2] Frame @ %.2fs: no result (%.1fs)", frame["timestamp"], elapsed
+                        )
+                        if progress is not None and fine_task_id is not None:
+                            progress.advance(fine_task_id)
+                        continue
+
+                    detected = bool(result.get("detected"))
+                    confidence = float(result.get("confidence", 0.0) or 0.0)
+                    quality_score = int(result.get("quality_score", 0) or 0)
+                    frame_passes = detected and quality_score >= quality_threshold
+                    fine_confidences.append(confidence)
+                    if frame_passes:
+                        fine_passed += 1
+                        if phase2_stats is not None:
+                            phase2_stats.detections_found += 1
+                            ts = frame["timestamp"]
+                            phase2_stats.detections_duration += (ts + 1.0) - max(0.0, ts - 1.0)
+
                     if progress is not None and fine_task_id is not None:
                         progress.advance(fine_task_id)
-                    continue
+                        progress.update(fine_task_id, status=f"({fine_passed} hits)")
 
-                detected = bool(result.get("detected"))
-                confidence = float(result.get("confidence", 0.0) or 0.0)
-                quality_score = int(result.get("quality_score", 0) or 0)
-                frame_passes = detected and quality_score >= quality_threshold
-                fine_confidences.append(confidence)
-                if frame_passes:
-                    fine_passed += 1
-                    if phase2_stats is not None:
-                        phase2_stats.detections_found += 1
-                        ts = frame["timestamp"]
-                        phase2_stats.detections_duration += (ts + 1.0) - max(0.0, ts - 1.0)
-
-                if progress is not None and fine_task_id is not None:
-                    progress.advance(fine_task_id)
-                    progress.update(fine_task_id, status=f"({fine_passed} hits)")
-
-                logger.debug(
-                    "[Pass 2] Frame @ %.2fs: detected=%s confidence=%.2f quality=%d "
-                    "passes_threshold=%s subject=%s (%.1fs)",
-                    frame["timestamp"],
-                    detected,
-                    confidence,
-                    quality_score,
-                    frame_passes,
-                    result.get("subject", "-"),
-                    elapsed,
-                )
-
-                if not frame_passes:
-                    continue
-
-                try:
-                    all_detections.append(
-                        RefinedDetection(
-                            clip_id=clip_id,
-                            file_name=clip["file_name"],
-                            file_path=file_path,
-                            fps=str(clip.get("fps") or "25.0"),
-                            start_time=max(0, frame["timestamp"] - 1),
-                            end_time=frame["timestamp"] + 1,
-                            subject=result.get("subject", "unknown"),
-                            confidence=confidence,
-                            quality_score=quality_score,
-                            description=result.get("description", ""),
-                            color=color,
-                            template=template.name if template else "generic",
-                        )
+                    logger.debug(
+                        "[Pass 2] Frame @ %.2fs: detected=%s confidence=%.2f quality=%d "
+                        "passes_threshold=%s subject=%s (%.1fs)",
+                        frame["timestamp"],
+                        detected,
+                        confidence,
+                        quality_score,
+                        frame_passes,
+                        result.get("subject", "-"),
+                        elapsed,
                     )
-                except (ValueError, TypeError) as exc:
-                    logger.warning("Skipping invalid detection: %s", exc)
-                    continue
-        finally:
-            if progress is not None and fine_task_id is not None:
-                progress.remove_task(fine_task_id)
+
+                    if not frame_passes:
+                        continue
+
+                    try:
+                        all_detections.append(
+                            RefinedDetection(
+                                clip_id=clip_id,
+                                file_name=clip["file_name"],
+                                file_path=file_path,
+                                fps=str(clip.get("fps") or "25.0"),
+                                start_time=max(0, frame["timestamp"] - 1),
+                                end_time=frame["timestamp"] + 1,
+                                subject=result.get("subject", "unknown"),
+                                confidence=confidence,
+                                quality_score=quality_score,
+                                description=result.get("description", ""),
+                                color=color,
+                                template=template.name if template else "generic",
+                            )
+                        )
+                    except (ValueError, TypeError) as exc:
+                        logger.warning("Skipping invalid detection: %s", exc)
+                        continue
+            finally:
+                if progress is not None and fine_task_id is not None:
+                    progress.remove_task(fine_task_id)
+
+            if checkpoint is not None:
+                checkpoint.fine_windows_completed.append(window_index)
+                checkpoint.refined_detections = list(all_detections)
+                checkpoint.fine_frames_analyzed = fine_frames_analyzed
+                checkpoint.fine_passed = fine_passed
+                checkpoint.fine_failures = fine_failures
+                checkpoint.fine_elapsed_total = fine_elapsed_total
+                checkpoint.fine_confidences = fine_confidences
+                if checkpoint_file is not None:
+                    checkpoint.save_atomic(checkpoint_file)
+    except KeyboardInterrupt:
+        logger.warning(
+            "\nScan interrupted during Pass 2 for %s. Saving intra-clip checkpoint...",
+            clip["file_name"],
+        )
+        if checkpoint is not None and checkpoint_file is not None:
+            checkpoint.refined_detections = list(all_detections)
+            checkpoint.fine_frames_analyzed = fine_frames_analyzed
+            checkpoint.fine_passed = fine_passed
+            checkpoint.fine_failures = fine_failures
+            checkpoint.fine_elapsed_total = fine_elapsed_total
+            checkpoint.fine_confidences = fine_confidences
+            checkpoint.save_atomic(checkpoint_file)
+        raise
 
     # Deduplicate overlapping detections (keep highest quality_score)
     before_dedup = len(all_detections)
@@ -676,6 +835,9 @@ def main() -> None:
     if target_run_dir is None and args.archive:
         target_run_dir = get_run_dir(output_dir)
 
+    checkpoints_dir = (target_run_dir or output_dir) / "checkpoints"
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+
     refined = DetectionsRefined(total_clips=0, total_detections=0, detections=[])
     completed_clips: set[str] = set()
 
@@ -753,6 +915,8 @@ def main() -> None:
                     progress=progress,
                     phase1_stats=p1_stats,
                     phase2_stats=p2_stats,
+                    checkpoints_dir=checkpoints_dir,
+                    resume=args.resume,
                 )
                 refined.detections.extend(detections)
                 refined.total_detections += len(detections)
@@ -762,6 +926,13 @@ def main() -> None:
                     progress.advance(overall_task)
                 if state is not None:
                     state.add_progress("scan", clip_name)
+
+                # Clean up intra-clip checkpoint now that clip is committed
+                raw_clip_id = clip.get("clip_id") or (
+                    f"clip_{hashlib.sha256(clip['file_path'].encode('utf-8')).hexdigest()[:16]}"
+                )
+                clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
+                remove_clip_checkpoint(checkpoints_dir / f"{clip_id}.json")
 
         # Final atomic write to ensure complete sync
         save_detections_atomic(output_path, refined)
