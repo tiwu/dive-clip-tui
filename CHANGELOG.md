@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-01
+
 ### Added
 - Add GitHub Actions step summaries to CI pipeline reporting test results, code coverage, Ruff lint status, and changelog/SemVer validation.
 - Add `pytest-cov` dev dependency and extend unit tests covering entrypoints, Ollama connection checks, storyline planning, and TUI screens.
