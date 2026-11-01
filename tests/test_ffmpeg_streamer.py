@@ -199,3 +199,49 @@ def test_cleanup_work_dir_nonexistent(tmp_path: Path) -> None:
     """cleanup_work_dir should handle nonexistent path gracefully."""
     nonexistent = tmp_path / "does_not_exist"
     cleanup_work_dir(nonexistent)  # Should not raise
+
+
+def test_extract_frames_dynamic_timeout(tmp_path: Path) -> None:
+    """extract_frames should scale timeout dynamically with video duration."""
+    video = tmp_path / "video.mp4"
+    video.touch()
+    output_dir = tmp_path / "frames"
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stderr = ""
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", return_value=mock_result) as mock_run:
+        extract_frames(video, output_dir, duration_seconds=600.0)
+
+    call_kwargs = mock_run.call_args[1]
+    assert call_kwargs["timeout"] >= 1200
+
+
+def test_extract_frames_short_clip_fallback(tmp_path: Path) -> None:
+    """extract_frames should fall back to extracting 1 frame at start when fps filter yields 0 frames."""
+    video = tmp_path / "short_video.mp4"
+    video.write_bytes(b"dummy video data")
+    output_dir = tmp_path / "frames"
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stderr = ""
+
+    call_count = 0
+
+    def mock_subprocess(cmd, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if "-vframes" in cmd:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "frame_000001.jpg").write_text("fallback frame")
+        return mock_result
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=mock_subprocess):
+        frames = extract_frames(video, output_dir, fps=0.5)
+
+    assert len(frames) == 1
+    assert frames[0]["frame_number"] == 1
+    assert frames[0]["timestamp"] == 0.0
+    assert call_count == 3  # probe duration, ffmpeg fps pass, fallback ffmpeg frame

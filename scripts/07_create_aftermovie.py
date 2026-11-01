@@ -393,15 +393,18 @@ def main() -> None:
             subject = det.get("subject", "unknown")
             quality = det.get("quality_score", 0)
 
-            # Look for pre-rendered clip
-            matching = list(clips_dir.glob(f"{clip_id}_*.mp4"))
+            start_time = float(det.get("start_time", 0))
+            end_time = float(det.get("end_time", start_time + 5))
+
+            # Look for pre-rendered clip (timestamped first, then any clip_id match)
+            matching = list(clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_*.mp4"))
+            if not matching:
+                matching = list(clips_dir.glob(f"{clip_id}_*.mp4"))
             if matching:
                 source = matching[0]
             else:
                 # Render from source video
                 source_path = Path(det.get("file_path", ""))
-                start_time = float(det.get("start_time", 0))
-                end_time = float(det.get("end_time", start_time + 5))
                 source = tmp_dir / f"{clip_id}_rendered.mp4"
                 if not source_path.exists():
                     print(f"  SKIP: source not found for {clip_id}")

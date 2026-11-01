@@ -83,7 +83,21 @@ def update_latest_symlink(output_dir: Path | str, run_dir: Path | str) -> Path:
         latest_link.symlink_to(rel_target)
         logger.debug("Updated latest symlink: %s -> %s", latest_link, rel_target)
     except OSError as exc:
-        logger.warning("Could not create latest symlink at %s: %s", latest_link, exc)
+        fallback_txt = out_path / "latest.txt"
+        try:
+            fallback_txt.write_text(f"{rel_target}\n", encoding="utf-8")
+            logger.debug(
+                "Filesystem does not support symlinks (%s); wrote fallback latest.txt: %s",
+                exc,
+                rel_target,
+            )
+        except OSError as write_exc:
+            logger.warning(
+                "Could not create latest symlink or fallback latest.txt at %s: %s (symlink error: %s)",
+                fallback_txt,
+                write_exc,
+                exc,
+            )
 
     return latest_link
 

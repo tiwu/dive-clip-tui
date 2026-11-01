@@ -480,25 +480,73 @@ def process_clip(
 def _deduplicate_detections(
     detections: list[RefinedDetection],
 ) -> list[RefinedDetection]:
-    """Merge temporally overlapping detections, keeping the highest quality score.
+    """Merge contiguous detections of the same subject and deduplicate overlapping windows.
 
-    Two detections overlap if their time windows intersect. When they overlap,
-    the one with the higher quality_score is kept and the other is dropped.
+    1. Contiguous or adjacent windows of the same subject in the same clip are merged
+       into a continuous highlight segment, preserving the highest quality score,
+       highest confidence, and most descriptive detail.
+    2. Any remaining overlapping windows of different subjects are deduplicated by
+       keeping the detection with the higher quality score.
     """
     if not detections:
         return []
 
-    sorted_dets = sorted(detections, key=lambda d: (-d.quality_score, d.start_time))
+    # Step 1: Group by clip and subject (case-insensitive) to merge contiguous segments
+    from collections import defaultdict
+
+    groups: dict[tuple[str, str], list[RefinedDetection]] = defaultdict(list)
+    for det in detections:
+        key = (det.clip_id, det.subject.strip().lower())
+        groups[key].append(det)
+
+    all_merged: list[RefinedDetection] = []
+    for group in groups.values():
+        sorted_group = sorted(group, key=lambda d: d.start_time)
+        merged_group: list[RefinedDetection] = []
+        for det in sorted_group:
+            if not merged_group:
+                merged_group.append(det)
+                continue
+            prev = merged_group[-1]
+            # Merge if overlapping or adjacent (within 1.0 second tolerance)
+            if det.start_time <= prev.end_time + 1.0:
+                new_end = max(prev.end_time, det.end_time)
+                new_quality = max(prev.quality_score, det.quality_score)
+                new_confidence = max(prev.confidence, det.confidence)
+                new_desc = (
+                    det.description if det.quality_score > prev.quality_score else prev.description
+                )
+                new_subject = (
+                    det.subject if det.quality_score > prev.quality_score else prev.subject
+                )
+                merged_group[-1] = prev.model_copy(
+                    update={
+                        "end_time": new_end,
+                        "quality_score": new_quality,
+                        "confidence": new_confidence,
+                        "description": new_desc,
+                        "subject": new_subject,
+                    }
+                )
+            else:
+                merged_group.append(det)
+        all_merged.extend(merged_group)
+
+    # Step 2: For any remaining overlapping detections across different subjects, keep higher quality
+    sorted_dets = sorted(all_merged, key=lambda d: (-d.quality_score, -d.confidence, d.start_time))
     kept: list[RefinedDetection] = []
 
     for det in sorted_dets:
         overlaps = any(
-            det.start_time < kept_det.end_time and det.end_time > kept_det.start_time
+            det.clip_id == kept_det.clip_id
+            and det.start_time < kept_det.end_time
+            and det.end_time > kept_det.start_time
             for kept_det in kept
         )
         if not overlaps:
             kept.append(det)
 
+    kept.sort(key=lambda d: (d.file_name, d.start_time))
     return kept
 
 

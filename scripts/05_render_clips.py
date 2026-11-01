@@ -152,7 +152,7 @@ def render_detections(
         quality = det.get("quality_score", 0)
         clip_id = slugify(str(det.get("clip_id", f"clip{i}")))
 
-        output_name = f"{clip_id}_{subject}_q{quality}.mp4"
+        output_name = f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_{subject}_q{quality}.mp4"
         output_path = highlights_dir / output_name
 
         if output_path.exists() and output_path.stat().st_size > 0:
