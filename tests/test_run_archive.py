@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 from utils.run_archive import (
     archive_file,
@@ -11,6 +12,7 @@ from utils.run_archive import (
     default_run_log_path,
     generate_run_id,
     get_run_dir,
+    update_latest_symlink,
 )
 
 
@@ -114,3 +116,18 @@ def test_archive_run_artifacts_handles_already_in_place_log(tmp_path: Path) -> N
     archived = archive_run_artifacts(run_dir, log_file=in_place_log)
     assert archived["log"] == in_place_log
     assert in_place_log.read_text(encoding="utf-8") == "existing log"
+
+
+def test_update_latest_symlink_exfat_fallback(tmp_path: Path) -> None:
+    """update_latest_symlink should write latest.txt when symlink_to raises OSError."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    run_dir = out_dir / "runs" / "run-20261101-100000"
+    run_dir.mkdir(parents=True)
+
+    with patch.object(Path, "symlink_to", side_effect=OSError(1, "Operation not permitted")):
+        update_latest_symlink(out_dir, run_dir)
+
+    fallback_file = out_dir / "latest.txt"
+    assert fallback_file.exists()
+    assert "run-20261101-100000" in fallback_file.read_text(encoding="utf-8")

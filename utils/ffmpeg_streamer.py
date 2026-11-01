@@ -7,11 +7,14 @@ on systems without shared memory (e.g. macOS).
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def get_work_dir(use_ramdisk: bool = True) -> Path:
@@ -38,6 +41,27 @@ def _try_create(path: Path) -> bool:
         return False
 
 
+def _probe_duration(video_path: Path) -> float | None:
+    """Probe video duration in seconds using ffprobe, or None if probe fails."""
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(video_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if res.returncode == 0 and res.stdout.strip():
+            return float(res.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def extract_frames(
     video_path: str | Path,
     output_dir: str | Path,
@@ -45,6 +69,7 @@ def extract_frames(
     scale: str | None = None,
     start_seconds: float | None = None,
     duration_seconds: float | None = None,
+    timeout: int | float | None = None,
 ) -> list[dict]:
     """Extract frames from a video file using FFmpeg.
 
@@ -57,6 +82,14 @@ def extract_frames(
     if output_dir.exists():
         shutil.rmtree(output_dir, ignore_errors=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Compute dynamic timeout based on duration if not explicitly passed
+    if timeout is None:
+        dur = duration_seconds
+        if dur is None:
+            dur = _probe_duration(video_path)
+        timeout = max(300, int(dur * 2.0)) if dur is not None and dur > 0 else 300
+    timeout_sec = int(timeout)
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
 
@@ -76,18 +109,20 @@ def extract_frames(
     cmd.extend(["-qscale:v", "2", output_pattern])
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
-        print(f"WARNING: FFmpeg timeout for {video_path}")
+        logger.warning("FFmpeg timeout after %ds for %s", timeout_sec, video_path)
         return []
     except Exception as exc:
-        print(f"WARNING: FFmpeg error for {video_path}: {exc}")
+        logger.warning("FFmpeg error for %s: %s", video_path, exc)
         return []
 
     if result.returncode != 0:
-        print(
-            f"WARNING: FFmpeg returned {result.returncode} for {video_path}: "
-            f"{result.stderr.strip()}"
+        logger.warning(
+            "FFmpeg returned %d for %s: %s",
+            result.returncode,
+            video_path,
+            result.stderr.strip(),
         )
 
     frames = []
@@ -104,6 +139,28 @@ def extract_frames(
             "timestamp": timestamp,
             "frame_number": frame_num,
         })
+
+    # Fallback for short clips where the fps filter produced 0 frames
+    if not frames and video_path.exists() and video_path.stat().st_size > 0:
+        fallback_pattern = str(output_dir / "frame_000001.jpg")
+        fallback_cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
+        if start_seconds is not None:
+            fallback_cmd.extend(["-ss", str(start_seconds)])
+        fallback_cmd.extend(["-i", str(video_path), "-vframes", "1"])
+        if scale:
+            fallback_cmd.extend(["-vf", f"scale={scale}"])
+        fallback_cmd.extend(["-qscale:v", "2", fallback_pattern])
+        try:
+            subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=60)
+            fallback_file = Path(fallback_pattern)
+            if fallback_file.exists() and fallback_file.stat().st_size > 0:
+                frames.append({
+                    "frame_path": str(fallback_file),
+                    "timestamp": start_seconds or 0.0,
+                    "frame_number": 1,
+                })
+        except Exception as exc:
+            logger.warning("Fallback frame extraction failed for %s: %s", video_path, exc)
 
     return frames
 

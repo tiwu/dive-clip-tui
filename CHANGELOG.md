@@ -6,6 +6,13 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Fixed
+- Fixed highlight clip collisions by including timestamp ranges in output filenames.
+- Fixed FFmpeg extraction timeouts on long 4K video files by dynamically scaling extraction timeouts to video duration.
+- Added guaranteed single-frame extraction fallback for clips shorter than the sampling interval.
+- Merged consecutive detection windows of the same subject into continuous highlight clips.
+- Added graceful fallback for `latest` symlink creation on exFAT and non-symlink filesystems.
+
 ## [0.14.1] - 2026-10-31
 
 ### Fixed

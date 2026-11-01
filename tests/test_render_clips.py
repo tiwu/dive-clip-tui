@@ -310,7 +310,7 @@ def test_render_detections_renders_new_and_skips_existing(tmp_path: Path) -> Non
     highlights_dir.mkdir(parents=True, exist_ok=True)
 
     # Pre-create the first highlight clip to simulate existing file
-    existing_clip = highlights_dir / "c1_turtle_q8.mp4"
+    existing_clip = highlights_dir / "c1_0.0s-5.0s_turtle_q8.mp4"
     existing_clip.write_bytes(b"existing video content")
 
     detections = [
@@ -344,10 +344,54 @@ def test_render_detections_renders_new_and_skips_existing(tmp_path: Path) -> Non
 
     assert rendered_count == 1
     assert failed_count == 0
-    # c1_turtle_q8.mp4 was skipped, only c2_shark_q9.mp4 was rendered
-    assert rendered_files == ["c2_shark_q9.mp4"]
+    # c1_0.0s-5.0s_turtle_q8.mp4 was skipped, only c2_10.0s-15.0s_shark_q9.mp4 was rendered
+    assert rendered_files == ["c2_10.0s-15.0s_shark_q9.mp4"]
     # Existing clip content was untouched
     assert existing_clip.read_bytes() == b"existing video content"
+
+
+def test_render_detections_multiple_detections_same_subject_unique_filenames(
+    tmp_path: Path,
+) -> None:
+    """Multiple detections of the same subject and quality in the same clip should render to distinct files."""
+    source_video = tmp_path / "source.mp4"
+    source_video.touch()
+    highlights_dir = tmp_path / "highlights"
+
+    detections = [
+        {
+            "clip_id": "c1",
+            "file_path": str(source_video),
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "subject": "turtle",
+            "quality_score": 8,
+        },
+        {
+            "clip_id": "c1",
+            "file_path": str(source_video),
+            "start_time": 10.0,
+            "end_time": 15.0,
+            "subject": "turtle",
+            "quality_score": 8,
+        },
+    ]
+
+    rendered_files = []
+
+    def mock_render_clip(source, start, end, out):
+        rendered_files.append(out.name)
+        out.write_bytes(b"content")
+        return True
+
+    with patch.object(render, "render_clip", side_effect=mock_render_clip):
+        rendered_count, failed_count = render.render_detections(detections, highlights_dir)
+
+    assert rendered_count == 2
+    assert failed_count == 0
+    assert len(rendered_files) == 2
+    assert rendered_files[0] == "c1_0.0s-5.0s_turtle_q8.mp4"
+    assert rendered_files[1] == "c1_10.0s-15.0s_turtle_q8.mp4"
 
 
 def test_render_detections_quiet_mode(tmp_path: Path) -> None:

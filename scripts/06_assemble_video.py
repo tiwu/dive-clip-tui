@@ -169,8 +169,17 @@ def main() -> None:
         subject = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_subject)[:40]
         quality = det.get("quality_score", 0)
 
-        # Look for rendered clip matching this detection
-        matching = list(clips_dir.glob(f"{clip_id}_{subject}_q{quality}.mp4"))
+        start_time = float(det.get("start_time", 0))
+        end_time = float(det.get("end_time", start_time + 5))
+
+        # Look for rendered clip matching this detection (try timestamped first, then legacy)
+        matching = list(
+            clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_{subject}_q{quality}.mp4")
+        )
+        if not matching:
+            matching = list(clips_dir.glob(f"{clip_id}_{subject}_q{quality}.mp4"))
+        if not matching:
+            matching = list(clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_*.mp4"))
         if matching:
             clip_files.append(matching[0])
             print(f"  Using: {matching[0].name} (quality {quality}/10)")

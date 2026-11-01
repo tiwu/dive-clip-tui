@@ -92,6 +92,41 @@ def test_deduplicate_detections_overlap_keeps_higher_quality() -> None:
     assert result[0].quality_score == 9
 
 
+def test_deduplicate_detections_merges_contiguous_same_subject() -> None:
+    """_deduplicate_detections should merge contiguous windows of the same subject into one continuous highlight."""
+    from utils.models import RefinedDetection
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=10.0,
+        end_time=12.0,
+        subject="turtle",
+        confidence=0.85,
+        quality_score=8,
+        description="turtle swimming",
+    )
+    det2 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=12.0,
+        end_time=14.0,
+        subject="turtle",
+        confidence=0.95,
+        quality_score=9,
+        description="turtle close up",
+    )
+    result = scan._deduplicate_detections([det1, det2])
+    assert len(result) == 1
+    assert result[0].start_time == 10.0
+    assert result[0].end_time == 14.0
+    assert result[0].quality_score == 9
+    assert result[0].confidence == 0.95
+    assert result[0].description == "turtle close up"
+
+
 def test_call_ollama_success(tmp_path: Path) -> None:
     """call_ollama should parse Ollama JSON response correctly."""
     image_path = tmp_path / "frame.jpg"
