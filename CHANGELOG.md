@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-01
+
 ### Added
 - Add root `.jscpd.json` configuration for automated copy-paste and duplication detection across pipeline scripts, utilities, and TUI.
 
