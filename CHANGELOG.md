@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-01
+
 ### Added
 - Add standalone Pass 0 classification with reviewable confidence and uncertainty results that can be reused in later scans.
 
