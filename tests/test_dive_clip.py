@@ -1112,3 +1112,71 @@ def test_cmd_aftermovie_reads_volume_and_fade_from_config(tmp_path: Path) -> Non
     assert cmd[cmd.index("--top-n") + 1] == "12"
     assert cmd[cmd.index("--music-volume") + 1] == "0.25"
     assert cmd[cmd.index("--fade-duration") + 1] == "2.0"
+
+
+def test_cmd_scan_worker_joined_before_final_render(tmp_path: Path) -> None:
+    """cmd_scan must join the background render worker before launching the final render subprocess."""
+    import threading
+
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "highlights"
+    output_folder.mkdir()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
+
+    worker_thread_captured: list[threading.Thread] = []
+    original_thread_init = threading.Thread.__init__
+
+    def thread_init_spy(self, *args, **kwargs):
+        original_thread_init(self, *args, **kwargs)
+        if kwargs.get("target") and "render_worker" in kwargs["target"].__name__:
+            worker_thread_captured.append(self)
+
+    step_log: list[str] = []
+
+    def mock_run(cmd, description):
+        cmd_str = " ".join(cmd)
+        if "00_ingest_media.py" in cmd_str:
+            manifest_path = Path(cmd[cmd.index("--output") + 1])
+            manifest_path.write_text('{"project_name": "Test", "clips": []}')
+            step_log.append("ingest")
+            return 0
+        if "02_scan_footage.py" in cmd_str:
+            step_log.append("scan")
+            run_dir = Path(cmd[cmd.index("--output-dir") + 1])
+            detections_path = run_dir / "detections_refined.json"
+            detections_path.write_text('{"detections": []}')
+            assert len(worker_thread_captured) == 1
+            worker = worker_thread_captured[0]
+            assert worker.is_alive()
+            return 0
+        if "05_render_clips.py" in cmd_str:
+            step_log.append("render")
+            assert len(worker_thread_captured) == 1
+            worker = worker_thread_captured[0]
+            assert not worker.is_alive(), (
+                "Background render worker must be completely joined before final render starts!"
+            )
+            return 0
+        return 0
+
+    args = argparse.Namespace(
+        input=str(input_folder),
+        output=str(output_folder),
+        config=str(config_path),
+        resume=False,
+        reset=False,
+        debug=False,
+        log_file=None,
+    )
+
+    with (
+        patch("scripts.dive_clip.run", side_effect=mock_run),
+        patch.object(threading.Thread, "__init__", side_effect=thread_init_spy, autospec=True),
+    ):
+        rc = cmd_scan(args)
+
+    assert rc == 0
+    assert step_log == ["ingest", "scan", "render"]

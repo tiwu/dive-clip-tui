@@ -13,6 +13,7 @@ import logging
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,39 @@ def slugify(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", text)[:40]
 
 
+def is_valid_clip(video_path: Path, timeout: float = 30.0) -> bool:
+    """Validate that video_path exists, has non-zero size, contains a video stream, and positive duration."""
+    if not video_path.exists() or video_path.stat().st_size == 0:
+        return False
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if res.returncode != 0:
+            return False
+        data = json.loads(res.stdout)
+        streams = data.get("streams", [])
+        if not streams or not streams[0].get("codec_name"):
+            return False
+        fmt = data.get("format", {})
+        duration = float(fmt.get("duration", 0))
+        return duration > 0
+    except Exception:
+        return False
+
+
 def render_clip(
     source_path: Path,
     start_time: float,
@@ -41,7 +75,8 @@ def render_clip(
 ) -> bool:
     """Extract a time window from a video file as an MP4 clip.
 
-    Returns True on success, False on failure.
+    Renders to a temporary file, validates output with ffprobe, and
+    atomically publishes to output_path. Returns True on success, False on failure.
     """
     extra = {"no_console": True} if not log_to_console else {}
     duration = end_time - start_time
@@ -53,6 +88,9 @@ def render_clip(
             extra=extra,
         )
         return False
+
+    temp_path = output_path.with_name(f".tmp_{output_path.name}")
+    temp_path.unlink(missing_ok=True)
 
     cmd = [
         "ffmpeg",
@@ -72,7 +110,7 @@ def render_clip(
         "-movflags",
         "+faststart",
         "-y",
-        str(output_path),
+        str(temp_path),
     ]
 
     try:
@@ -80,17 +118,21 @@ def render_clip(
             logger.debug("Running FFmpeg command: %s", " ".join(cmd), extra=extra)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
+        temp_path.unlink(missing_ok=True)
         logger.warning("FFmpeg timeout rendering %s", output_path.name, extra=extra)
         return False
     except KeyboardInterrupt:
+        temp_path.unlink(missing_ok=True)
         if output_path.exists():
             output_path.unlink(missing_ok=True)
         raise
     except Exception as exc:
+        temp_path.unlink(missing_ok=True)
         logger.warning("FFmpeg error rendering %s: %s", output_path.name, exc, extra=extra)
         return False
 
     if result.returncode != 0:
+        temp_path.unlink(missing_ok=True)
         logger.warning(
             "FFmpeg failed for %s: %s",
             output_path.name,
@@ -98,6 +140,17 @@ def render_clip(
             extra=extra,
         )
         return False
+
+    if temp_path.exists():
+        if not is_valid_clip(temp_path):
+            temp_path.unlink(missing_ok=True)
+            logger.warning(
+                "Validation failed for rendered clip %s: invalid video or duration",
+                output_path.name,
+                extra=extra,
+            )
+            return False
+        temp_path.replace(output_path)
 
     return True
 
@@ -107,6 +160,8 @@ def render_detections(
     highlights_dir: Path,
     state: PipelineState | None = None,
     log_to_console: bool = True,
+    stop_event: threading.Event | None = None,
+    validate_existing: bool = False,
 ) -> tuple[int, int]:
     """Render detection windows into standalone MP4 clips.
 
@@ -120,6 +175,10 @@ def render_detections(
     failed = 0
     extra = {"no_console": True} if not log_to_console else {}
     for i, item in enumerate(detections, 1):
+        if stop_event is not None and stop_event.is_set():
+            logger.debug("Render stop requested; halting detection batch.")
+            break
+
         det = item.model_dump() if hasattr(item, "model_dump") else item
         source_path = Path(det.get("file_path", ""))
         if not source_path.exists():
@@ -142,15 +201,34 @@ def render_detections(
         output_name = f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_{subject}_q{quality}.mp4"
         output_path = highlights_dir / output_name
 
-        if output_path.exists() and output_path.stat().st_size > 0:
-            logger.debug(
-                "  [%d/%d] SKIP: already rendered: %s",
-                i,
-                len(detections),
-                output_name,
-                extra=extra,
-            )
-            continue
+        if output_path.exists():
+            if output_path.stat().st_size == 0:
+                logger.warning(
+                    "  [%d/%d] Output exists but is empty (0 bytes), re-rendering: %s",
+                    i,
+                    len(detections),
+                    output_name,
+                    extra=extra,
+                )
+                output_path.unlink(missing_ok=True)
+            elif validate_existing and not is_valid_clip(output_path):
+                logger.warning(
+                    "  [%d/%d] Output exists but is invalid, re-rendering: %s",
+                    i,
+                    len(detections),
+                    output_name,
+                    extra=extra,
+                )
+                output_path.unlink(missing_ok=True)
+            else:
+                logger.debug(
+                    "  [%d/%d] SKIP: already rendered: %s",
+                    i,
+                    len(detections),
+                    output_name,
+                    extra=extra,
+                )
+                continue
 
         if state is not None:
             state.set_activity(f"render: {i}/{len(detections)} {output_name}")
