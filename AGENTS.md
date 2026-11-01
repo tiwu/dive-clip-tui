@@ -121,7 +121,10 @@ in `docs/plans/README.md`:
 1. **Stage 1 (Plan)**: Once requirements are aligned, if no GitHub issue exists yet, create one with `gh issue create --label "agent:plan-review"`, write `docs/plans/PLAN-<id>-<slug>.md` (including the proposed SemVer impact and draft changelog entry), embed the plan in the issue body, and stop to wait for user approval before writing implementation code.
 2. **Stage 2 (Implement & PR)**: After approval, implement on `feature/issue-<id>-<slug>`, add a `CHANGELOG.md` entry under `[Unreleased]`, and open a linked PR (`Closes #<id>`) with one SemVer label (unlabeled defaults to minor). CI enforces the tests, lint, formatting, and changelog requirements.
 
-When reading issues with the GitHub CLI, always pass `--json title,body,labels,comments` to `gh issue view` to avoid the deprecated GraphQL `projectCards` failure.
+When using the GitHub CLI:
+- Pass `--json title,body,labels,comments` to `gh issue view` (or `gh pr view`) to avoid the deprecated GraphQL `projectCards` failure.
+- When creating or editing PR descriptions with Markdown, write the body to a file and pass `--body-file` to prevent shell command substitution and redirection syntax errors.
+- If `gh pr edit` fails due to the GraphQL `projectCards` deprecation, update the PR via the GitHub REST API: `gh api repos/:owner/:repo/pulls/:number -X PATCH -F body=@<file>`.
 
 ---
 
