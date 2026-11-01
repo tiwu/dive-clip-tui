@@ -19,10 +19,10 @@ scan_parameters:
   domain: "auto"                    # "auto" (Pass 0 classifies clip), "underwater", "motorcycle", or "generic"
   classify_clips: "auto"            # "auto" (run Pass 0 unless domain/tags set), "always", or "off"
   classify_frames_count: 3          # Number of sample frames per clip for Pass 0 domain classification
-  coarse_fps: 0.5                   # 0.5 frames per second during coarse scan (1 frame every 2 seconds)
-  coarse_scale: "640:-2"            # Downscale coarse frames for fast VLM screening
+  coarse_fps: 0.25                   # 0.25 frames per second during coarse scan (1 frame every 4 seconds)
+  coarse_scale: "426:-2"            # Downscale coarse frames for fast VLM screening
   fine_fps: 1.0                     # 1 frame per second during highlight windows
-  fine_scale: "1280:-2"             # Resolution for fine identification 
+  fine_scale: "854:-2"             # Resolution for fine identification 
                                     #   (or "iw/2:-2" for half resolution or "null" for no scaling)
   coarse_confidence_threshold: 0.80 # Minimum confidence to trigger fine scan
   coarse_quality_threshold: 4       # Minimum score (1-10) to reject upside-down/dangling frames in coarse pass
