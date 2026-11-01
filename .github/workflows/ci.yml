@@ -33,35 +33,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           uv run python -m pytest --cov --cov-report=term --cov-report=json:coverage.json
-          if [ -n "$GITHUB_STEP_SUMMARY" ] && [ -f coverage.json ]; then
-            python3 -c '
-          import json, os
-          with open("coverage.json") as f:
-              cov = json.load(f)
-          totals = cov["totals"]
-          files = cov.get("files", {})
-
-          dirs = {"scripts": [0, 0], "utils": [0, 0], "tui": [0, 0]}
-          for path, data in files.items():
-              prefix = path.split("/")[0] if "/" in path else "other"
-              if prefix in dirs:
-                  dirs[prefix][0] += data["summary"]["covered_lines"]
-                  dirs[prefix][1] += data["summary"]["num_statements"]
-
-          summary = []
-          summary.append("## 🧪 Test Results & Coverage\n")
-          summary.append(f"- **Overall Coverage:** {totals.get(\"percent_covered\", 0):.1f}% ({totals.get(\"covered_lines\", 0)}/{totals.get(\"num_statements\", 0)} statements)")
-          summary.append(f"- **Missing Statements:** {totals.get(\"missing_lines\", 0)}\n")
-          summary.append("| Component | Covered Statements | Total Statements | Coverage |")
-          summary.append("| :--- | :--- | :--- | :--- |")
-          for name, (cov_lines, total_lines) in dirs.items():
-              pct = (cov_lines / total_lines * 100) if total_lines else 0
-              summary.append(f"| `{name}/` | {cov_lines} | {total_lines} | {pct:.1f}% |")
-
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
-              f.write("\n".join(summary) + "\n\n")
-          '
-          fi
+          uv run python scripts/ci_summary.py test-coverage --coverage-json coverage.json
 
       - name: Check lint and formatting for changed Python files
         env:
@@ -73,20 +45,10 @@ jobs:
           if ((${#PY_FILES[@]})); then
             uv run ruff check "${PY_FILES[@]}"
             uv run ruff format --check "${PY_FILES[@]}"
-            FILE_MSG="${#PY_FILES[@]} changed Python file(s) checked"
           else
-            FILE_MSG="No changed Python files to check"
-            echo "$FILE_MSG"
+            echo "No changed Python files to check."
           fi
-          if [ -n "$GITHUB_STEP_SUMMARY" ]; then
-            cat <<EOF >> "$GITHUB_STEP_SUMMARY"
-          ## 🎨 Code Quality & Linting
-          - **Ruff Lint:** Passed ✅
-          - **Ruff Formatting:** Passed ✅
-          - **Scope:** ${FILE_MSG}
-
-          EOF
-          fi
+          uv run python scripts/ci_summary.py lint-format --file-count "${#PY_FILES[@]}"
 
       - name: Validate changelog entry
         env:
@@ -96,15 +58,4 @@ jobs:
           uv run python scripts/release.py validate-pr \
             --base "$BASE_SHA" \
             --labels-json "$PR_LABELS"
-          if [ -n "$GITHUB_STEP_SUMMARY" ]; then
-            python3 -c '
-          import json, os
-          labels = json.loads(os.environ.get("PR_LABELS", "[]"))
-          semver_labels = [l for l in labels if l.startswith("semver:")]
-          semver = semver_labels[0] if semver_labels else "semver:minor (default)"
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
-              f.write("## 📝 Release & Changelog\n")
-              f.write(f"- **Proposed SemVer Impact:** `{semver}`\n")
-              f.write("- **Changelog Validation:** Valid ✅\n\n")
-          '
-          fi
+          uv run python scripts/ci_summary.py release-pr --labels-json "$PR_LABELS"
