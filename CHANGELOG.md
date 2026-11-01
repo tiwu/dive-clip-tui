@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-01
+
 ### Fixed
 - Fixed highlight clip collisions by including timestamp ranges in output filenames.
 - Fixed FFmpeg extraction timeouts on long 4K video files by dynamically scaling extraction timeouts to video duration.
