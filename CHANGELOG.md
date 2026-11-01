@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-01
+
 ### Added
 - Add repository-scoped agent definitions for Copilot (`.github/agents/`) and Antigravity skills (`_agents/skills/`) for Product Owner, Architecture Expert, Code Quality Review, and Project Review Team.
 
