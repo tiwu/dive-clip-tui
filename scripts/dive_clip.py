@@ -14,6 +14,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -478,7 +479,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
                     dets_list = json.load(f).get("detections", [])
             except Exception:
                 pass
-        rendered_files = list(highlights_dir.glob("*.mp4")) if highlights_dir.exists() else []
+        rendered_files = (
+            [p for p in highlights_dir.glob("*.mp4") if not p.name.startswith(".")]
+            if highlights_dir.exists()
+            else []
+        )
         total_highlight_dur = sum(
             max(0.0, float(d.get("end_time", 0)) - float(d.get("start_time", 0))) for d in dets_list
         )
@@ -770,6 +775,22 @@ def summarize_feedback(feedback_items: dict[str, Any]) -> None:
             ))
 
     total = sum(counts.values())
+    logger.info(
+        "Feedback Summary: total=%d, keep=%d, reject=%d, wrong_subject=%d",
+        total,
+        counts["keep"],
+        counts["reject"],
+        counts["wrong_subject"],
+    )
+    for c_name, det_subj, corr_subj, note in corrections:
+        logger.info(
+            "  - %s: detected='%s', corrected='%s', note='%s'",
+            c_name,
+            det_subj,
+            corr_subj,
+            note,
+        )
+
     if console.is_terminal:
         console.print(Rule("[bold green]Feedback Summary[/bold green]", style="green"))
         table = Table(title=f"Review Results ({total} clips judged)")
@@ -789,22 +810,11 @@ def summarize_feedback(feedback_items: dict[str, Any]) -> None:
             for c_name, det_subj, corr_subj, note in corrections:
                 detail_table.add_row(c_name, det_subj, corr_subj, note)
             console.print(detail_table)
-    else:
-        logger.info(
-            "Feedback Summary: total=%d, keep=%d, reject=%d, wrong_subject=%d",
-            total,
-            counts["keep"],
-            counts["reject"],
-            counts["wrong_subject"],
-        )
-        for c_name, det_subj, corr_subj, note in corrections:
-            logger.info(
-                "  - %s: detected='%s', corrected='%s', note='%s'",
-                c_name,
-                det_subj,
-                corr_subj,
-                note,
-            )
+
+
+def _slugify(text: str) -> str:
+    """Convert a string to a filesystem-safe slug (matches 05_render_clips.slugify)."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", text)[:40]
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -837,31 +847,42 @@ def cmd_review(args: argparse.Namespace) -> int:
         logger.error("Highlights folder does not exist: %s", highlights_dir)
         return 1
 
-    clip_paths = sorted(highlights_dir.glob("*.mp4"))
+    clip_paths = sorted(p for p in highlights_dir.glob("*.mp4") if not p.name.startswith("."))
     if not clip_paths:
         logger.info("No rendered clips found in %s.", highlights_dir)
         return 0
 
     detections_path = run_dir / "detections_refined.json"
+    if not detections_path.exists():
+        detections_path = run_dir / "detections.json"
+
     detections_by_name: dict[str, dict[str, Any]] = {}
     if detections_path.exists():
         try:
             with open(detections_path, encoding="utf-8") as f:
                 det_data = json.load(f)
-            for d in det_data.get("detections", []):
+            for i, d in enumerate(det_data.get("detections", []), start=1):
                 start_t = float(d.get("start_time", 0))
                 end_t = float(d.get("end_time", start_t + 5))
-                subj = d.get("subject", "unknown")
+                raw_subj = d.get("subject", "unknown")
+                subj_slug = _slugify(raw_subj)
                 q = d.get("quality_score", 0)
-                cid = d.get("clip_id", "")
-                fname = f"{cid}_{start_t:.1f}s-{end_t:.1f}s_{subj}_q{q}.mp4"
-                detections_by_name[fname] = d
+                raw_cid = str(d.get("clip_id", f"clip{i}"))
+                cid_slug = _slugify(raw_cid)
+                # Key by both slugified filename and raw filename
+                detections_by_name[
+                    f"{cid_slug}_{start_t:.1f}s-{end_t:.1f}s_{subj_slug}_q{q}.mp4"
+                ] = d
+                detections_by_name[f"{raw_cid}_{start_t:.1f}s-{end_t:.1f}s_{raw_subj}_q{q}.mp4"] = d
         except Exception as exc:
             logger.debug("Could not read detections for review context: %s", exc)
 
     feedback_path = run_dir / "feedback.json"
     feedback_state = load_feedback(feedback_path)
     feedback_dict: dict[str, Any] = feedback_state.setdefault("feedback", {})
+    if not isinstance(feedback_dict, dict):
+        feedback_dict = {}
+        feedback_state["feedback"] = feedback_dict
 
     review_all = getattr(args, "all", False)
     if not review_all:
@@ -890,11 +911,25 @@ def cmd_review(args: argparse.Namespace) -> int:
         clip_name = clip_path.name
         det = detections_by_name.get(clip_name, {})
 
-        source_file = det.get("file_name") or det.get("file_path") or "unknown source"
-        start_t = float(det.get("start_time", 0))
-        end_t = float(det.get("end_time", 0))
-        detected_subject = det.get("subject", "unknown")
-        domain = det.get("domain") or det.get("template") or "generic"
+        if not det:
+            # Fallback parse: {cid}_{start}s-{end}s_{subject}_q{quality}.mp4
+            m = re.match(r"^.+?_([\d\.]+)s-([\d\.]+)s_(.+?)_q\d+\.mp4$", clip_name)
+            if m:
+                start_t = float(m.group(1))
+                end_t = float(m.group(2))
+                detected_subject = m.group(3).replace("_", " ")
+            else:
+                start_t = 0.0
+                end_t = 0.0
+                detected_subject = "unknown"
+            source_file = "unknown source"
+            domain = "generic"
+        else:
+            source_file = det.get("file_name") or det.get("file_path") or "unknown source"
+            start_t = float(det.get("start_time", 0))
+            end_t = float(det.get("end_time", 0))
+            detected_subject = det.get("subject", "unknown")
+            domain = det.get("domain") or det.get("template") or "generic"
 
         prior = feedback_dict.get(clip_name)
         status_str = f" [Previous: {prior.get('decision')}]" if prior else ""
@@ -912,7 +947,10 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"([dim]domain: {domain}[/dim])"
             )
 
-        if not open_clip_player(clip_path):
+        if not clip_path.exists():
+            console.print(f"[red]Clip file not found: {clip_name}[/red]")
+            console.print("[yellow]You can still judge, [s]kip, or [q]uit.[/yellow]")
+        elif not open_clip_player(clip_path):
             console.print(
                 "[yellow]Could not open player. You can still judge, [s]kip, or [q]uit.[/yellow]"
             )
@@ -941,7 +979,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             try:
                 note = input("Note (optional, press Enter to skip): ").strip()
             except EOFError, KeyboardInterrupt:
-                note = ""
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
             feedback_dict[clip_name] = {
                 "clip_file": clip_name,
                 "decision": "keep",
@@ -962,7 +1001,8 @@ def cmd_review(args: argparse.Namespace) -> int:
             try:
                 note = input("Note (optional, press Enter to skip): ").strip()
             except EOFError, KeyboardInterrupt:
-                note = ""
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
             feedback_dict[clip_name] = {
                 "clip_file": clip_name,
                 "decision": "reject",
@@ -983,11 +1023,13 @@ def cmd_review(args: argparse.Namespace) -> int:
             try:
                 corrected = input("Corrected subject: ").strip()
             except EOFError, KeyboardInterrupt:
-                corrected = ""
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
             try:
                 note = input("Note (optional, press Enter to skip): ").strip()
             except EOFError, KeyboardInterrupt:
-                note = ""
+                console.print("\n[yellow]Review paused by user.[/yellow]")
+                break
             feedback_dict[clip_name] = {
                 "clip_file": clip_name,
                 "decision": "wrong_subject",

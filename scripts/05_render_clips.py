@@ -161,7 +161,7 @@ def render_detections(
     state: PipelineState | None = None,
     log_to_console: bool = True,
     stop_event: threading.Event | None = None,
-    validate_existing: bool = False,
+    validate_existing: bool = True,
 ) -> tuple[int, int]:
     """Render detection windows into standalone MP4 clips.
 

@@ -345,3 +345,154 @@ def test_summarize_feedback_output() -> None:
     with patch("scripts.dive_clip.logger.info") as mock_info:
         summarize_feedback(feedback)
         assert mock_info.called
+
+
+def test_cmd_review_slugified_subject_and_clip_id_matching(tmp_path: Path) -> None:
+    """Detection with spaces/special characters in subject and clip_id should match rendered clip."""
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "run-20261101-200000"
+    highlights_dir = run_dir / "highlights"
+    highlights_dir.mkdir(parents=True)
+
+    # Rendered filename has slugified subject: green_sea_turtle, clip ID: clip_1
+    clip = highlights_dir / "clip_1_0.0s-5.0s_green_sea_turtle_q8.mp4"
+    clip.touch()
+
+    # Detections file contains unslugified subject and clip_id
+    detections = {
+        "detections": [
+            {
+                "clip_id": "clip 1",
+                "file_name": "dive_gopro.mp4",
+                "start_time": 0.0,
+                "end_time": 5.0,
+                "subject": "green sea turtle",
+                "quality_score": 8,
+                "domain": "underwater",
+            }
+        ]
+    }
+    (run_dir / "detections_refined.json").write_text(json.dumps(detections))
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{tmp_path}"\n')
+
+    parser = build_parser()
+    args = parser.parse_args(["review", "--config", str(config_file), "--run", run_dir.name])
+
+    with (
+        patch("builtins.input", side_effect=["k", "looks sharp"]),
+        patch("scripts.dive_clip.open_clip_player", return_value=True),
+    ):
+        rc = cmd_review(args)
+
+    assert rc == 0
+    saved = json.loads((run_dir / "feedback.json").read_text())["feedback"]
+    assert clip.name in saved
+    item = saved[clip.name]
+    assert item["detected_subject"] == "green sea turtle"
+    assert item["source_file"] == "dive_gopro.mp4"
+    assert item["domain"] == "underwater"
+    assert item["start_time"] == 0.0
+    assert item["end_time"] == 5.0
+
+
+def test_cmd_review_ignores_temporary_files(tmp_path: Path) -> None:
+    """cmd_review should exclude temporary hidden files (.tmp_*.mp4) from the review queue."""
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "run-20261101-210000"
+    highlights_dir = run_dir / "highlights"
+    highlights_dir.mkdir(parents=True)
+
+    normal_clip = highlights_dir / "c1_0.0s-5.0s_fish_q8.mp4"
+    temp_clip = highlights_dir / ".tmp_c2_5.0s-10.0s_shark_q9.mp4"
+    normal_clip.touch()
+    temp_clip.touch()
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{tmp_path}"\n')
+
+    parser = build_parser()
+    args = parser.parse_args(["review", "--config", str(config_file), "--run", run_dir.name])
+
+    with (
+        patch("builtins.input", side_effect=["k", "done"]),
+        patch("scripts.dive_clip.open_clip_player", return_value=True) as mock_player,
+    ):
+        rc = cmd_review(args)
+
+    assert rc == 0
+    # Only normal_clip should be opened, temp_clip must be excluded
+    assert mock_player.call_count == 1
+    saved = json.loads((run_dir / "feedback.json").read_text())["feedback"]
+    assert normal_clip.name in saved
+    assert temp_clip.name not in saved
+
+
+def test_cmd_review_missing_clip_file_handling(tmp_path: Path) -> None:
+    """Missing clip file should display an explicit error and allow user to skip."""
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "run-20261101-220000"
+    highlights_dir = run_dir / "highlights"
+    highlights_dir.mkdir(parents=True)
+
+    clip = highlights_dir / "c1_0.0s-5.0s_fish_q8.mp4"
+    clip.touch()
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{tmp_path}"\n')
+
+    parser = build_parser()
+    args = parser.parse_args(["review", "--config", str(config_file), "--run", run_dir.name])
+
+    # Remove the clip file before review opens it
+    clip.unlink()
+
+    with (
+        patch("builtins.input", side_effect=["s"]),
+        patch("scripts.dive_clip.open_clip_player") as mock_player,
+    ):
+        rc = cmd_review(args)
+
+    assert rc == 0
+    # open_clip_player should not be called for a nonexistent file
+    assert not mock_player.called
+
+
+def test_cmd_review_interrupt_at_prompt_pauses_cleanly(tmp_path: Path) -> None:
+    """KeyboardInterrupt at decision, corrected, or note prompt pauses review cleanly."""
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "run-20261101-230000"
+    highlights_dir = run_dir / "highlights"
+    highlights_dir.mkdir(parents=True)
+
+    clip1 = highlights_dir / "c1_0.0s-5.0s_fish_q8.mp4"
+    clip2 = highlights_dir / "c2_5.0s-10.0s_shark_q9.mp4"
+    clip1.touch()
+    clip2.touch()
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{tmp_path}"\n')
+
+    parser = build_parser()
+    args = parser.parse_args(["review", "--config", str(config_file), "--run", run_dir.name])
+
+    def input_raising(prompt=""):
+        val = next(mock_inputs)
+        if isinstance(val, BaseException):
+            raise val
+        return val
+
+    mock_inputs = iter(["k", "first clip done", "w", KeyboardInterrupt()])
+    with (
+        patch("builtins.input", side_effect=input_raising),
+        patch("scripts.dive_clip.open_clip_player", return_value=True),
+    ):
+        rc = cmd_review(args)
+
+    assert rc == 0
+    saved = json.loads((run_dir / "feedback.json").read_text())["feedback"]
+    assert clip1.name in saved
+    assert saved[clip1.name]["decision"] == "keep"
+    # Incomplete clip2 judgment was not written
+    assert clip2.name not in saved

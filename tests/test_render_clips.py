@@ -340,7 +340,10 @@ def test_render_detections_renders_new_and_skips_existing(tmp_path: Path) -> Non
         out.write_bytes(b"newly rendered")
         return True
 
-    with patch.object(render, "render_clip", side_effect=mock_render_clip):
+    with (
+        patch.object(render, "is_valid_clip", return_value=True),
+        patch.object(render, "render_clip", side_effect=mock_render_clip),
+    ):
         rendered_count, failed_count = render.render_detections(detections, highlights_dir)
 
     assert rendered_count == 1
