@@ -546,3 +546,85 @@ ollama:
     assert mock_process.call_count == 1
     passed_clip = mock_process.call_args[0][0]
     assert passed_clip["domain"] == "motorcycle"
+
+
+def test_cmd_classify_specialize_generic(tmp_path: Path) -> None:
+    """classify with --specialize-generic should generate prompt_candidates.json for generic clips."""
+    footage_dir = tmp_path / "footage"
+    footage_dir.mkdir()
+    out_file = tmp_path / "classifications.json"
+    cand_file = tmp_path / "custom_candidates.json"
+
+    fake_clips = [
+        {"clip_id": "c1", "file_name": "park.mp4", "file_path": str(footage_dir / "park.mp4")},
+    ]
+    fake_classifications = [
+        ClipClassification(
+            clip_id="c1",
+            file_name="park.mp4",
+            file_path=str(footage_dir / "park.mp4"),
+            domain="generic",
+            confidence=0.8,
+            environment="city park",
+            primary_subjects=["dog", "frisbee"],
+        ),
+    ]
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "classify",
+        "--input",
+        str(footage_dir),
+        "--output",
+        str(out_file),
+        "--specialize-generic",
+        "--candidate-output",
+        str(cand_file),
+    ])
+
+    with (
+        patch("scripts.dive_clip._load_ingest_module") as mock_ingest_loader,
+        patch("scripts.dive_clip._load_scan_module") as mock_scan_loader,
+    ):
+        mock_ingest = MagicMock()
+        mock_ingest.ingest_folder.return_value = fake_clips
+        mock_ingest_loader.return_value = mock_ingest
+
+        mock_scan = MagicMock()
+        mock_scan.classify_footage.return_value = fake_classifications
+        mock_scan_loader.return_value = mock_scan
+
+        rc = cmd_classify(args)
+
+    assert rc == 0
+    assert out_file.exists()
+    assert cand_file.exists()
+
+    cand_data = json.loads(cand_file.read_text(encoding="utf-8"))
+    assert cand_data["name"].startswith("generic_")
+    assert cand_data["inferred_context"]["environment"] == "city park"
+    assert "dog" in cand_data["inferred_context"]["primary_subjects"]
+    assert len(cand_data["candidates"]) == 1
+
+
+def test_cmd_classify_candidate_output_requires_specialize_generic(tmp_path: Path) -> None:
+    """--candidate-output without --specialize-generic should be rejected."""
+    parser = build_parser()
+    args = parser.parse_args([
+        "classify",
+        "--input",
+        str(tmp_path),
+        "--candidate-output",
+        str(tmp_path / "cand.json"),
+    ])
+    assert cmd_classify(args) == 1
+
+
+def test_scan_candidate_isolation() -> None:
+    """Highlight scanning must isolate against candidate templates and only run registered templates."""
+    from utils.prompt_templates import BUILTIN_DOMAINS, GENERIC_HIGHLIGHT_TEMPLATE
+
+    registry = scan.load_custom_templates({})
+    assert set(registry.keys()).issubset(set(BUILTIN_DOMAINS.keys()))
+    t_generic = scan.resolve_template_for_subject("any subject", domain="generic")
+    assert t_generic.name == GENERIC_HIGHLIGHT_TEMPLATE.name

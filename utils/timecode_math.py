@@ -55,7 +55,9 @@ class Timecode:
         return cls(hours, minutes, seconds, frames, fps_frac, False)
 
     @classmethod
-    def _from_frames_dropframe(cls, total_frames: int, fps_float: float) -> Timecode:
+    def _from_frames_dropframe(
+        cls, total_frames: int, fps_float: float
+    ) -> Timecode:
         """Convert actual frame count to 29.97/59.94 drop-frame timecode.
 
         In drop frame, frame labels :00 and :01 are skipped at the start
@@ -75,7 +77,9 @@ class Timecode:
         remainder_in_minute = display_frames - int(minutes_actual * frames_per_minute_actual)
 
         decade_minutes = {0, 10, 20, 30, 40, 50}
-        dropped_in_hour = sum(2 for m in range(minutes_actual) if m % 10 not in decade_minutes)
+        dropped_in_hour = sum(
+            2 for m in range(minutes_actual) if m % 10 not in decade_minutes
+        )
         display_frames += dropped_in_hour
 
         minutes = minutes_actual % 60

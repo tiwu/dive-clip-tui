@@ -257,6 +257,34 @@ def aggregate_frame_classifications(
     return winning_domain, mean_confidence, False, None
 
 
+def _clean_env_string(raw_env: Any) -> str:
+    """Normalize environment string from scalar or list representation."""
+    if isinstance(raw_env, str):
+        return raw_env.strip()
+    if isinstance(raw_env, list):
+        return ", ".join(str(item).strip() for item in raw_env if str(item).strip())
+    if raw_env is not None:
+        return str(raw_env).strip()
+    return ""
+
+
+def _clean_text_list(raw_values: Any) -> list[str]:
+    """Extract and deduplicate cleaned alphanumeric strings from list or comma-separated string."""
+    items: list[str] = []
+    if isinstance(raw_values, list):
+        candidates = raw_values
+    elif isinstance(raw_values, str) and raw_values.strip():
+        candidates = raw_values.split(",")
+    else:
+        return []
+
+    for item in candidates:
+        s = str(item).strip().rstrip(".,;")
+        if s and s not in items:
+            items.append(s)
+    return items
+
+
 def aggregate_frame_context(
     frame_results: list[dict[str, Any]],
     winning_domain: str | None = None,
@@ -286,7 +314,7 @@ def aggregate_frame_context(
     env_max_conf: dict[str, float] = {}
 
     for frame in candidate_frames:
-        env = str(frame.get("environment") or "").strip()
+        env = _clean_env_string(frame.get("environment"))
         if not env:
             continue
         key = env.lower()
@@ -312,14 +340,8 @@ def aggregate_frame_context(
     first_seen_order: list[str] = []
 
     for frame in candidate_frames:
-        raw_subjects = frame.get("primary_subjects", [])
-        if not isinstance(raw_subjects, list):
-            continue
         seen_in_this_frame: set[str] = set()
-        for item in raw_subjects:
-            s_clean = str(item).strip().rstrip(".,;")
-            if not s_clean:
-                continue
+        for s_clean in _clean_text_list(frame.get("primary_subjects", [])):
             key = s_clean.lower()
             if key not in seen_in_this_frame:
                 seen_in_this_frame.add(key)
@@ -422,37 +444,13 @@ def classify_clip(
         except ValueError, TypeError:
             q_score = None
 
-        # Extract environment (string, sanitized)
-        raw_env = result.get("environment")
-        env_str = ""
-        if isinstance(raw_env, str):
-            env_str = raw_env.strip()
-        elif isinstance(raw_env, list):
-            env_str = ", ".join(str(item).strip() for item in raw_env if str(item).strip())
-        elif raw_env is not None:
-            env_str = str(raw_env).strip()
-
-        # Extract primary_subjects (list of clean strings)
-        raw_subjects = result.get("primary_subjects")
-        subjects_list: list[str] = []
-        if isinstance(raw_subjects, list):
-            for item in raw_subjects:
-                s = str(item).strip().rstrip(".,;")
-                if s and s not in subjects_list:
-                    subjects_list.append(s)
-        elif isinstance(raw_subjects, str) and raw_subjects.strip():
-            for part in raw_subjects.split(","):
-                s = part.strip().rstrip(".,;")
-                if s and s not in subjects_list:
-                    subjects_list.append(s)
-
         usable_results.append({
             "domain": matched_domain,
             "confidence": max(0.0, min(1.0, confidence)),
             "usable": usable_val,
             "quality_score": q_score,
-            "environment": env_str,
-            "primary_subjects": subjects_list,
+            "environment": _clean_env_string(result.get("environment")),
+            "primary_subjects": _clean_text_list(result.get("primary_subjects")),
         })
 
     winning_domain, mean_conf, is_uncertain, reason = aggregate_frame_classifications(
