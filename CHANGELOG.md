@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add first-class `wildlife` domain with coarse screening prompt, specialist fine templates (`wildlife_animal`, `wildlife_bird`, `wildlife_action`), and fallback (`broad_wildlife`).
+- Standardize universal coarse orientation rejection ("accidental, inverted, dangling, or unusable") and 1–10 fine quality rubrics across all domains.
+- Add generic footage context inference (`infer_generic_context`, `create_prompt_candidate_for_generic`) and `--specialize-generic` CLI option in `dive-clip classify` with scan isolation.
+- Expand multi-domain evaluation seed cases in `docs/evaluation/seed-cases.yaml` for underwater, motorcycle, wildlife, and generic footage.
+
 ## [0.22.0] - 2026-11-02
 
 ### Changed

@@ -4,34 +4,44 @@ notes:
   - Source videos remain local and are not included in this repository.
   - Filenames and time ranges identify examples without storing machine-specific paths.
 cases:
+  # ===========================================================================
+  # Underwater Domain Cases
+  # ===========================================================================
   - id: accidental-camera-drop
+    domain: underwater
     source_file: GX010875-bad.MP4
     interval_seconds: [12.0, 14.0]
     kind: false_positive
     observed:
+      domain: underwater
       subject: corals
       quality_score: 8
       confidence: 0.95
       rendered_file: clip_0d1044dfbbd01c35_12.0s-14.0s_corals_q8.mp4
     expected:
+      domain: underwater
       include_as_highlight: false
       reason: Accidental upside-down camera drop showing the diver's wetsuit.
 
   - id: pufferfish-mislabeled-as-nudibranch
+    domain: underwater
     source_file: GX010782-puffer.MP4
     interval_seconds: [44.0, 46.0]
     kind: wrong_subject
     observed:
+      domain: underwater
       subject: nudibranch
       quality_score: 8
       confidence: 0.95
       rendered_file: clip_1806a28c33a8495d_44.0s-46.0s_nudibranch_q8.mp4
     expected:
+      domain: underwater
       include_as_highlight: true
       subject: pufferfish
       reason: Same pufferfish seen in earlier highlights.
 
   - id: missed-turtle-highlight
+    domain: underwater
     source_file: GX010830-turtle.MP4
     interval_seconds: null
     kind: false_negative
@@ -40,17 +50,150 @@ cases:
       accepted_detections: 0
       note: One coarse candidate was rejected during fine scanning.
     expected:
+      domain: underwater
       include_as_highlight: true
       subject: turtle
       needs_user_time_range: true
 
   - id: flutefish-run-coverage-unconfirmed
+    domain: underwater
     source_file: GX010856-flutefish.MP4
     interval_seconds: null
     kind: unresolved_coverage
     observed:
+      domain: underwater
       in_run_manifest: false
       note: The source may have been added after this run.
     expected:
+      domain: underwater
       verify_present_at_run_time: true
       needs_user_time_range: true
+
+  # ===========================================================================
+  # Motorcycle Domain Cases
+  # ===========================================================================
+  - id: moto-twisties-cornering
+    domain: motorcycle
+    source_file: MOTO0042-twisties.MP4
+    interval_seconds: [24.0, 30.0]
+    kind: positive_highlight
+    observed:
+      domain: motorcycle
+      subject: cornering
+      quality_score: 9
+      confidence: 0.92
+      rendered_file: clip_moto42_24.0s-30.0s_cornering_q9.mp4
+    expected:
+      domain: motorcycle
+      include_as_highlight: true
+      subject: cornering
+      template: moto_riding
+      reason: Clean lean angle and dynamic mountain curve progression.
+
+  - id: moto-traffic-light-stationary
+    domain: motorcycle
+    source_file: MOTO0058-city.MP4
+    interval_seconds: [10.0, 15.0]
+    kind: false_positive
+    observed:
+      domain: motorcycle
+      subject: motorcycle
+      quality_score: 6
+      confidence: 0.70
+      rendered_file: clip_moto58_10.0s-15.0s_motorcycle_q6.mp4
+    expected:
+      domain: motorcycle
+      include_as_highlight: false
+      reason: Stationary bike idling at a city traffic intersection with no dynamic action.
+
+  # ===========================================================================
+  # Wildlife Domain Cases
+  # ===========================================================================
+  - id: wildlife-lion-hunt
+    domain: wildlife
+    source_file: WILD0101-savannah.MP4
+    interval_seconds: [55.0, 62.0]
+    kind: positive_highlight
+    observed:
+      domain: wildlife
+      subject: lion
+      quality_score: 9
+      confidence: 0.94
+      rendered_file: clip_wild101_55.0s-62.0s_lion_q9.mp4
+    expected:
+      domain: wildlife
+      include_as_highlight: true
+      subject: lion
+      template: wildlife_action
+      reason: Dynamic predator sprint across open savannah with sharp focus on subject.
+
+  - id: wildlife-eagle-takeoff
+    domain: wildlife
+    source_file: WILD0124-raptor.MP4
+    interval_seconds: [18.0, 24.0]
+    kind: positive_highlight
+    observed:
+      domain: wildlife
+      subject: eagle
+      quality_score: 8
+      confidence: 0.88
+      rendered_file: clip_wild124_18.0s-24.0s_eagle_q8.mp4
+    expected:
+      domain: wildlife
+      include_as_highlight: true
+      subject: eagle
+      template: wildlife_bird
+      reason: Avian takeoff from dead branch into soaring flight with clear plumage illumination.
+
+  - id: wildlife-safari-vehicle-floor
+    domain: wildlife
+    source_file: WILD0109-bad.MP4
+    interval_seconds: [5.0, 8.0]
+    kind: false_positive
+    observed:
+      domain: wildlife
+      subject: animal
+      quality_score: 7
+      confidence: 0.85
+      rendered_file: clip_wild109_5.0s-8.0s_animal_q7.mp4
+    expected:
+      domain: wildlife
+      include_as_highlight: false
+      reason: Accidental dangling camera pointing down at the rubber floor of safari vehicle.
+
+  # ===========================================================================
+  # Generic Domain Cases
+  # ===========================================================================
+  - id: generic-alpine-ridge-hike
+    domain: generic
+    source_file: GEN0055-ridge.MP4
+    interval_seconds: [102.0, 110.0]
+    kind: positive_highlight
+    observed:
+      domain: generic
+      subject: hikers
+      quality_score: 8
+      confidence: 0.89
+      rendered_file: clip_gen55_102.0s-110.0s_hikers_q8.mp4
+    expected:
+      domain: generic
+      include_as_highlight: true
+      subject: hikers
+      template: generic_highlight
+      reason: Scenic vista with intentional framing and stable tracking along mountain ridge.
+
+  - id: generic-backpack-pocket-unusable
+    domain: generic
+    source_file: GEN0081-pocket.MP4
+    interval_seconds: [0.0, 15.0]
+    kind: false_positive
+    observed:
+      domain: generic
+      subject: pocket
+      quality_score: 5
+      confidence: 0.72
+      rendered_file: clip_gen81_0.0s-15.0s_pocket_q5.mp4
+    expected:
+      domain: generic
+      include_as_highlight: false
+      reason: Camera activated unintentionally inside backpack pocket showing black fabric.

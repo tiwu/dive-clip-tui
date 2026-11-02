@@ -257,6 +257,88 @@ def aggregate_frame_classifications(
     return winning_domain, mean_confidence, False, None
 
 
+def aggregate_frame_context(
+    frame_results: list[dict[str, Any]],
+    winning_domain: str | None = None,
+) -> tuple[str, list[str]]:
+    """Aggregate inferred environment and primary subjects across sample frames.
+
+    Prioritizes usable frames matching the winning domain to avoid contamination from
+    discordant or unusable frames. Returns (environment, primary_subjects).
+    """
+    if not frame_results or winning_domain == "unusable":
+        return "", []
+
+    # Filter to usable frames
+    usable_frames = [f for f in frame_results if f.get("usable", True)]
+    if not usable_frames:
+        usable_frames = frame_results
+
+    # Prioritize frames matching the winning domain if available
+    domain_frames = (
+        [f for f in usable_frames if f.get("domain") == winning_domain] if winning_domain else []
+    )
+    candidate_frames = domain_frames if domain_frames else usable_frames
+
+    # Aggregate environment
+    env_counts: dict[str, int] = {}
+    env_display: dict[str, str] = {}
+    env_max_conf: dict[str, float] = {}
+
+    for frame in candidate_frames:
+        env = str(frame.get("environment") or "").strip()
+        if not env:
+            continue
+        key = env.lower()
+        env_counts[key] = env_counts.get(key, 0) + 1
+        if key not in env_display:
+            env_display[key] = env
+            env_max_conf[key] = float(frame.get("confidence") or 0.0)
+        else:
+            env_max_conf[key] = max(env_max_conf[key], float(frame.get("confidence") or 0.0))
+
+    aggregated_env = ""
+    if env_counts:
+        # Sort by frequency (descending), then confidence (descending)
+        best_env_key = max(
+            env_counts.keys(),
+            key=lambda k: (env_counts[k], env_max_conf.get(k, 0.0)),
+        )
+        aggregated_env = env_display[best_env_key]
+
+    # Aggregate primary subjects (ranked by cross-frame frequency)
+    subject_frame_counts: dict[str, int] = {}
+    subject_display: dict[str, str] = {}
+    first_seen_order: list[str] = []
+
+    for frame in candidate_frames:
+        raw_subjects = frame.get("primary_subjects", [])
+        if not isinstance(raw_subjects, list):
+            continue
+        seen_in_this_frame: set[str] = set()
+        for item in raw_subjects:
+            s_clean = str(item).strip().rstrip(".,;")
+            if not s_clean:
+                continue
+            key = s_clean.lower()
+            if key not in seen_in_this_frame:
+                seen_in_this_frame.add(key)
+                subject_frame_counts[key] = subject_frame_counts.get(key, 0) + 1
+                if key not in subject_display:
+                    subject_display[key] = s_clean
+                    first_seen_order.append(key)
+
+    # Sort unique subjects by frame frequency (descending), preserving first-seen order on ties
+    sorted_subject_keys = sorted(
+        first_seen_order,
+        key=lambda k: subject_frame_counts[k],
+        reverse=True,
+    )
+    aggregated_subjects = [subject_display[k] for k in sorted_subject_keys]
+
+    return aggregated_env, aggregated_subjects
+
+
 def classify_clip(
     clip: dict[str, Any] | ClipManifest,
     sample_frames: list[dict[str, Any]],
@@ -281,6 +363,8 @@ def classify_clip(
             confidence=None,
             uncertain=True,
             reason="no usable responses",
+            environment="",
+            primary_subjects=[],
         )
 
     prompt = build_classification_prompt(registry)
@@ -338,11 +422,37 @@ def classify_clip(
         except ValueError, TypeError:
             q_score = None
 
+        # Extract environment (string, sanitized)
+        raw_env = result.get("environment")
+        env_str = ""
+        if isinstance(raw_env, str):
+            env_str = raw_env.strip()
+        elif isinstance(raw_env, list):
+            env_str = ", ".join(str(item).strip() for item in raw_env if str(item).strip())
+        elif raw_env is not None:
+            env_str = str(raw_env).strip()
+
+        # Extract primary_subjects (list of clean strings)
+        raw_subjects = result.get("primary_subjects")
+        subjects_list: list[str] = []
+        if isinstance(raw_subjects, list):
+            for item in raw_subjects:
+                s = str(item).strip().rstrip(".,;")
+                if s and s not in subjects_list:
+                    subjects_list.append(s)
+        elif isinstance(raw_subjects, str) and raw_subjects.strip():
+            for part in raw_subjects.split(","):
+                s = part.strip().rstrip(".,;")
+                if s and s not in subjects_list:
+                    subjects_list.append(s)
+
         usable_results.append({
             "domain": matched_domain,
             "confidence": max(0.0, min(1.0, confidence)),
             "usable": usable_val,
             "quality_score": q_score,
+            "environment": env_str,
+            "primary_subjects": subjects_list,
         })
 
     winning_domain, mean_conf, is_uncertain, reason = aggregate_frame_classifications(
@@ -350,6 +460,10 @@ def classify_clip(
     )
 
     usable_clip = winning_domain != "unusable"
+
+    aggregated_env, aggregated_subjects = aggregate_frame_context(
+        usable_results, winning_domain=winning_domain
+    )
 
     return ClipClassification(
         clip_id=clip_id,
@@ -360,6 +474,8 @@ def classify_clip(
         uncertain=is_uncertain,
         reason=reason,
         usable=usable_clip,
+        environment=aggregated_env,
+        primary_subjects=aggregated_subjects,
     )
 
 
@@ -527,6 +643,8 @@ def classify_footage(
                     confidence=None,
                     uncertain=True,
                     reason=f"error: {exc}",
+                    environment="",
+                    primary_subjects=[],
                 )
             results.append(classification)
             cleanup_work_dir(clip_work)

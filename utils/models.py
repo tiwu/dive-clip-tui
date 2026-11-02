@@ -85,6 +85,10 @@ class ClipClassification(BaseModel):
     quality_score: int | None = Field(
         default=None, ge=1, le=10, description="Estimated visual quality score (1-10)"
     )
+    environment: str = Field(default="", description="Inferred physical setting or environment")
+    primary_subjects: list[str] = Field(
+        default_factory=list, description="Primary visible subjects or elements"
+    )
 
 
 class ClassificationOutput(BaseModel):
