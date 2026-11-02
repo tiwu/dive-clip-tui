@@ -15,7 +15,8 @@ flow does not require cloud uploads, a subscription, API keys, or DaVinci Resolv
 - [FFmpeg](https://ffmpeg.org/) and `ffprobe`
 - [Ollama](https://ollama.com/) with `qwen2.5-vl:7b` available locally
 - Enough memory and GPU resources for the selected vision model; a CUDA GPU
-  with 12 GB VRAM is recommended for the configured model
+  with 12 GB VRAM is recommended for the configured model. NVIDIA GPUs with NVENC
+  support are automatically leveraged for hardware-accelerated video rendering.
 - DaVinci Resolve only if you want to use the optional Resolve export/import flow
 
 ## Installation
@@ -109,8 +110,8 @@ token counts, and full FFmpeg commands.
 ### 3-stage scanning & domain awareness
 
 The scanner uses a 3-stage coarse-to-fine architecture:
-1. **Pass 0 (Video Classification)**: Samples representative frames from the coarse frame batch to classify the clip domain (`underwater`, `motorcycle`, `generic`, or custom domains), unless overridden by `scan_parameters.domain` or clip tags.
-2. **Pass 1 (Domain Coarse Scan)**: Screens frames at low FPS (default: 0.5 FPS) using a domain-specific screening prompt that filters out unusable camera angles (e.g. dangling on a BCD underwater vs. pointed at a fuel tank/ground on a motorcycle) while tagging detected subjects and categories.
+1. **Pass 0 (Video Classification & Usability)**: Uses fast targeted input seeking (<0.5s) to sample isolated frames across video duration (scaled dynamically: min 3, max 8, 1 frame per 5 min) without decoding full files. Classifies the clip domain (`underwater`, `motorcycle`, `generic`, or custom domains) and screens for unusable footage (camera inside a bag/pocket, covered lens, dangling on gear). Unusable or non-target clips exit immediately with terminal alerts, avoiding wasted coarse frame decoding and VLM calls.
+2. **Pass 1 (Domain Coarse Scan)**: Screens frames at low FPS (default: 0.25–0.5 FPS) using a domain-specific screening prompt that filters out false positives while tagging detected subjects and categories. Coarse frame extraction for upcoming clips is prefetched in the background in `/dev/shm` to keep the GPU saturated.
 3. **Pass 2 (Subject-Routed Fine Scan)**: Dynamically routes each highlight candidate window to a specialized rubric (such as `pelagics`, `macro`, `diver`, `moto_riding`, `moto_scenic`, `moto_group`, or `generic_highlight`) for precise quality scoring and deduplication.
 
 Even in the `generic` domain, the model identifies and preserves the concrete subject and action (e.g. `"downhill mountain bike jump"`, `"scenic mountain pass"`, `"dog catching frisbee"`) alongside detailed descriptions, making it easy to discover what subjects exist in your footage and add custom templates for them.
@@ -125,7 +126,7 @@ To quickly classify an unorganized folder of unknown videos without running high
 uv run dive-clip classify --input ./footage --output ./outputs/classifications.json
 ```
 
-Pass 0 samples only enough representative frames per clip (configured via `scan_parameters.classify_frames_count`, default 3) to identify the domain without scanning the entire video. Results display each clip's domain, mean confidence, and uncertainty status (flagged when frames disagree, when confidence is below 0.6, or when VLM responses are unusable).
+Pass 0 samples targeted representative frames dynamically based on clip duration (configured via `scan_parameters.classify_frames_count`, default 3, plus 1 per 5 min up to `classify_frames_max`, default 8) to identify the domain and verify usability without scanning the entire video. Results display each clip's domain, mean confidence, usability status, and uncertainty flags (flagged when frames disagree, when confidence is below 0.6, or when VLM responses are unusable).
 
 #### Reusing classifications in later scans
 
@@ -142,7 +143,7 @@ is the main tool for tuning the confidence thresholds:
 
 ```text
 [Pass 0] Extracting frames @ 0.5 FPS: clip001.mp4
-[Pass 0] Extracted 150 frames from clip001.mp4
+[Pass 0] Extracted 3 frames from clip001.mp4
 [Pass 0] Classifying domain for clip001.mp4 across 3 sample frames...
 [Pass 0] Classified clip001.mp4 as domain 'underwater'
 [Pass 1] Coarse scan @ 0.5 FPS (underwater): clip001.mp4
@@ -286,6 +287,7 @@ tui/
 utils/
   checkpoint.py            # Pipeline checkpoint and intra-clip resume state
   config.py                # Configuration loading and validation
+  encoder.py               # Hardware encoder detection (NVENC) and CPU fallback
   ffmpeg_streamer.py       # Frame sampling and temporary storage (/dev/shm)
   logging_setup.py         # Shared console and file logging setup
   models.py                # Pydantic manifest and detection models
@@ -315,6 +317,21 @@ outputs/                   # Generated manifests, detections, and exports
   throughput while eliminating heavy SSD write cycles when processing large batches.
   The pipeline automatically falls back to standard temporary storage on systems without
   `/dev/shm` (e.g. macOS) or when `use_ramdisk` is set to `false`.
+- **Hardware-accelerated encoding**: Highlight clip rendering (`05_render_clips.py`)
+  and aftermovie creation (`07_create_aftermovie.py`) probe and use `h264_nvenc` GPU
+  encoding by default (`video_encoder: "auto"`), reducing CPU load and rendering
+  times by over 90%. If hardware encoding is unavailable or encounters errors, the
+  pipeline automatically falls back to thread-capped CPU `libx264`.
+- **Fast input seeking**: Clip extraction places `-ss` and `-to` before `-i`, enabling
+  instant keyframe seeking and decoding only the target highlight segment rather than
+  decoding the full container from 0.0s.
+- **Pipelined frame prefetching**: During multi-clip scans, coarse frame extraction
+  for Video $N+1$ runs in the background in `/dev/shm` while Video $N$ executes VLM
+  inference on GPU, overlapping decoding and inference with a strict 1-clip memory
+  bound (`buffer_size=1`).
+- **HTTP connection pooling**: `OllamaClient` maintains a persistent `requests.Session()`
+  connection pool across all frame evaluations to eliminate TCP handshake latency and
+  socket churn.
 - The optional Resolve marker export supports frame-rate-aware timecodes,
   including 29.97 drop-frame and non-drop-frame formats.
 

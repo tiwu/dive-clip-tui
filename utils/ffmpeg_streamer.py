@@ -41,7 +41,7 @@ def _try_create(path: Path) -> bool:
         return False
 
 
-def _probe_duration(video_path: Path) -> float | None:
+def probe_duration(video_path: str | Path) -> float | None:
     """Probe video duration in seconds using ffprobe, or None if probe fails."""
     try:
         cmd = [
@@ -60,6 +60,102 @@ def _probe_duration(video_path: Path) -> float | None:
     except Exception:
         pass
     return None
+
+
+_probe_duration = probe_duration
+
+
+def calculate_sample_timestamps(
+    duration: float,
+    min_count: int = 3,
+    interval_seconds: float = 300.0,
+    max_count: int = 8,
+) -> list[float]:
+    """Calculate evenly spaced timestamps across video duration.
+
+    Args:
+        duration: Video duration in seconds.
+        min_count: Minimum number of sample timestamps (default: 3).
+        interval_seconds: Number of seconds per additional sample frame (default: 300s / 5 min).
+        max_count: Upper bound on the number of sample timestamps (default: 8).
+
+    Returns:
+        Sorted list of float timestamps.
+    """
+    if duration <= 0:
+        return []
+
+    min_c = max(1, min_count)
+    max_c = max(min_c, max_count)
+    if interval_seconds > 0:
+        calculated_count = int(duration / interval_seconds)
+        count = min(max_c, max(min_c, calculated_count))
+    else:
+        count = min_c
+
+    step = duration / (count + 1)
+    return [round((i + 1) * step, 3) for i in range(count)]
+
+
+def extract_targeted_frames(
+    video_path: str | Path,
+    output_dir: str | Path,
+    timestamps: list[float],
+    scale: str | None = None,
+    timeout: float = 30.0,
+) -> list[dict]:
+    """Extract individual frames at specific timestamps using fast input seeking.
+
+    Does not decode the full container, extracting only one frame per timestamp.
+    Returns a list of dicts with keys: frame_path, timestamp, frame_number.
+    """
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    extracted_frames: list[dict] = []
+    for idx, ts in enumerate(timestamps, start=1):
+        frame_file = output_dir / f"sample_{idx:03d}_{ts:.1f}s.jpg"
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-ss",
+            str(ts),
+            "-i",
+            str(video_path),
+            "-vframes",
+            "1",
+        ]
+        if scale:
+            cmd.extend(["-vf", f"scale={scale}"])
+        cmd.extend(["-qscale:v", "2", "-y", str(frame_file)])
+
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout))
+            if res.returncode == 0 and frame_file.exists() and frame_file.stat().st_size > 0:
+                extracted_frames.append({
+                    "frame_path": str(frame_file),
+                    "timestamp": ts,
+                    "frame_number": idx,
+                })
+            else:
+                logger.debug(
+                    "Targeted frame extraction failed at %.1fs for %s: %s",
+                    ts,
+                    video_path.name,
+                    res.stderr.strip()[:200],
+                )
+        except Exception as exc:
+            logger.debug(
+                "Targeted frame extraction exception at %.1fs for %s: %s",
+                ts,
+                video_path.name,
+                exc,
+            )
+
+    return extracted_frames
 
 
 def extract_frames(

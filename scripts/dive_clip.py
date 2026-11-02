@@ -127,6 +127,8 @@ def _run_background_render_worker(
     if render_detections is None:
         return
 
+    rendered_cache: set[str] = set()
+
     while not stop_event.is_set():
         if detections_path.exists():
             try:
@@ -139,6 +141,7 @@ def _run_background_render_worker(
                         highlights_dir,
                         log_to_console=False,
                         stop_event=stop_event,
+                        rendered_cache=rendered_cache,
                     )
             except Exception as exc:
                 logger.debug("Background render check: %s", exc)

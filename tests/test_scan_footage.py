@@ -1592,3 +1592,272 @@ def test_process_clip_subject_routing_multicategory(tmp_path: Path) -> None:
     assert "moto_scenic" in templates_used
     assert "Orange" in colors_used
     assert "Blue" in colors_used
+
+
+def test_process_clip_unusable_early_exit(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """process_clip should immediately abort and skip coarse extraction if Pass 0 classifies footage as unusable."""
+    caplog.set_level(logging.INFO)
+    from utils.stats import Phase0Stats
+
+    video = tmp_path / "in_bag.mp4"
+    video.touch()
+    clip = {
+        "clip_id": "bag_1",
+        "file_name": "in_bag.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+        "duration": 600.0,
+    }
+    config = {
+        "scan_parameters": {
+            "domain": "auto",
+            "classify_clips": "auto",
+            "classify_frames_count": 3,
+            "coarse_fps": 0.5,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+
+    sample_frame = tmp_path / "sample.jpg"
+    sample_frame.touch()
+
+    coarse_extracted = False
+
+    def mock_extract(video_path, output_dir, *args, **kwargs):
+        nonlocal coarse_extracted
+        if "coarse" in str(output_dir):
+            coarse_extracted = True
+        return [{"frame_path": str(sample_frame), "timestamp": 1.0, "frame_number": 1}]
+
+    def mock_targeted(video_path, output_dir, timestamps, scale=None):
+        return [
+            {"frame_path": str(sample_frame), "timestamp": ts, "frame_number": idx}
+            for idx, ts in enumerate(timestamps, start=1)
+        ]
+
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+        if phase == "classify":
+            return {
+                "domain": "unusable",
+                "confidence": 0.99,
+                "usable": False,
+                "quality_score": 1,
+                "reason": "inside gear bag",
+            }
+        return None
+
+    p0_stats = Phase0Stats()
+    with (
+        patch.object(scan, "extract_targeted_frames", side_effect=mock_targeted),
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        detections = scan.process_clip(
+            clip,
+            config,
+            tmp_path / "work",
+            phase0_stats=p0_stats,
+        )
+
+    assert detections == []
+    assert not coarse_extracted
+    assert p0_stats.clips_unusable == 1
+    assert "unusable camera footage" in caplog.text
+
+
+def test_process_clip_non_target_domain_early_exit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """process_clip should immediately abort and skip coarse extraction if detected domain does not match configured domain."""
+    caplog.set_level(logging.INFO)
+    from utils.stats import Phase0Stats
+
+    video = tmp_path / "motorcycle.mp4"
+    video.touch()
+    clip = {
+        "clip_id": "moto_2",
+        "file_name": "motorcycle.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+        "duration": 300.0,
+    }
+    config = {
+        "scan_parameters": {
+            "domain": "underwater",
+            "classify_clips": "always",
+            "classify_frames_count": 3,
+            "coarse_fps": 0.5,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+
+    sample_frame = tmp_path / "sample.jpg"
+    sample_frame.touch()
+
+    coarse_extracted = False
+
+    def mock_extract(video_path, output_dir, *args, **kwargs):
+        nonlocal coarse_extracted
+        if "coarse" in str(output_dir):
+            coarse_extracted = True
+        return [{"frame_path": str(sample_frame), "timestamp": 1.0, "frame_number": 1}]
+
+    def mock_targeted(video_path, output_dir, timestamps, scale=None):
+        return [
+            {"frame_path": str(sample_frame), "timestamp": ts, "frame_number": idx}
+            for idx, ts in enumerate(timestamps, start=1)
+        ]
+
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+        if phase == "classify":
+            return {
+                "domain": "motorcycle",
+                "confidence": 0.95,
+                "usable": True,
+                "quality_score": 8,
+            }
+        return None
+
+    p0_stats = Phase0Stats()
+    with (
+        patch.object(scan, "extract_targeted_frames", side_effect=mock_targeted),
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        detections = scan.process_clip(
+            clip,
+            config,
+            tmp_path / "work",
+            phase0_stats=p0_stats,
+        )
+
+    assert detections == []
+    assert not coarse_extracted
+    assert p0_stats.clips_skipped_domain == 1
+    assert "non-target domain 'motorcycle' (configured: 'underwater')" in caplog.text
+
+
+def test_process_clip_reuses_prefetched_coarse_frames_and_triggers_callback(
+    tmp_path: Path,
+) -> None:
+    """process_clip should reuse prefetched_coarse_frames and invoke on_coarse_start callback."""
+    video = tmp_path / "dive.mp4"
+    video.touch()
+    clip = {
+        "clip_id": "dive_1",
+        "file_name": "dive.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+        "domain": "underwater",
+    }
+    config = {
+        "scan_parameters": {
+            "domain": "underwater",
+            "classify_clips": "off",
+            "coarse_fps": 0.5,
+            "fine_fps": 1.0,
+            "coarse_confidence_threshold": 0.7,
+            "coarse_quality_threshold": 4,
+            "quality_threshold": 6,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+
+    c_frame = tmp_path / "c_frame.jpg"
+    c_frame.touch()
+    f_frame = tmp_path / "f_frame.jpg"
+    f_frame.touch()
+
+    coarse_extracted = False
+
+    def mock_extract(video_path, output_dir, *args, **kwargs):
+        nonlocal coarse_extracted
+        if "coarse" in str(output_dir):
+            coarse_extracted = True
+        return [{"frame_path": str(f_frame), "timestamp": 2.0, "frame_number": 1}]
+
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+        if phase == "coarse":
+            return {
+                "detected": True,
+                "confidence": 0.85,
+                "quality_score": 7,
+                "subject": "sea turtle",
+                "category": "wildlife",
+            }
+        if phase == "fine":
+            return {
+                "detected": True,
+                "confidence": 0.9,
+                "quality_score": 8,
+                "subject": "green sea turtle",
+                "description": "turtle swimming",
+            }
+        return None
+
+    callback_called = False
+
+    def on_coarse_start():
+        nonlocal callback_called
+        callback_called = True
+
+    prefetched = [
+        {"frame_path": str(c_frame), "timestamp": 2.0, "frame_number": 1},
+        {"frame_path": str(c_frame), "timestamp": 4.0, "frame_number": 2},
+    ]
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        detections = scan.process_clip(
+            clip,
+            config,
+            tmp_path / "work",
+            prefetched_coarse_frames=prefetched,
+            on_coarse_start=on_coarse_start,
+        )
+
+    assert len(detections) == 1
+    assert not coarse_extracted
+    assert callback_called
+
+
+def test_extract_classification_frames_duration_sampling(tmp_path: Path) -> None:
+    """extract_classification_frames should calculate dynamic sample count and timestamps from video duration."""
+    video = tmp_path / "long_video.mp4"
+    video.touch()
+
+    captured_timestamps: list[float] = []
+
+    def mock_targeted(video_path, output_dir, timestamps, scale=None):
+        nonlocal captured_timestamps
+        captured_timestamps = list(timestamps)
+        return [
+            {"frame_path": str(tmp_path / "f.jpg"), "timestamp": t, "frame_number": i}
+            for i, t in enumerate(timestamps, 1)
+        ]
+
+    with patch.object(scan, "extract_targeted_frames", side_effect=mock_targeted):
+        frames = scan.extract_classification_frames(
+            file_path=video,
+            output_dir=tmp_path / "pass0",
+            count=3,
+            duration=1200.0,  # 20 min -> 4 frames (1200 / 300 = 4)
+            interval_seconds=300.0,
+            max_count=8,
+        )
+
+    assert len(frames) == 4
+    assert len(captured_timestamps) == 4
+    # Evenly spaced across 1200s (step = 1200 / 5 = 240)
+    assert captured_timestamps == [240.0, 480.0, 720.0, 960.0]

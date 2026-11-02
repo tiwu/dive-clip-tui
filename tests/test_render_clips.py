@@ -41,10 +41,12 @@ def test_render_clip_success(tmp_path: Path) -> None:
         result = render.render_clip(source, 10.0, 15.0, output)
 
     assert result is True
-    # Verify ffmpeg was called with -ss and -to
+    # Verify ffmpeg was called with -ss and -to before -i (fast input seek)
     call_args = mock_run.call_args[0][0]
     assert "-ss" in call_args
     assert "-to" in call_args
+    assert "-i" in call_args
+    assert call_args.index("-ss") < call_args.index("-i")
     assert "10.0" in call_args or "10" in call_args
     assert "15.0" in call_args or "15" in call_args
 
@@ -608,3 +610,57 @@ def test_render_detections_retries_invalid_existing(tmp_path: Path) -> None:
     assert failed_count == 0
     assert c1_path.name in rendered_clips
     assert c2_path.name in rendered_clips
+
+
+def test_render_clip_encoder_fallback(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.touch()
+    output = tmp_path / "clip.mp4"
+
+    res_fail = MagicMock(returncode=1, stderr="nvenc failure")
+    res_ok = MagicMock(returncode=0, stderr="")
+
+    with (
+        patch.object(render.subprocess, "run", side_effect=[res_fail, res_ok]) as mock_run,
+        patch.object(render, "is_valid_clip", return_value=True),
+    ):
+        result = render.render_clip(source, 0.0, 5.0, output, encoder_name="h264_nvenc")
+        assert result is True
+        assert mock_run.call_count == 2
+        # First call used h264_nvenc
+        assert "h264_nvenc" in mock_run.call_args_list[0][0][0]
+        # Second call used libx264 fallback
+        assert "libx264" in mock_run.call_args_list[1][0][0]
+
+
+def test_render_detections_rendered_cache(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.touch()
+    highlights_dir = tmp_path / "highlights"
+    highlights_dir.mkdir(parents=True)
+
+    detections = [
+        {"clip_id": "c1", "file_path": str(source), "start_time": 0.0, "end_time": 5.0},
+        {"clip_id": "c2", "file_path": str(source), "start_time": 5.0, "end_time": 10.0},
+    ]
+
+    # Pre-populate cache with c1
+    cache = {"c1_0.0s-5.0s_unknown_q0.mp4"}
+    rendered_calls = []
+
+    def mock_render(src, start, end, out, **kwargs):
+        rendered_calls.append(out.name)
+        return True
+
+    with patch.object(render, "render_clip", side_effect=mock_render):
+        rendered_count, failed_count = render.render_detections(
+            detections,
+            highlights_dir,
+            rendered_cache=cache,
+        )
+
+    # c1 was in cache so it was skipped without disk check; only c2 was rendered
+    assert rendered_calls == ["c2_5.0s-10.0s_unknown_q0.mp4"]
+    assert rendered_count == 1
+    assert failed_count == 0
+    assert "c2_5.0s-10.0s_unknown_q0.mp4" in cache

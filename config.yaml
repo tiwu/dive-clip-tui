@@ -18,7 +18,11 @@ ollama:
 scan_parameters:
   domain: "auto"                    # "auto" (Pass 0 classifies clip), "underwater", "motorcycle", or "generic"
   classify_clips: "auto"            # "auto" (run Pass 0 unless domain/tags set), "always", or "off"
-  classify_frames_count: 3          # Number of sample frames per clip for Pass 0 domain classification
+  classify_frames_count: 3          # Minimum number of sample frames per clip for Pass 0 domain classification
+  classify_interval_seconds: 300    # Interval in seconds for dynamic Pass 0 sampling (1 frame per 5 min)
+  classify_frames_max: 8            # Maximum number of sample frames for Pass 0 domain classification
+  prefetch_coarse: true             # Prefetch Video N+1 coarse frames in /dev/shm during Video N inference
+  video_encoder: "auto"             # Video encoder: "auto" (probes NVENC, falls back to libx264), "h264_nvenc", or "libx264"
   coarse_fps: 0.25                   # 0.25 frames per second during coarse scan (1 frame every 4 seconds)
   coarse_scale: "426:-2"            # Downscale coarse frames for fast VLM screening
   fine_fps: 1.0                     # 1 frame per second during highlight windows

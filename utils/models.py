@@ -79,6 +79,12 @@ class ClipClassification(BaseModel):
     )
     uncertain: bool = Field(default=False, description="Whether classification is uncertain")
     reason: str | None = Field(default=None, description="Reason for uncertainty, if any")
+    usable: bool = Field(
+        default=True, description="Whether footage is usable (not in-bag, covered, or dangling)"
+    )
+    quality_score: int | None = Field(
+        default=None, ge=1, le=10, description="Estimated visual quality score (1-10)"
+    )
 
 
 class ClassificationOutput(BaseModel):

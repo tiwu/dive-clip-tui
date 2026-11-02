@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
+from utils.encoder import get_fallback_encoder, get_video_encoder
 from utils.ffmpeg_streamer import concat_clips
 from utils.logging_setup import configure_logging
 from utils.run_archive import resolve_and_validate_assembly_artifacts
@@ -34,6 +35,8 @@ def render_clip_with_fade(
     end_time: float,
     output_path: Path,
     fade_duration: float = 1.0,
+    encoder_name: str | None = None,
+    encoder_args: list[str] | None = None,
 ) -> bool:
     """Render a clip with fade-in at start and fade-out at end.
 
@@ -52,25 +55,30 @@ def render_clip_with_fade(
         vf_filters.append(f"fade=t=in:st=0:d={fade}")
         vf_filters.append(f"fade=t=out:st={duration - fade}:d={fade}")
 
+    if encoder_args is None:
+        enc_name, enc_args = get_video_encoder(encoder_name or "auto")
+    else:
+        enc_name = encoder_name or "custom"
+        enc_args = encoder_args
+
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
-        "-i",
-        str(source_path),
         "-ss",
         str(start_time),
         "-to",
         str(end_time),
+        "-i",
+        str(source_path),
     ]
 
     if vf_filters:
         cmd.extend(["-vf", ",".join(vf_filters)])
 
     cmd.extend([
-        "-c:v",
-        "libx264",
+        *enc_args,
         "-c:a",
         "aac",
         "-movflags",
@@ -89,6 +97,25 @@ def render_clip_with_fade(
         return False
 
     if result.returncode != 0:
+        fallback = get_fallback_encoder(enc_name)
+        if fallback:
+            fb_name, fb_args = fallback
+            logger.warning(
+                "FFmpeg aftermovie fade failed with %s for %s, falling back to %s: %s",
+                enc_name,
+                output_path.name,
+                fb_name,
+                result.stderr.strip()[:200],
+            )
+            return render_clip_with_fade(
+                source_path,
+                start_time,
+                end_time,
+                output_path,
+                fade_duration=fade_duration,
+                encoder_name=fb_name,
+                encoder_args=fb_args,
+            )
         logger.warning("FFmpeg failed for %s: %s", output_path.name, result.stderr.strip()[:200])
         return False
 
@@ -118,6 +145,7 @@ def convert_aspect_ratio(
     video_path: Path,
     output_path: Path,
     aspect_ratio: str,
+    encoder_name: str | None = None,
 ) -> bool:
     """Convert a video to the target aspect ratio using scale+pad."""
     vf = aspect_ratio_filter(aspect_ratio)
@@ -127,6 +155,7 @@ def convert_aspect_ratio(
         return True
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    enc_name, enc_args = get_video_encoder(encoder_name or "auto")
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -136,8 +165,7 @@ def convert_aspect_ratio(
         str(video_path),
         "-vf",
         vf,
-        "-c:v",
-        "libx264",
+        *enc_args,
         "-c:a",
         "copy",
         "-movflags",
@@ -156,6 +184,39 @@ def convert_aspect_ratio(
         return False
 
     if result.returncode != 0:
+        fallback = get_fallback_encoder(enc_name)
+        if fallback:
+            fb_name, fb_args = fallback
+            logger.warning(
+                "FFmpeg aspect ratio failed with %s for %s, falling back to %s: %s",
+                enc_name,
+                output_path.name,
+                fb_name,
+                result.stderr.strip()[:200],
+            )
+            retry_cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video_path),
+                "-vf",
+                vf,
+                *fb_args,
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                "-y",
+                str(output_path),
+            ]
+            try:
+                res2 = subprocess.run(retry_cmd, capture_output=True, text=True, timeout=300)
+                if res2.returncode == 0:
+                    return True
+            except Exception:
+                pass
         logger.warning("FFmpeg aspect ratio conversion failed: %s", result.stderr.strip()[:200])
         return False
 

@@ -127,3 +127,22 @@ def test_resolve_host_defaults_to_localhost(monkeypatch) -> None:
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
     assert ollama_client.resolve_host(None) == ollama_client.DEFAULT_OLLAMA_HOST
     assert ollama_client.resolve_host("") == ollama_client.DEFAULT_OLLAMA_HOST
+
+
+def test_client_session_pooling_and_context_manager(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"data")
+
+    mock_session = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"response": '{"detected": true}'}
+    mock_session.post.return_value = mock_resp
+
+    with ollama_client.OllamaClient(
+        "http://localhost:11434", "model", session=mock_session
+    ) as client:
+        res = client.generate(str(image_path), "Prompt", "phase1")
+        assert res == {"detected": True}
+        assert mock_session.post.call_count == 1
+
+    mock_session.close.assert_called_once()

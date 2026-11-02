@@ -91,6 +91,8 @@ class Phase0Stats(BaseModel):
     """Statistics for Phase 0 clip domain classification."""
 
     clips_classified: int = 0
+    clips_unusable: int = 0
+    clips_skipped_domain: int = 0
     frames_analyzed: int = 0
     ollama_calls: int = 0
     ollama_failures: int = 0
@@ -211,8 +213,14 @@ def format_stats_table(stats: PipelineStats, title: str = "Pipeline Run Summary"
         p0 = stats.phase0
         dom_parts = [f"{d}: {c}" for d, c in p0.domain_counts.items()]
         dom_str = f" ({', '.join(dom_parts)})" if dom_parts else ""
+        skip_notes = []
+        if p0.clips_unusable > 0:
+            skip_notes.append(f"{p0.clips_unusable} unusable")
+        if p0.clips_skipped_domain > 0:
+            skip_notes.append(f"{p0.clips_skipped_domain} non-target")
+        skip_str = f" • [yellow]{', '.join(skip_notes)} skipped[/yellow]" if skip_notes else ""
         p0_details = (
-            f"[bold]{p0.clips_classified}[/] clips classified{dom_str}\n"
+            f"[bold]{p0.clips_classified}[/] clips classified{dom_str}{skip_str}\n"
             f"[dim]{p0.frames_analyzed} frames analyzed  •  "
             f"{p0.ollama_calls} Ollama calls ({p0.ollama_failures} failed)  •  "
             f"Elapsed: {format_duration(p0.elapsed_seconds)}[/dim]"
@@ -297,8 +305,14 @@ def format_stats_log(stats: PipelineStats) -> str:
         p0 = stats.phase0
         dom_parts = [f"{d}: {c}" for d, c in p0.domain_counts.items()]
         dom_str = f" ({', '.join(dom_parts)})" if dom_parts else ""
+        skip_notes = []
+        if p0.clips_unusable > 0:
+            skip_notes.append(f"{p0.clips_unusable} unusable")
+        if p0.clips_skipped_domain > 0:
+            skip_notes.append(f"{p0.clips_skipped_domain} non-target")
+        skip_str = f" [{', '.join(skip_notes)} skipped]" if skip_notes else ""
         lines.append(
-            f"Phase 0 (Classify): {p0.clips_classified} clips classified{dom_str}, "
+            f"Phase 0 (Classify): {p0.clips_classified} clips classified{dom_str}{skip_str}, "
             f"{p0.frames_analyzed} frames, "
             f"{p0.ollama_calls} calls ({p0.ollama_failures} failed), "
             f"elapsed {format_duration(p0.elapsed_seconds)}"
