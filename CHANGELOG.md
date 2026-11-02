@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Changed
+- Add hardware-accelerated NVENC video encoding with automatic fallback, fast input seeking for highlight renders, dynamic duration-based Pass 0 frame sampling with in-bag/dangling footage rejection, connection pooling in OllamaClient, and memory-bounded pipelined frame extraction prefetching.
+
 ## [0.21.0] - 2026-11-01
 
 ### Added

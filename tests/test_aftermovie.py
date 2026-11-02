@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
-import json
 import os
-import subprocess
-import sys as sys_module
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 # Load scripts/07_create_aftermovie.py directly (name starts with a digit)
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -160,7 +156,7 @@ def test_main_no_detections(tmp_path: Path) -> None:
     highlights_dir.mkdir(parents=True)
 
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("general:\n  output_dir: \"./outputs\"\n")
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
 
     original_argv = sys_module.argv
     original_exit = sys_module.exit
@@ -185,10 +181,8 @@ def test_main_no_detections(tmp_path: Path) -> None:
         ]
         sys_module.exit = fake_exit
         os.chdir(tmp_path)
-        try:
+        with contextlib.suppress(SystemExit):
             aftermovie.main()
-        except SystemExit:
-            pass
     finally:
         sys_module.argv = original_argv
         sys_module.exit = original_exit
@@ -199,8 +193,8 @@ def test_main_no_detections(tmp_path: Path) -> None:
 
 def test_main_renders_clips(tmp_path: Path) -> None:
     """main should render clips and create aftermovie."""
-    import sys as sys_module
     import json
+    import sys as sys_module
 
     # Create detections file
     detections = {
@@ -231,7 +225,7 @@ def test_main_renders_clips(tmp_path: Path) -> None:
 
     # Create a minimal config.yaml
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("general:\n  output_dir: \"./outputs\"\n")
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
 
     # Mock subprocess.run to return success for all ffmpeg calls
     mock_result = MagicMock()
@@ -274,11 +268,11 @@ def test_main_renders_clips(tmp_path: Path) -> None:
         sys_module.exit = fake_exit
         os.chdir(tmp_path)
 
-        with patch.object(aftermovie.subprocess, "run", side_effect=mock_ffmpeg):
-            try:
-                aftermovie.main()
-            except SystemExit:
-                pass
+        with (
+            patch.object(aftermovie.subprocess, "run", side_effect=mock_ffmpeg),
+            contextlib.suppress(SystemExit),
+        ):
+            aftermovie.main()
     finally:
         sys_module.argv = original_argv
         sys_module.exit = original_exit
@@ -286,3 +280,37 @@ def test_main_renders_clips(tmp_path: Path) -> None:
 
     assert exit_code is None or exit_code == 0
 
+
+def test_convert_aspect_ratio_encoder_and_fallback(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.touch()
+    output = tmp_path / "out_9_16.mp4"
+
+    res_fail = MagicMock(returncode=1, stderr="nvenc error")
+    res_ok = MagicMock(returncode=0, stderr="")
+
+    # Call with h264_nvenc which fails on first try, then falls back to libx264
+    with patch.object(aftermovie.subprocess, "run", side_effect=[res_fail, res_ok]) as mock_run:
+        ok = aftermovie.convert_aspect_ratio(source, output, "9:16", encoder_name="h264_nvenc")
+        assert ok is True
+        assert mock_run.call_count == 2
+        # First call used h264_nvenc
+        assert "h264_nvenc" in mock_run.call_args_list[0][0][0]
+        # Second call used libx264 fallback
+        assert "libx264" in mock_run.call_args_list[1][0][0]
+
+
+def test_render_clip_with_fade_encoder_and_fallback(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    source.touch()
+    output = tmp_path / "faded.mp4"
+
+    res_fail = MagicMock(returncode=1, stderr="nvenc error")
+    res_ok = MagicMock(returncode=0, stderr="")
+
+    with patch.object(aftermovie.subprocess, "run", side_effect=[res_fail, res_ok]) as mock_run:
+        ok = aftermovie.render_clip_with_fade(source, 0.0, 5.0, output, encoder_name="h264_nvenc")
+        assert ok is True
+        assert mock_run.call_count == 2
+        assert "h264_nvenc" in mock_run.call_args_list[0][0][0]
+        assert "libx264" in mock_run.call_args_list[1][0][0]

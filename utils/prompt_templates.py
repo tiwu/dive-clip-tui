@@ -70,16 +70,23 @@ class DomainConfig:
 # =============================================================================
 
 VIDEO_CLASSIFICATION_PROMPT = (
-    "Analyze this video frame and classify the primary setting and domain.\n\n"
+    "Analyze this video frame and classify the primary setting, domain, and footage usability.\n\n"
     "Target domains:\n"
     "- 'underwater': Scuba diving, snorkeling, free diving, marine life, coral reefs, "
     "underwater wrecks, diver action, oceanic or aquatic environments.\n"
     "- 'motorcycle': Motorcycle, motorbike, scooter, riding, cockpit or handlebar POV, "
     "pavement, track, twisties, curves, group ride, highway or scenic road ride.\n"
     "- 'generic': Any other domain (e.g. action sports, hiking, travel, city, family, landscape).\n\n"
+    "Usability & Camera State:\n"
+    "- If the camera is inside a bag or pocket, lens is covered/black, upside down, tumbling, "
+    "dangling on a clip/lanyard, or showing only floor/empty darkness with no scene, "
+    "set 'usable': false and 'quality_score': 1.\n"
+    "- Otherwise set 'usable': true with a quality_score from 4 to 10.\n\n"
     "Return a JSON object with:\n"
     "- domain: string (one of 'underwater', 'motorcycle', 'generic')\n"
     "- confidence: float (0.0 to 1.0)\n"
+    "- usable: boolean (true if footage is normal/usable; false if in-bag, covered, upside-down, or dangling)\n"
+    "- quality_score: integer (1-10; 1-3 for in-bag/dangling/chaotic, 4+ for usable footage)\n"
     "- environment: string (brief note on setting, e.g. 'coral reef wall', 'mountain pass road')\n"
     "- primary_subjects: list of strings (main visible subjects/elements)\n"
 )
@@ -97,7 +104,7 @@ def build_classification_prompt(
         return VIDEO_CLASSIFICATION_PROMPT
 
     lines = [
-        "Analyze this video frame and classify the primary setting and domain.\n",
+        "Analyze this video frame and classify the primary setting, domain, and footage usability.\n",
         "Target domains:",
     ]
     for d in domain_names:
@@ -108,9 +115,16 @@ def build_classification_prompt(
 
     valid_domains = ", ".join(f"'{d}'" for d in domain_names)
     lines.extend([
-        "\nReturn a JSON object with:",
+        "\nUsability & Camera State:",
+        "- If the camera is inside a bag or pocket, lens is covered/black, upside down, tumbling, "
+        "dangling on a clip/lanyard, or showing only floor/empty darkness with no scene, "
+        "set 'usable': false and 'quality_score': 1.",
+        "- Otherwise set 'usable': true with a quality_score from 4 to 10.\n",
+        "Return a JSON object with:",
         f"- domain: string (one of {valid_domains})",
         "- confidence: float (0.0 to 1.0)",
+        "- usable: boolean (true if footage is normal/usable; false if in-bag, covered, upside-down, or dangling)",
+        "- quality_score: integer (1-10; 1-3 for in-bag/dangling/chaotic, 4+ for usable footage)",
         "- environment: string (brief note on setting)",
         "- primary_subjects: list of strings (main visible subjects/elements)",
     ])

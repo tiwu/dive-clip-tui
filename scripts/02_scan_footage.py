@@ -16,6 +16,8 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +44,14 @@ from utils.checkpoint import (
     remove_clip_checkpoint,
 )
 from utils.config import ConfigError, load_config
-from utils.ffmpeg_streamer import cleanup_work_dir, extract_frames, get_work_dir
+from utils.ffmpeg_streamer import (
+    calculate_sample_timestamps,
+    cleanup_work_dir,
+    extract_frames,
+    extract_targeted_frames,
+    get_work_dir,
+    probe_duration,
+)
 from utils.logging_setup import configure_logging, get_console
 from utils.models import (
     ClassificationOutput,
@@ -132,10 +141,32 @@ def extract_classification_frames(
     count: int = 3,
     scale: str | None = None,
     fps: float | None = None,
+    duration: float | None = None,
+    interval_seconds: float = 300.0,
+    max_count: int = 8,
 ) -> list[dict]:
-    """Extract representative frames for domain classification, bounded by count."""
+    """Extract representative frames for domain classification using fast targeted extraction."""
     if count <= 0:
         return []
+
+    dur = duration if duration is not None and duration > 0 else probe_duration(file_path)
+    if dur is not None and dur > 0:
+        timestamps = calculate_sample_timestamps(
+            duration=dur,
+            min_count=count,
+            interval_seconds=interval_seconds,
+            max_count=max_count,
+        )
+        targeted = extract_targeted_frames(
+            video_path=file_path,
+            output_dir=output_dir,
+            timestamps=timestamps,
+            scale=scale,
+        )
+        if targeted:
+            return targeted
+
+    # Fallback to extract_frames if duration probe or targeted seek fails
     actual_fps = fps or 0.25
     frames = extract_frames(
         video_path=file_path,
@@ -156,6 +187,30 @@ def aggregate_frame_classifications(
     """
     if not frame_results:
         return "generic", None, True, "no usable responses"
+
+    # Check usability flags and quality scores across sampled frames
+    usable_flags = [bool(item["usable"]) for item in frame_results if "usable" in item]
+    quality_scores = [
+        int(item["quality_score"])
+        for item in frame_results
+        if item.get("quality_score") is not None
+    ]
+
+    is_unusable = False
+    if usable_flags and len(usable_flags) >= 1:
+        unusable_ratio = (len(usable_flags) - sum(usable_flags)) / len(usable_flags)
+        if unusable_ratio >= 0.66 or (
+            quality_scores and (sum(quality_scores) / len(quality_scores)) <= 2.5
+        ):
+            is_unusable = True
+
+    if is_unusable:
+        return (
+            "unusable",
+            1.0,
+            False,
+            "unusable camera footage (inside bag, covered lens, or dangling)",
+        )
 
     domain_counts: dict[str, int] = {}
     domain_confidences: dict[str, list[float]] = {}
@@ -275,14 +330,26 @@ def classify_clip(
         if not matched_domain:
             matched_domain = "generic"
 
+        usable_val = bool(result.get("usable", True))
+        try:
+            q_score = (
+                int(result["quality_score"]) if result.get("quality_score") is not None else None
+            )
+        except ValueError, TypeError:
+            q_score = None
+
         usable_results.append({
             "domain": matched_domain,
             "confidence": max(0.0, min(1.0, confidence)),
+            "usable": usable_val,
+            "quality_score": q_score,
         })
 
     winning_domain, mean_conf, is_uncertain, reason = aggregate_frame_classifications(
         usable_results
     )
+
+    usable_clip = winning_domain != "unusable"
 
     return ClipClassification(
         clip_id=clip_id,
@@ -292,6 +359,7 @@ def classify_clip(
         confidence=mean_conf,
         uncertain=is_uncertain,
         reason=reason,
+        usable=usable_clip,
     )
 
 
@@ -508,6 +576,8 @@ def process_clip(
     checkpoints_dir: Path | None = None,
     resume: bool = False,
     phase0_stats: Phase0Stats | None = None,
+    prefetched_coarse_frames: list[dict] | None = None,
+    on_coarse_start: Callable[[], None] | None = None,
 ) -> list[RefinedDetection]:
     """Process a single clip through 3-stage domain-aware scanning.
 
@@ -544,6 +614,16 @@ def process_clip(
         if resume and checkpoint_file.exists():
             checkpoint = ClipScanCheckpoint.load(checkpoint_file)
             if checkpoint is not None:
+                if checkpoint.pass_stage == "completed":
+                    if checkpoint.detected_domain == "unusable":
+                        logger.info(
+                            "Skipping %s (marked unusable in checkpoint)", clip["file_name"]
+                        )
+                        cleanup_work_dir(clip_work_dir)
+                        return []
+                    logger.info("Skipping %s (already completed in checkpoint)", clip["file_name"])
+                    cleanup_work_dir(clip_work_dir)
+                    return checkpoint.refined_detections
                 logger.info(
                     "Resumed %s from intra-clip checkpoint (stage=%s, domain=%s, %d coarse frames evaluated)",
                     clip["file_name"],
@@ -573,6 +653,8 @@ def process_clip(
     if classify_clips is None:
         classify_clips = "auto" if configured_domain == "auto" else "off"
     classify_frames_count = max(1, int(scan_params.get("classify_frames_count", 3)))
+    classify_interval_seconds = float(scan_params.get("classify_interval_seconds", 300.0))
+    classify_frames_max = int(scan_params.get("classify_frames_max", 8))
 
     detected_domain: str | None = None
     if checkpoint is not None and checkpoint.detected_domain:
@@ -582,14 +664,14 @@ def process_clip(
             detected_domain,
             clip["file_name"],
         )
-    elif configured_domain and configured_domain != "auto":
+    elif configured_domain and configured_domain != "auto" and classify_clips != "always":
         detected_domain = configured_domain
         logger.info(
             "[Pass 0] Using configured domain '%s' for %s",
             detected_domain,
             clip["file_name"],
         )
-    elif clip.get("domain"):
+    elif clip.get("domain") and classify_clips != "always":
         detected_domain = clip["domain"]
         logger.info(
             "[Pass 0] Using clip manifest domain '%s' for %s",
@@ -606,72 +688,34 @@ def process_clip(
                 clip["file_name"],
             )
 
-    # ---------- Pass 1: Coarse scan setup ----------
-    candidate_windows: list[tuple[float, float]] = []
-    coarse_hits: list[tuple[float, tuple[float, float], str, str, float]] = []
-    coarse_confidences: list[float] = []
-    coarse_detected = 0
-    coarse_failures = 0
-    coarse_elapsed_total = 0.0
-
-    skip_coarse_inference = checkpoint is not None and checkpoint.pass_stage in (
-        "coarse_done",
-        "fine",
-        "completed",
+    # Execute Pass 0 VLM classification if domain is still unknown or forced via 'always'
+    need_classification = (classify_clips == "always") or (
+        detected_domain is None and classify_clips != "off"
     )
-    need_classification = False
+    if need_classification:
+        logger.info("[Pass 0] Extracting frames @ %.1f FPS: %s", coarse_fps, clip["file_name"])
+        if state is not None:
+            state.set_activity(f"scan: {clip['file_name']} (pass 0 extract, {coarse_fps} FPS)")
 
-    coarse_frames: list[dict] = []
-    if skip_coarse_inference and checkpoint is not None:
-        logger.info(
-            "[Pass 1] Skipping coarse scan for %s (already completed in checkpoint)",
-            clip["file_name"],
-        )
-        candidate_windows = list(checkpoint.candidate_windows)
-        coarse_confidences = list(checkpoint.coarse_confidences)
-        coarse_detected = checkpoint.coarse_detected
-        coarse_failures = checkpoint.coarse_failures
-        coarse_elapsed_total = checkpoint.coarse_elapsed_total
-        if phase1_stats is not None:
-            phase1_stats.frames_analyzed += checkpoint.coarse_frames_analyzed
-            phase1_stats.detections_detected += coarse_detected
-        coarse_frames_count = checkpoint.coarse_frames_analyzed
-    else:
-        need_classification = detected_domain is None and classify_clips != "off"
-        if need_classification:
-            logger.info("[Pass 0] Extracting frames @ %.1f FPS: %s", coarse_fps, clip["file_name"])
-            if state is not None:
-                state.set_activity(f"scan: {clip['file_name']} (pass 0 extract, {coarse_fps} FPS)")
-        else:
-            logger.info(
-                "[Pass 1] Coarse scan @ %.1f FPS (%s): %s",
-                coarse_fps,
-                detected_domain or "underwater",
-                clip["file_name"],
-            )
-            if state is not None:
-                state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
-
-        coarse_frames = extract_frames(
-            video_path=file_path,
-            output_dir=clip_work_dir / "coarse",
-            fps=coarse_fps,
+        pass0_dir = clip_work_dir / "pass0"
+        sample_frames = extract_classification_frames(
+            file_path=file_path,
+            output_dir=pass0_dir,
+            count=classify_frames_count,
             scale=coarse_scale,
+            fps=coarse_fps,
+            duration=clip.get("duration"),
+            interval_seconds=classify_interval_seconds,
+            max_count=classify_frames_max,
         )
-        coarse_frames_count = len(coarse_frames)
-        if phase1_stats is not None:
-            phase1_stats.frames_extracted += len(coarse_frames)
+
         logger.info(
-            "%s Extracted %d frames from %s",
-            "[Pass 0]" if need_classification else "[Pass 1]",
-            len(coarse_frames),
+            "[Pass 0] Extracted %d frames from %s",
+            len(sample_frames),
             clip["file_name"],
         )
 
-        # Execute Pass 0 VLM classification if domain is still unknown
-        if detected_domain is None and classify_clips != "off" and coarse_frames:
-            sample_frames = select_representative_frames(coarse_frames, classify_frames_count)
-
+        if sample_frames:
             logger.info(
                 "[Pass 0] Classifying domain for %s across %d sample frames...",
                 clip["file_name"],
@@ -697,12 +741,110 @@ def process_clip(
                 clip["file_name"],
                 detected_domain,
             )
+        cleanup_work_dir(pass0_dir)
+
+    # Check for unusable or non-target footage and early-exit to avoid full decode
+    if detected_domain == "unusable":
+        msg = f"⚡ Skipped {clip['file_name']}: unusable camera footage (inside bag / lens covered / dangling)"
+        logger.warning(msg)
+        get_console().print(f"[yellow]{msg}[/yellow]")
+        if phase0_stats is not None:
+            phase0_stats.clips_unusable += 1
+        if checkpoint is not None:
+            checkpoint.detected_domain = "unusable"
+            checkpoint.pass_stage = "completed"
+            if checkpoint_file is not None:
+                checkpoint.save_atomic(checkpoint_file)
+        cleanup_work_dir(clip_work_dir)
+        return []
+
+    if configured_domain and configured_domain != "auto" and detected_domain != configured_domain:
+        msg = f"⚡ Skipped {clip['file_name']}: non-target domain '{detected_domain}' (configured: '{configured_domain}')"
+        logger.warning(msg)
+        get_console().print(f"[yellow]{msg}[/yellow]")
+        if phase0_stats is not None:
+            phase0_stats.clips_skipped_domain += 1
+        if checkpoint is not None:
+            checkpoint.detected_domain = detected_domain
+            checkpoint.pass_stage = "completed"
+            if checkpoint_file is not None:
+                checkpoint.save_atomic(checkpoint_file)
+        cleanup_work_dir(clip_work_dir)
+        return []
 
     if detected_domain is None:
         detected_domain = "underwater"
 
     if checkpoint is not None:
         checkpoint.detected_domain = detected_domain
+
+    # ---------- Pass 1: Coarse scan setup ----------
+    candidate_windows: list[tuple[float, float]] = []
+    coarse_hits: list[tuple[float, tuple[float, float], str, str, float]] = []
+    coarse_confidences: list[float] = []
+    coarse_detected = 0
+    coarse_failures = 0
+    coarse_elapsed_total = 0.0
+
+    skip_coarse_inference = checkpoint is not None and checkpoint.pass_stage in (
+        "coarse_done",
+        "fine",
+        "completed",
+    )
+
+    coarse_frames: list[dict] = []
+    if skip_coarse_inference and checkpoint is not None:
+        logger.info(
+            "[Pass 1] Skipping coarse scan for %s (already completed in checkpoint)",
+            clip["file_name"],
+        )
+        candidate_windows = list(checkpoint.candidate_windows)
+        coarse_confidences = list(checkpoint.coarse_confidences)
+        coarse_detected = checkpoint.coarse_detected
+        coarse_failures = checkpoint.coarse_failures
+        coarse_elapsed_total = checkpoint.coarse_elapsed_total
+        if phase1_stats is not None:
+            phase1_stats.frames_analyzed += checkpoint.coarse_frames_analyzed
+            phase1_stats.detections_detected += coarse_detected
+        coarse_frames_count = checkpoint.coarse_frames_analyzed
+    else:
+        logger.info(
+            "[Pass 1] Coarse scan @ %.1f FPS (%s): %s",
+            coarse_fps,
+            detected_domain,
+            clip["file_name"],
+        )
+        if state is not None:
+            state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
+
+        if prefetched_coarse_frames:
+            coarse_frames = prefetched_coarse_frames
+            logger.info(
+                "[Pass 1] Using %d prefetched coarse frames for %s",
+                len(coarse_frames),
+                clip["file_name"],
+            )
+        else:
+            coarse_frames = extract_frames(
+                video_path=file_path,
+                output_dir=clip_work_dir / "coarse",
+                fps=coarse_fps,
+                scale=coarse_scale,
+            )
+        coarse_frames_count = len(coarse_frames)
+        if phase1_stats is not None:
+            phase1_stats.frames_extracted += len(coarse_frames)
+        logger.info(
+            "[Pass 1] Extracted %d frames from %s",
+            len(coarse_frames),
+            clip["file_name"],
+        )
+
+        if on_coarse_start is not None:
+            try:
+                on_coarse_start()
+            except Exception as exc:
+                logger.warning("on_coarse_start callback failed: %s", exc)
 
     dom_config = registry.get(
         detected_domain, registry.get("underwater", BUILTIN_DOMAINS["underwater"])
@@ -712,16 +854,6 @@ def process_clip(
     coarse_prompt = matched_template.coarse_prompt if matched_template else dom_config.coarse_prompt
 
     if not skip_coarse_inference:
-        if need_classification:
-            logger.info(
-                "[Pass 1] Coarse scan @ %.1f FPS (%s): %s",
-                coarse_fps,
-                detected_domain,
-                clip["file_name"],
-            )
-            if state is not None:
-                state.set_activity(f"scan: {clip['file_name']} (pass 1 coarse, {coarse_fps} FPS)")
-
         task_id = None
         if progress is not None and coarse_frames:
             task_id = progress.add_task(
@@ -1164,6 +1296,12 @@ def process_clip(
         fine_elapsed_total,
     )
 
+    if checkpoint is not None:
+        checkpoint.pass_stage = "completed"
+        checkpoint.refined_detections = list(all_detections)
+        if checkpoint_file is not None:
+            checkpoint.save_atomic(checkpoint_file)
+
     cleanup_work_dir(clip_work_dir)
     return all_detections
 
@@ -1444,6 +1582,18 @@ def main() -> None:
             except Exception as exc:
                 logger.debug("Could not restore previous scan_stats: %s", exc)
 
+    scan_params = config.get("scan_parameters", {})
+    prefetch_enabled = bool(scan_params.get("prefetch_coarse", True))
+    coarse_fps = scan_params.get("coarse_fps", 0.5)
+    coarse_scale = scan_params.get("coarse_scale", "640:-2")
+
+    active_prefetch: dict[str, Any] | None = None
+    prefetch_executor = (
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch_worker")
+        if prefetch_enabled and len(clips) > 1
+        else None
+    )
+
     try:
         with create_scan_progress() as progress:
             overall_task = (
@@ -1461,6 +1611,41 @@ def main() -> None:
                         progress.advance(overall_task)
                     continue
 
+                clip_cid = get_clip_id(clip)
+                prefetched_frames: list[dict] | None = None
+                if active_prefetch and active_prefetch.get("clip_id") == clip_cid:
+                    try:
+                        prefetched_frames = active_prefetch["future"].result()
+                    except Exception as exc:
+                        logger.warning(
+                            "Error waiting for prefetch future for %s: %s", clip_name, exc
+                        )
+                        prefetched_frames = None
+                    active_prefetch = None
+
+                def on_coarse_start_cb(idx=index):
+                    nonlocal active_prefetch
+                    if prefetch_executor is None or idx >= len(clips):
+                        return
+                    next_c = clips[idx]
+                    next_cid = get_clip_id(next_c)
+                    next_dir = work_dir / next_cid / "coarse"
+                    try:
+                        future = prefetch_executor.submit(
+                            extract_frames,
+                            video_path=next_c["file_path"],
+                            output_dir=next_dir,
+                            fps=coarse_fps,
+                            scale=coarse_scale,
+                        )
+                        active_prefetch = {"clip_id": next_cid, "future": future}
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to schedule coarse prefetch for %s: %s",
+                            next_c.get("file_name"),
+                            exc,
+                        )
+
                 logger.info("Processing %d/%d: %s", index, len(clips), clip_name)
                 if state is not None:
                     state.set_activity(f"scan: starting {clip_name} ({index}/{len(clips)})")
@@ -1476,6 +1661,8 @@ def main() -> None:
                     checkpoints_dir=checkpoints_dir,
                     resume=args.resume,
                     phase0_stats=p0_stats,
+                    prefetched_coarse_frames=prefetched_frames,
+                    on_coarse_start=on_coarse_start_cb,
                 )
                 refined.detections.extend(detections)
                 refined.total_detections += len(detections)
@@ -1575,6 +1762,8 @@ def main() -> None:
             state.set_activity("scan: interrupted by user")
         sys.exit(130)
     finally:
+        if prefetch_executor is not None:
+            prefetch_executor.shutdown(wait=False, cancel_futures=True)
         cleanup_work_dir(work_dir)
 
 

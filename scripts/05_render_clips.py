@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.checkpoint import PipelineState
 from utils.config import ConfigError, load_config
+from utils.encoder import get_fallback_encoder, get_video_encoder
 from utils.logging_setup import configure_logging
 from utils.signals import setup_signal_handlers
 
@@ -72,11 +73,14 @@ def render_clip(
     end_time: float,
     output_path: Path,
     log_to_console: bool = True,
+    encoder_name: str | None = None,
+    encoder_args: list[str] | None = None,
 ) -> bool:
     """Extract a time window from a video file as an MP4 clip.
 
-    Renders to a temporary file, validates output with ffprobe, and
-    atomically publishes to output_path. Returns True on success, False on failure.
+    Renders to a temporary file using fast input seeking and hardware acceleration,
+    validates output with ffprobe, and atomically publishes to output_path.
+    Returns True on success, False on failure.
     """
     extra = {"no_console": True} if not log_to_console else {}
     duration = end_time - start_time
@@ -92,19 +96,25 @@ def render_clip(
     temp_path = output_path.with_name(f".tmp_{output_path.name}")
     temp_path.unlink(missing_ok=True)
 
+    if encoder_args is None:
+        enc_name, enc_args = get_video_encoder(encoder_name or "auto")
+    else:
+        enc_name = encoder_name or "custom"
+        enc_args = encoder_args
+
+    # Input seeking: place -ss and -to before -i for fast keyframe seeking
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
-        "-i",
-        str(source_path),
         "-ss",
         str(start_time),
         "-to",
         str(end_time),
-        "-c:v",
-        "libx264",
+        "-i",
+        str(source_path),
+        *enc_args,
         "-c:a",
         "aac",
         "-movflags",
@@ -133,6 +143,26 @@ def render_clip(
 
     if result.returncode != 0:
         temp_path.unlink(missing_ok=True)
+        fallback = get_fallback_encoder(enc_name)
+        if fallback:
+            fb_name, fb_args = fallback
+            logger.warning(
+                "FFmpeg failed with %s for %s, falling back to %s: %s",
+                enc_name,
+                output_path.name,
+                fb_name,
+                result.stderr.strip()[:200],
+                extra=extra,
+            )
+            return render_clip(
+                source_path,
+                start_time,
+                end_time,
+                output_path,
+                log_to_console=log_to_console,
+                encoder_name=fb_name,
+                encoder_args=fb_args,
+            )
         logger.warning(
             "FFmpeg failed for %s: %s",
             output_path.name,
@@ -162,6 +192,8 @@ def render_detections(
     log_to_console: bool = True,
     stop_event: threading.Event | None = None,
     validate_existing: bool = True,
+    rendered_cache: set[str] | None = None,
+    encoder_name: str | None = None,
 ) -> tuple[int, int]:
     """Render detection windows into standalone MP4 clips.
 
@@ -201,6 +233,9 @@ def render_detections(
         output_name = f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_{subject}_q{quality}.mp4"
         output_path = highlights_dir / output_name
 
+        if rendered_cache is not None and output_name in rendered_cache:
+            continue
+
         if output_path.exists():
             if output_path.stat().st_size == 0:
                 logger.warning(
@@ -221,6 +256,8 @@ def render_detections(
                 )
                 output_path.unlink(missing_ok=True)
             else:
+                if rendered_cache is not None:
+                    rendered_cache.add(output_name)
                 logger.debug(
                     "  [%d/%d] SKIP: already rendered: %s",
                     i,
@@ -246,19 +283,17 @@ def render_detections(
         logger.info(msg, extra=extra)
 
         clip_start = time.perf_counter()
-        if log_to_console:
-            ok = render_clip(source_path, start_time, end_time, output_path)
-        else:
-            ok = render_clip(
-                source_path,
-                start_time,
-                end_time,
-                output_path,
-                log_to_console=False,
-            )
+        kwargs: dict[str, Any] = {}
+        if not log_to_console:
+            kwargs["log_to_console"] = False
+        if encoder_name is not None:
+            kwargs["encoder_name"] = encoder_name
+        ok = render_clip(source_path, start_time, end_time, output_path, **kwargs)
 
         if ok:
             rendered += 1
+            if rendered_cache is not None:
+                rendered_cache.add(output_name)
             logger.debug(
                 "  [%d/%d] rendered in %.1fs: %s",
                 i,

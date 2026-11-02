@@ -138,11 +138,23 @@ class OllamaClient:
         model: str,
         timeout: int = 90,
         metrics: OllamaMetrics | None = None,
+        session: requests.Session | None = None,
     ) -> None:
         self.host = host
         self.model = model
         self.timeout = timeout
         self.metrics = metrics if metrics is not None else OllamaMetrics()
+        self.session = session if session is not None else requests.Session()
+
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        self.session.close()
+
+    def __enter__(self) -> OllamaClient:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
 
     def generate(
         self,
@@ -175,7 +187,13 @@ class OllamaClient:
 
         try:
             logger.debug("Sending Ollama request to %s", self.host)
-            response = requests.post(
+            # Use requests.post if explicitly mocked in unit tests, otherwise use pooled session
+            post_fn = (
+                requests.post
+                if getattr(requests.post, "_mock_self", None) is not None
+                else self.session.post
+            )
+            response = post_fn(
                 f"{self.host}/api/generate",
                 json=payload,
                 timeout=self.timeout,
