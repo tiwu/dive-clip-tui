@@ -5,13 +5,14 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
 from scripts.dive_clip import build_parser, cmd_classify, cmd_scan
-from utils.models import ClipClassification
+from utils.models import ClassificationOutput, ClipClassification
 
 # Dynamically load scripts/02_scan_footage.py
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -628,3 +629,258 @@ def test_scan_candidate_isolation() -> None:
     assert set(registry.keys()).issubset(set(BUILTIN_DOMAINS.keys()))
     t_generic = scan.resolve_template_for_subject("any subject", domain="generic")
     assert t_generic.name == GENERIC_HIGHLIGHT_TEMPLATE.name
+
+
+def test_build_parser_classify_resume() -> None:
+    """build_parser should accept --resume for classify subcommand."""
+    parser = build_parser()
+    args1 = parser.parse_args(["classify", "--resume"])
+    assert args1.resume is True
+
+    args2 = parser.parse_args(["classify", "--resume", "run-20261102-120000"])
+    assert args2.resume == "run-20261102-120000"
+
+
+def test_classify_footage_incremental_save(tmp_path: Path) -> None:
+    """classify_footage should atomically write intermediate results after each clip."""
+    clips = [
+        {"file_name": "vid1.mp4", "file_path": str(tmp_path / "vid1.mp4"), "duration": 10.0},
+        {"file_name": "vid2.mp4", "file_path": str(tmp_path / "vid2.mp4"), "duration": 10.0},
+    ]
+    for c in clips:
+        Path(c["file_path"]).touch()
+
+    out_file = tmp_path / "classifications.json"
+    saved_snapshots: list[int] = []
+
+    mock_classifications = [
+        ClipClassification(
+            clip_id="vid1",
+            file_name="vid1.mp4",
+            file_path=str(tmp_path / "vid1.mp4"),
+            domain="underwater",
+            confidence=0.9,
+            uncertain=False,
+        ),
+        ClipClassification(
+            clip_id="vid2",
+            file_name="vid2.mp4",
+            file_path=str(tmp_path / "vid2.mp4"),
+            domain="generic",
+            confidence=0.8,
+            uncertain=False,
+        ),
+    ]
+
+    with (
+        patch.object(scan, "extract_classification_frames") as mock_extract,
+        patch.object(scan, "classify_clip") as mock_classify,
+    ):
+        mock_extract.return_value = ["frame1.jpg"]
+
+        def side_effect_classify(clip: Any, **kwargs: Any) -> ClipClassification:
+            c = (
+                mock_classifications[0]
+                if clip["file_name"] == "vid1.mp4"
+                else mock_classifications[1]
+            )
+            return c
+
+        mock_classify.side_effect = side_effect_classify
+
+        # Record whenever out_file is written
+        orig_save = getattr(scan, "save_classifications_atomic", None)
+
+        def spy_save(path: Any, output_obj: Any) -> None:
+            if orig_save:
+                orig_save(path, output_obj)
+            else:
+                Path(path).write_text(output_obj.model_dump_json(indent=2), encoding="utf-8")
+            if Path(path) == out_file:
+                saved_snapshots.append(output_obj.total_clips)
+
+        with patch.object(scan, "save_classifications_atomic", side_effect=spy_save):
+            results = scan.classify_footage(clips, {}, output_file=out_file)
+
+    assert len(results) == 2
+    assert saved_snapshots == [1, 2]
+    assert out_file.exists()
+    final_data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert final_data["total_clips"] == 2
+    assert len(final_data["classifications"]) == 2
+
+
+def test_classify_footage_resume(tmp_path: Path) -> None:
+    """classify_footage should skip already-classified clips when resume=True."""
+    clips = [
+        {"file_name": "vid1.mp4", "file_path": str(tmp_path / "vid1.mp4"), "duration": 10.0},
+        {"file_name": "vid2.mp4", "file_path": str(tmp_path / "vid2.mp4"), "duration": 10.0},
+    ]
+    for c in clips:
+        Path(c["file_path"]).touch()
+
+    out_file = tmp_path / "classifications.json"
+    initial_output = ClassificationOutput(
+        total_clips=1,
+        classifications=[
+            ClipClassification(
+                clip_id="vid1",
+                file_name="vid1.mp4",
+                file_path=str(tmp_path / "vid1.mp4"),
+                domain="underwater",
+                confidence=0.95,
+                uncertain=False,
+            )
+        ],
+    )
+    out_file.write_text(initial_output.model_dump_json(indent=2), encoding="utf-8")
+
+    with (
+        patch.object(scan, "extract_classification_frames") as mock_extract,
+        patch.object(scan, "classify_clip") as mock_classify,
+    ):
+        mock_extract.return_value = ["frame1.jpg"]
+        mock_classify.return_value = ClipClassification(
+            clip_id="vid2",
+            file_name="vid2.mp4",
+            file_path=str(tmp_path / "vid2.mp4"),
+            domain="motorcycle",
+            confidence=0.85,
+            uncertain=False,
+        )
+
+        results = scan.classify_footage(clips, {}, output_file=out_file, resume=True)
+
+    # vid1 was resumed, so mock_classify was only called once (for vid2)
+    assert mock_classify.call_count == 1
+    assert len(results) == 2
+    assert results[0].domain == "underwater"
+    assert results[1].domain == "motorcycle"
+
+    final_data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert final_data["total_clips"] == 2
+
+
+def test_cmd_classify_creates_run_dir_and_symlink(tmp_path: Path) -> None:
+    """cmd_classify should create runs/run-<timestamp> and update latest symlink."""
+    footage_dir = tmp_path / "footage"
+    footage_dir.mkdir()
+    (footage_dir / "vid1.mp4").touch()
+
+    output_dir = tmp_path / "outputs"
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_dir}"\n', encoding="utf-8")
+
+    fake_clips = [{"file_name": "vid1.mp4", "file_path": str(footage_dir / "vid1.mp4")}]
+    mock_classification = [
+        ClipClassification(
+            clip_id="vid1",
+            file_name="vid1.mp4",
+            file_path=str(footage_dir / "vid1.mp4"),
+            domain="underwater",
+            confidence=0.9,
+            uncertain=False,
+        )
+    ]
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "classify",
+        "--input",
+        str(footage_dir),
+        "--output",
+        str(output_dir),
+        "--config",
+        str(config_file),
+    ])
+
+    with (
+        patch("scripts.dive_clip._load_ingest_module") as mock_ingest_loader,
+        patch("scripts.dive_clip._load_scan_module") as mock_scan_loader,
+    ):
+        mock_ingest = MagicMock()
+        mock_ingest.ingest_folder.return_value = fake_clips
+        mock_ingest_loader.return_value = mock_ingest
+
+        mock_scan = MagicMock()
+        mock_scan.classify_footage.return_value = mock_classification
+        mock_scan_loader.return_value = mock_scan
+
+        rc = cmd_classify(args)
+
+    assert rc == 0
+    runs_dir = output_dir / "runs"
+    assert runs_dir.exists()
+    run_dirs = list(runs_dir.glob("run-*"))
+    assert len(run_dirs) == 1
+    active_run = run_dirs[0]
+
+    assert (active_run / "classifications.json").exists()
+    assert (active_run / "manifest.json").exists()
+    assert (active_run / "classify.log").exists()
+
+    # latest symlink or latest.txt
+    latest = output_dir / "latest"
+    assert latest.exists()
+    assert (latest / "classifications.json").exists()
+
+    # root classifications.json copy
+    assert (output_dir / "classifications.json").exists()
+
+
+def test_cmd_classify_resume_existing_run(tmp_path: Path) -> None:
+    """cmd_classify with --resume should resolve and resume in the existing run directory."""
+    footage_dir = tmp_path / "footage"
+    footage_dir.mkdir()
+    (footage_dir / "vid1.mp4").touch()
+
+    output_dir = tmp_path / "outputs"
+    existing_run = output_dir / "runs" / "run-20261102-100000"
+    existing_run.mkdir(parents=True)
+    (existing_run / "classifications.json").write_text(
+        '{"total_clips": 1, "classifications": []}', encoding="utf-8"
+    )
+
+    # Point latest to existing_run
+    latest = output_dir / "latest"
+    latest.symlink_to(Path("runs/run-20261102-100000"))
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_dir}"\n', encoding="utf-8")
+
+    fake_clips = [{"file_name": "vid1.mp4", "file_path": str(footage_dir / "vid1.mp4")}]
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "classify",
+        "--input",
+        str(footage_dir),
+        "--output",
+        str(output_dir),
+        "--resume",
+        "--config",
+        str(config_file),
+    ])
+
+    with (
+        patch("scripts.dive_clip._load_ingest_module") as mock_ingest_loader,
+        patch("scripts.dive_clip._load_scan_module") as mock_scan_loader,
+    ):
+        mock_ingest = MagicMock()
+        mock_ingest.ingest_folder.return_value = fake_clips
+        mock_ingest_loader.return_value = mock_ingest
+
+        mock_scan = MagicMock()
+        mock_scan.classify_footage.return_value = []
+        mock_scan_loader.return_value = mock_scan
+
+        rc = cmd_classify(args)
+
+    assert rc == 0
+    # Did not create a new run directory, reused existing
+    run_dirs = list((output_dir / "runs").glob("run-*"))
+    assert len(run_dirs) == 1
+    assert run_dirs[0].name == "run-20261102-100000"
+    mock_scan.classify_footage.assert_called_once()
+    _, kwargs = mock_scan.classify_footage.call_args
+    assert kwargs.get("resume") is True

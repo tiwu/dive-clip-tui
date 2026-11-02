@@ -217,6 +217,7 @@ def archive_run_artifacts(
     log_file: Path | str | None = None,
     stats_path: Path | str | None = None,
     aftermovie_path: Path | str | None = None,
+    classifications_path: Path | str | None = None,
 ) -> dict[str, Path]:
     """Archive available pipeline artifacts into `run_dir`.
 
@@ -236,6 +237,12 @@ def archive_run_artifacts(
         dest = archive_file(detections_path, target_dir, "detections_refined.json")
         if dest:
             archived["detections"] = dest
+
+    if classifications_path is not None:
+        src_classifications = Path(classifications_path)
+        dest = archive_file(src_classifications, target_dir, "classifications.json")
+        if dest:
+            archived["classifications"] = dest
 
     if stats_path is not None:
         dest = archive_file(stats_path, target_dir, "run_stats.json")

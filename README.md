@@ -123,10 +123,12 @@ Custom domains and prompt templates can be configured or extended directly under
 To quickly classify an unorganized folder of unknown videos without running highlight detection:
 
 ```bash
-uv run dive-clip classify --input ./footage --output ./outputs/classifications.json
+uv run dive-clip classify --input ./footage --output ./outputs
 ```
 
 Pass 0 samples targeted representative frames dynamically based on clip duration (configured via `scan_parameters.classify_frames_count`, default 3, plus 1 per 5 min up to `classify_frames_max`, default 8) to identify the domain and verify usability without scanning the entire video. Results display each clip's domain, mean confidence, usability status, and uncertainty flags (flagged when frames disagree, when confidence is below 0.6, or when VLM responses are unusable).
+
+Outputs are organized into standard timestamped runs (`<output>/runs/run-<timestamp>/classifications.json`) with an updated `<output>/latest` symlink and mirrored to `<output>/classifications.json`. Results are persisted incrementally and atomically after each clip completes, and interrupted runs can be resumed at any time with `--resume`.
 
 To synthesize a reviewable prompt candidate for `generic` clips, add `--specialize-generic` (optionally `--candidate-output <path.json>`; defaults to `prompt_candidates.json` next to the output). Candidates are never used by `dive-clip scan` until you copy them into your config yourself.
 

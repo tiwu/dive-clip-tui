@@ -6,6 +6,11 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add timestamped run directory archiving (`runs/run-YYYYMMDD-HHMMSS/`) and `latest` symlink creation to `dive-clip classify`.
+- Add atomic incremental result saving after each clip during domain classification.
+- Add `--resume` support to `dive-clip classify` to resume interrupted classification runs.
+
 ## [0.23.0] - 2026-11-02
 
 ### Added
