@@ -1100,6 +1100,9 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 def cmd_classify(args: argparse.Namespace) -> int:
     """Run standalone Pass 0 domain classification on video footage."""
+    if args.candidate_output and not args.specialize_generic:
+        logger.error("--candidate-output requires --specialize-generic.")
+        return 1
     try:
         general = load_general_config(args.config)
         config = load_config(args.config)
@@ -1179,8 +1182,6 @@ def cmd_classify(args: argparse.Namespace) -> int:
         if generic_clips:
             if args.candidate_output:
                 cand_p = Path(args.candidate_output)
-            elif isinstance(args.specialize_generic, str):
-                cand_p = Path(args.specialize_generic)
             else:
                 cand_p = output_file.parent / "prompt_candidates.json"
 
@@ -1196,16 +1197,19 @@ def cmd_classify(args: argparse.Namespace) -> int:
             candidate = PromptCandidate.model_validate(
                 create_prompt_candidate_for_generic(inferred_context)
             )
+            candidates = [candidate]
             candidate_output = PromptCandidateOutput(
-                name=candidate.name,
+                name=candidates[0].name,
                 inferred_context=inferred_context,
-                coarse_prompt=candidate.coarse_prompt,
-                fine_prompt=candidate.fine_prompt,
-                recommended_threshold=candidate.recommended_threshold,
-                total_candidates=1,
-                candidates=[candidate],
+                coarse_prompt=candidates[0].coarse_prompt,
+                fine_prompt=candidates[0].fine_prompt,
+                recommended_threshold=candidates[0].recommended_threshold,
+                total_candidates=len(candidates),
+                candidates=candidates,
             )
-            candidate_file.write_text(candidate_output.model_dump_json(indent=2), encoding="utf-8")
+            tmp_file = candidate_file.with_suffix(".json.tmp")
+            tmp_file.write_text(candidate_output.model_dump_json(indent=2), encoding="utf-8")
+            tmp_file.replace(candidate_file)
             logger.info("Saved generic prompt candidate(s) to %s", candidate_file)
         else:
             logger.info("No generic clips found; prompt candidates not generated.")
@@ -1347,11 +1351,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     classify_p.add_argument(
         "--specialize-generic",
-        nargs="?",
-        const=True,
-        default=False,
-        metavar="PATH",
-        help="Synthesize candidate coarse and fine prompt templates for generic footage (optionally specify output path)",
+        action="store_true",
+        help="Synthesize candidate coarse and fine prompt templates for generic footage",
     )
     classify_p.add_argument(
         "--candidate-output",

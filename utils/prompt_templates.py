@@ -1215,6 +1215,18 @@ def _slugify(text: str) -> str:
     return clean or "highlight"
 
 
+_CANDIDATE_COLOR = "Magenta"
+_CANDIDATE_THRESHOLD = 0.65  # Default mid-range confidence; tune per candidate during review.
+_MAX_CONTEXT_CHARS = 60
+_MAX_CONTEXT_SUBJECTS = 5
+
+
+def _sanitize_context_text(value: Any) -> str:
+    """Neutralize model-derived text before interpolating it into prompts (injection guard)."""
+    text = re.sub(r"[^A-Za-z0-9 ,'/&-]+", " ", str(value or ""))
+    return re.sub(r"\s+", " ", text).strip()[:_MAX_CONTEXT_CHARS]
+
+
 def infer_generic_context(
     records: list[Any] | Any,
 ) -> dict[str, Any]:
@@ -1357,19 +1369,25 @@ def create_prompt_candidate_for_generic(
     else:
         context = infer_generic_context(context_or_record)
 
-    environment: str = str(context.get("environment") or "").strip()
+    environment: str = _sanitize_context_text(context.get("environment"))
     raw_subjects = context.get("primary_subjects") or []
     if isinstance(raw_subjects, str):
-        primary_subjects = [s.strip() for s in raw_subjects.split(",") if s.strip()]
-    elif isinstance(raw_subjects, list):
-        primary_subjects = [str(s).strip() for s in raw_subjects if str(s).strip()]
-    else:
-        primary_subjects = []
+        raw_subjects = raw_subjects.split(",")
+    elif not isinstance(raw_subjects, list):
+        raw_subjects = []
+    primary_subjects = []
+    for raw in raw_subjects:
+        cleaned = _sanitize_context_text(raw)
+        if cleaned and cleaned not in primary_subjects:
+            primary_subjects.append(cleaned)
+    primary_subjects = primary_subjects[:_MAX_CONTEXT_SUBJECTS]
 
     raw_slug = candidate_name or context.get("template_slug") or "generic_highlight"
     name = _slugify(str(raw_slug))
     if not name.startswith("generic"):
         name = f"generic_{name}"
+    if name in {t.name for d in BUILTIN_DOMAINS.values() for t in d.templates}:
+        name = f"{name}_candidate"
 
     if primary_subjects:
         subjects_str = ", ".join(primary_subjects[:3])
@@ -1438,10 +1456,10 @@ def create_prompt_candidate_for_generic(
         "domain": "generic",
         "coarse_prompt": coarse_prompt,
         "fine_prompt": fine_prompt,
-        "recommended_threshold": 0.65,
+        "recommended_threshold": _CANDIDATE_THRESHOLD,
         "keywords": keywords_list,
         "system_prompt": system_prompt,
-        "color": "Magenta",
+        "color": _CANDIDATE_COLOR,
         "status": "candidate",
         "environment": environment,
         "primary_subjects": primary_subjects,

@@ -112,8 +112,8 @@ class PromptCandidate(BaseModel):
     system_prompt: str = ""
     color: str = "Magenta"
     status: str = "candidate"
-    environment: str = ""
-    primary_subjects: list[str] = Field(default_factory=list)
+    environment: str = Field("", max_length=120)
+    primary_subjects: list[str] = Field(default_factory=list, max_length=10)
 
 
 class PromptCandidateOutput(BaseModel):
