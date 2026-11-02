@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-02
+
 ### Added
 - Add first-class `wildlife` domain with coarse screening prompt, specialist fine templates (`wildlife_animal`, `wildlife_bird`, `wildlife_action`), and fallback (`broad_wildlife`).
 - Standardize universal coarse orientation rejection ("accidental, inverted, dangling, or unusable") and 1–10 fine quality rubrics across all domains.
