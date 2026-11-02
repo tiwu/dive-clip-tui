@@ -298,3 +298,30 @@ def test_classification_output() -> None:
     dumped = json.loads(output.model_dump_json())
     assert dumped["total_clips"] == 1
     assert dumped["classifications"][0]["domain"] == "motorcycle"
+
+
+def test_clip_classification_context_fields() -> None:
+    """ClipClassification should preserve environment and primary_subjects."""
+    c_default = ClipClassification(
+        clip_id="c_def",
+        file_name="clip.mp4",
+        file_path="/videos/clip.mp4",
+        domain="generic",
+    )
+    assert c_default.environment == ""
+    assert c_default.primary_subjects == []
+
+    c = ClipClassification(
+        clip_id="c_generic",
+        file_name="alpine.mp4",
+        file_path="/videos/alpine.mp4",
+        domain="generic",
+        confidence=0.82,
+        environment="alpine meadow",
+        primary_subjects=["marmot", "pine tree"],
+    )
+    assert c.environment == "alpine meadow"
+    assert c.primary_subjects == ["marmot", "pine tree"]
+    dumped = json.loads(c.model_dump_json())
+    assert dumped["environment"] == "alpine meadow"
+    assert dumped["primary_subjects"] == ["marmot", "pine tree"]

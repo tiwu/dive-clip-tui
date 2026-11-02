@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,6 +77,8 @@ VIDEO_CLASSIFICATION_PROMPT = (
     "underwater wrecks, diver action, oceanic or aquatic environments.\n"
     "- 'motorcycle': Motorcycle, motorbike, scooter, riding, cockpit or handlebar POV, "
     "pavement, track, twisties, curves, group ride, highway or scenic road ride.\n"
+    "- 'wildlife': Terrestrial animals, safari game, birds, raptors, predators, mammals, "
+    "reptiles, nature reserves, tracking, hunting, flight, or nesting in natural habitats.\n"
     "- 'generic': Any other domain (e.g. action sports, hiking, travel, city, family, landscape).\n\n"
     "Usability & Camera State:\n"
     "- If the camera is inside a bag or pocket, lens is covered/black, upside down, tumbling, "
@@ -83,11 +86,11 @@ VIDEO_CLASSIFICATION_PROMPT = (
     "set 'usable': false and 'quality_score': 1.\n"
     "- Otherwise set 'usable': true with a quality_score from 4 to 10.\n\n"
     "Return a JSON object with:\n"
-    "- domain: string (one of 'underwater', 'motorcycle', 'generic')\n"
+    "- domain: string (one of 'underwater', 'motorcycle', 'wildlife', 'generic')\n"
     "- confidence: float (0.0 to 1.0)\n"
     "- usable: boolean (true if footage is normal/usable; false if in-bag, covered, upside-down, or dangling)\n"
     "- quality_score: integer (1-10; 1-3 for in-bag/dangling/chaotic, 4+ for usable footage)\n"
-    "- environment: string (brief note on setting, e.g. 'coral reef wall', 'mountain pass road')\n"
+    "- environment: string (brief note on setting, e.g. 'coral reef wall', 'mountain pass road', 'savannah grassland')\n"
     "- primary_subjects: list of strings (main visible subjects/elements)\n"
 )
 
@@ -100,7 +103,9 @@ def build_classification_prompt(
         return VIDEO_CLASSIFICATION_PROMPT
 
     domain_names: list[str] = list(domains.keys()) if isinstance(domains, dict) else list(domains)
-    if set(domain_names) == {"underwater", "motorcycle", "generic"}:
+    if set(domain_names) == {"underwater", "motorcycle", "wildlife", "generic"} or set(
+        domain_names
+    ) == set(BUILTIN_DOMAINS.keys()):
         return VIDEO_CLASSIFICATION_PROMPT
 
     lines = [
@@ -159,17 +164,17 @@ PELAGICS_TEMPLATE = PromptTemplate(
         "Target subjects: pelagic species (turtles, sharks, rays, mantas, whales, dolphins).\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally aimed and upright (right-side up).\n"
-        "- If the camera is upside down, tumbling, dangling on a clip/lanyard, spinning, "
-        "or pointed accidentally at the seabed/boat/diver gear, you MUST reject the frame:\n"
+        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+        "  If the camera is upside down, inverted, tumbling, dangling on a clip/lanyard, spinning,\n"
+        "  inside a pocket/bag, lens covered/blocked, completely blurred, or pointed accidentally at the seabed/boat/diver gear, you MUST reject the frame:\n"
         "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Even if a turtle or shark is partially in view, if the camera is dangling or inverted, "
-        "mark 'detected': false.\n\n"
+        "- Accidental, inverted, dangling, or unusable footage must always be rejected even if a turtle or shark is partially in view.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if target pelagic is present AND camera is upright/stable)\n"
+        "- detected: boolean (true ONLY if target pelagic is present AND camera is upright and usable)\n"
         "- subject: string (species name or 'none')\n"
         "- category: string ('pelagics')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for inverted/dangling/chaotic, 4+ for usable)\n"
+        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -180,7 +185,7 @@ PELAGICS_TEMPLATE = PromptTemplate(
         "1. Lighting: Well-lit with natural or video light, good contrast, minimal backscatter/murk.\n"
         "2. Focus & Clarity: Pelagic subject is in sharp focus, not blurry or soft.\n"
         "3. Camera Stability: Smooth camera movement without excessive shake, rapid tumbling, or heavy motion blur.\n"
-        "4. Framing & Orientation: Upright, intentional composition centering the animal.\n\n"
+        "4. Subject Composition: Upright, intentional composition centering the animal.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Crisp focus on animal, clear water/lighting, smooth stable camera.\n"
         "- 7-8 (Strong Highlight): Good lighting, animal in clear focus, minimal camera shake.\n"
@@ -222,16 +227,17 @@ MACRO_TEMPLATE = PromptTemplate(
         "Target subjects: macro subjects (nudibranchs, shrimp, corals, small sea creatures).\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally aimed and upright (right-side up).\n"
-        "- If the camera is upside down, tumbling, dangling on a clip/lanyard, spinning, "
-        "or pointed accidentally at the reef/seabed, you MUST reject the frame:\n"
+        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+        "  If the camera is upside down, inverted, tumbling, dangling on a clip/lanyard, spinning,\n"
+        "  inside a pocket/bag, lens covered/blocked, completely blurred, or pointed accidentally at the reef/seabed, you MUST reject the frame:\n"
         "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Even if coral is visible, if the camera is dangling or inverted, mark 'detected': false.\n\n"
+        "- Accidental, inverted, dangling, or unusable frames must always be rejected even if coral or macro subjects are visible.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if macro subject is present AND camera is upright/stable)\n"
+        "- detected: boolean (true ONLY if macro subject is present AND camera is upright and usable)\n"
         "- subject: string (species/subject name or 'none')\n"
         "- category: string ('macro')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for inverted/dangling/chaotic, 4+ for usable)\n"
+        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -242,7 +248,7 @@ MACRO_TEMPLATE = PromptTemplate(
         "1. Lighting: Proper lighting illuminating macro details, balanced exposure, no blown-out highlights.\n"
         "2. Focus & Clarity: Macro subject is in crisp, sharp focus (shallow depth of field placed correctly).\n"
         "3. Camera Stability: Rock-steady camera without shake, surge drift, or motion blur.\n"
-        "4. Framing & Orientation: Upright, clean macro composition.\n\n"
+        "4. Subject Composition: Upright, clean macro composition.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Razor-sharp focus on subject, beautiful lighting, steady motionless camera.\n"
         "- 7-8 (Strong Highlight): Sharp focus on macro subject, good lighting, minimal camera motion.\n"
@@ -284,16 +290,17 @@ DIVER_TEMPLATE = PromptTemplate(
         "Target subjects: diver action, buddy interaction, swim-throughs, and intentional composition.\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally operated and upright (right-side up).\n"
-        "- If the camera is upside down, tumbling, dangling on a BCD lanyard, spinning, "
-        "or filming accidentally (e.g. fins/boat ladder/empty blue while dangling), you MUST reject the frame:\n"
+        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+        "  If the camera is upside down, inverted, tumbling, dangling on a BCD lanyard, spinning,\n"
+        "  inside a pocket/bag, lens covered/blocked, completely blurred, or filming accidentally (e.g. fins/boat ladder/empty blue while dangling), you MUST reject the frame:\n"
         "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Accidental footage of divers where the camera is dangling or inverted is NOT diver action: mark 'detected': false.\n\n"
+        "- Accidental, inverted, dangling, or unusable footage of divers where the camera is dangling or inverted is NOT diver action: mark 'detected': false.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if intentional diver action is present AND camera is upright)\n"
+        "- detected: boolean (true ONLY if intentional diver action is present AND camera is upright and usable)\n"
         "- subject: string (diver activity or 'none')\n"
         "- category: string ('diver')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for inverted/dangling/chaotic, 4+ for usable)\n"
+        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
         "- description: string (short note on diver action or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -304,7 +311,7 @@ DIVER_TEMPLATE = PromptTemplate(
         "1. Lighting: Good visibility of diver and background, balanced exposure.\n"
         "2. Focus & Clarity: Diver and gear in sharp focus, clear facial mask/expressions or silhouette.\n"
         "3. Camera Stability: Smooth camera gliding or steady hold, free of jerky movements or motion blur.\n"
-        "4. Framing & Orientation: Upright, cinematic composition with good rule of thirds or leading lines.\n\n"
+        "4. Subject Composition: Upright, cinematic composition with good rule of thirds or leading lines.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Crisp focus, dramatic lighting/silhouette, smooth stable glide, compelling action.\n"
         "- 7-8 (Strong Highlight): Good lighting, sharp diver, stable camera framing.\n"
@@ -335,17 +342,17 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
         "sharks, turtles, whales, frogfish, crocodilefish, seahorses, stonefish, diver action, and sea creatures.\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally aimed and upright (right-side up).\n"
-        "- If the camera is upside down, tumbling, dangling on a clip/lanyard, spinning, "
-        "or pointed accidentally at the seabed/hull/diver gear, you MUST reject the frame:\n"
+        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+        "  If the camera is upside down, inverted, tumbling, dangling on a clip/lanyard, spinning,\n"
+        "  inside a pocket/bag, lens covered/blocked, completely blurred, or pointed accidentally at the seabed/hull/diver gear, you MUST reject the frame:\n"
         "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Even if background corals or fish are present, if the camera is dangling or inverted, "
-        "mark 'detected': false.\n\n"
+        "- Accidental, inverted, dangling, or unusable frames must always be rejected even if background corals or fish are present.\n\n"
         "Return a JSON object with:\n"
         "- detected: boolean (true ONLY if marine life or diver action is present AND camera is upright and intentionally operated)\n"
         "- subject: string (species name, diver activity, or 'none')\n"
         "- category: string (one of 'pelagics', 'macro', 'diver', 'broad_marine')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for inverted/dangling/chaotic, 4+ for usable)\n"
+        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -358,7 +365,7 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
         "1. Lighting: Proper underwater lighting, natural contrast, clear visibility with minimal backscatter.\n"
         "2. Focus & Clarity: Marine subject is in crisp, sharp focus.\n"
         "3. Camera Stability: Smooth camera tracking or steady hold, free of jerky shake or heavy motion blur.\n"
-        "4. Framing & Orientation: Upright, intentional composition highlighting the subject.\n\n"
+        "4. Subject Composition: Upright, intentional composition highlighting the subject.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Razor-sharp focus, beautiful lighting, clear water, smooth stable camera.\n"
         "- 7-8 (Strong Highlight): Good lighting, sharp subject, stable camera with minimal motion blur.\n"
@@ -387,16 +394,18 @@ MOTORCYCLE_COARSE_PROMPT = (
     "scenic road vistas, twisties, hairpins, and fellow riders / group ride action.\n\n"
     "CAMERA ORIENTATION & USABILITY CHECK:\n"
     "- The camera must be intentionally aimed at the road, horizon, bike cockpit/handlebar, rider, or scenery.\n"
-    "- If the camera is pointed accidentally at the pavement/ground, fuel tank, inside a helmet, "
-    "blocked/covered, upside down, dangling, or stationary with zero movement/action (e.g. stopped at a light), "
+    "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+    "  If the camera is pointed accidentally at the pavement/ground, fuel tank, inside a helmet, "
+    "blocked/covered, upside down, inverted, dangling, or stationary with zero movement/action (e.g. stopped at a light), "
     "you MUST reject the frame:\n"
-    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n\n"
+    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
+    "- Accidental, inverted, dangling, or unusable frames must always be rejected even if a motorcycle or road is in frame.\n\n"
     "Return a JSON object with:\n"
     "- detected: boolean (true ONLY if motorcycle highlight action, scenic road, or rider interaction is present AND camera is usable)\n"
     "- subject: string (e.g. 'cornering through hairpin', 'scenic mountain pass', 'riding with buddy', or 'none')\n"
     "- category: string (one of 'moto_riding', 'moto_scenic', 'moto_group', 'broad_motorcycle')\n"
     "- confidence: float (0.0 to 1.0)\n"
-    "- quality_score: int (1-10; 1-3 for ground/blocked/stationary, 4+ for usable)\n"
+    "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/stationary, 4+ for usable)\n"
     "- description: string (short note on riding action or rejection reason)\n"
     "- timestamp: float (seconds in the clip)\n"
 )
@@ -426,10 +435,10 @@ MOTO_RIDING_TEMPLATE = PromptTemplate(
         "Analyze this motorcycle frame for dynamic riding action and cornering technique.\n\n"
         "QUALITY EVALUATION RUBRIC (1-10):\n"
         "Assess both riding action and shot execution:\n"
-        "1. Riding Action: Visible lean angle, smooth apex tracking, dynamic road curve, or overtakes.\n"
+        "1. Lighting: Good natural daylight or ambient road lighting, balanced exposure without blinding glare.\n"
         "2. Focus & Clarity: Clear forward road view, crisp cockpit or rider silhouette, minimal motion smear.\n"
         "3. Camera Stability: Stable horizon or smooth lean without violent engine vibration or camera shake.\n"
-        "4. Framing & Orientation: Upright composition with leading lines following the curve of the road.\n\n"
+        "4. Subject Composition: Upright composition with leading lines following the curve of the road and dynamic riding action.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Dramatic lean angle, razor-sharp view of the apex, rock-steady footage, thrilling speed.\n"
         "- 7-8 (Strong Highlight): Good cornering action, sharp road view, minimal vibration.\n"
@@ -515,10 +524,10 @@ MOTO_GROUP_TEMPLATE = PromptTemplate(
         "Analyze this motorcycle frame for group riding, fellow riders, and rider interaction.\n\n"
         "QUALITY EVALUATION RUBRIC (1-10):\n"
         "Assess both rider presence and shot execution:\n"
-        "1. Rider Interaction: Clear view of fellow riders, staggered formation, wave or gesture.\n"
-        "2. Focus & Clarity: Crisp focus on the lead/following motorcycle and rider.\n"
+        "1. Lighting: Clear ambient road lighting, well-exposed riders and road surroundings.\n"
+        "2. Focus & Clarity: Crisp focus on fellow riders and bikes, clear formation details.\n"
         "3. Camera Stability: Smooth following distance without erratic braking or jitter.\n"
-        "4. Framing: Intentional framing showing the relationship between riders and the road.\n\n"
+        "4. Subject Composition: Intentional framing and composition showing the relationship between riders and the road.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Perfectly framed formation, crisp focus on riders, great lighting and stability.\n"
         "- 7-8 (Strong Highlight): Clear view of fellow riders, good spacing and stable camera.\n"
@@ -546,10 +555,11 @@ BROAD_MOTORCYCLE_TEMPLATE = PromptTemplate(
         "Analyze this motorcycle frame for noteworthy highlights: riding action, scenic road views, "
         "or group riding.\n\n"
         "QUALITY EVALUATION RUBRIC (1-10):\n"
-        "1. Subject & Action: Engaging riding action, scenery, or rider focus.\n"
-        "2. Focus & Clarity: Clear road view, minimal motion smear.\n"
-        "3. Camera Stability: Smooth cruising without engine vibration shake.\n"
-        "4. Framing: Intentional upright road composition.\n\n"
+        "Assess both riding highlight and shot execution:\n"
+        "1. Lighting: Balanced road lighting and exposure, clear visibility of scene.\n"
+        "2. Focus & Clarity: Clear road and subject view, minimal motion smear.\n"
+        "3. Camera Stability: Smooth cruising motion without engine vibration shake.\n"
+        "4. Subject Composition: Upright, intentional road framing and subject composition.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Dynamic riding or gorgeous scenery, razor-sharp focus, rock-steady hold.\n"
         "- 7-8 (Strong Highlight): Good road view, clear lighting, stable camera.\n"
@@ -576,16 +586,19 @@ GENERIC_COARSE_PROMPT = (
     "Analyze this video frame for candidate screening.\n"
     "Target subjects: compelling action, clear central subject, scenic view, or notable event.\n\n"
     "CAMERA ORIENTATION & USABILITY CHECK:\n"
-    "- The camera must be intentionally aimed and upright.\n"
-    "- If the camera is inside a pocket/bag, pointed accidentally at the floor/ground, covered, "
-    "spinning uncontrollably, or completely blurred, you MUST reject the frame:\n"
-    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n\n"
+    "- The camera must be intentionally aimed and upright (right-side up).\n"
+    "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+    "  If the camera is inside a pocket/bag, pointed accidentally at the floor/ground, covered,\n"
+    "  upside down, inverted, dangling on a clip/strap, spinning uncontrollably, or completely blurred,\n"
+    "  you MUST reject the frame:\n"
+    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
+    "- Accidental, inverted, dangling, or unusable frames must always be rejected even if an object is visible.\n\n"
     "Return a JSON object with:\n"
-    "- detected: boolean (true ONLY if an intentional highlight subject is present AND camera is usable)\n"
+    "- detected: boolean (true ONLY if an intentional highlight subject is present AND camera is upright and usable)\n"
     "- subject: string (name of subject/action or 'none')\n"
     "- category: string ('generic_highlight')\n"
     "- confidence: float (0.0 to 1.0)\n"
-    "- quality_score: int (1-10; 1-3 for pocket/floor/chaotic, 4+ for usable)\n"
+    "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
     "- description: string (short note on subject or rejection reason)\n"
     "- timestamp: float (seconds in the clip)\n"
 )
@@ -599,10 +612,10 @@ GENERIC_HIGHLIGHT_TEMPLATE = PromptTemplate(
         "Analyze this video frame in detail for highlight quality.\n\n"
         "QUALITY EVALUATION RUBRIC (1-10):\n"
         "Assess both subject presence and shot execution:\n"
-        "1. Subject & Action: Clear, intentional subject or dynamic action in view.\n"
-        "2. Lighting & Exposure: Well-exposed, balanced contrast, good natural or artificial light.\n"
-        "3. Focus & Clarity: Subject is in crisp, sharp focus, not blurry.\n"
-        "4. Camera Stability: Smooth camera movement without jerky shake or heavy motion blur.\n\n"
+        "1. Lighting & Exposure: Well-exposed, balanced contrast, good natural or artificial light.\n"
+        "2. Focus & Clarity: Subject is in crisp, sharp focus, not blurry.\n"
+        "3. Camera Stability: Smooth camera movement without jerky shake or heavy motion blur.\n"
+        "4. Subject Composition: Intentional upright framing and subject composition highlighting the central event or action.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Crisp focus on compelling subject, beautiful lighting, rock-steady camera.\n"
         "- 7-8 (Strong Highlight): Good lighting, sharp subject, minimal camera shake.\n"
@@ -618,6 +631,251 @@ GENERIC_HIGHLIGHT_TEMPLATE = PromptTemplate(
     ),
     color="Magenta",
     domain="generic",
+)
+
+
+# =============================================================================
+# Domain: Wildlife Footage
+# =============================================================================
+
+WILDLIFE_COARSE_PROMPT = (
+    "Analyze this wildlife footage frame for candidate screening.\n"
+    "Target subjects: wild animals, mammals, safari game, predators, birds, raptors, "
+    "dynamic animal behavior, and natural habitats.\n\n"
+    "CAMERA ORIENTATION & USABILITY CHECK:\n"
+    "- The camera must be intentionally aimed and upright (right-side up).\n"
+    "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+    "  If the camera is upside down, inverted, tumbling, dangling on a strap/monopod/clip, spinning,\n"
+    "  pointed accidentally at the ground/safari vehicle floor, inside a bag/pocket, lens covered,\n"
+    "  or showing only darkness/blur, you MUST reject the frame:\n"
+    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
+    "- Accidental, inverted, dangling, or unusable frames must always be rejected even if an animal or bird is partially in view.\n\n"
+    "Return a JSON object with:\n"
+    "- detected: boolean (true ONLY if wildlife subject is present AND camera is upright and usable)\n"
+    "- subject: string (species or behavior name, e.g. 'lion pride', 'perched eagle', or 'none')\n"
+    "- category: string (one of 'wildlife_animal', 'wildlife_bird', 'wildlife_action', 'broad_wildlife')\n"
+    "- confidence: float (0.0 to 1.0)\n"
+    "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
+    "- description: string (short note on wildlife subject or rejection reason)\n"
+    "- timestamp: float (seconds in the clip)\n"
+)
+
+# Yellow: Wild animals, mammals, predators, safari game
+WILDLIFE_ANIMAL_TEMPLATE = PromptTemplate(
+    name="wildlife_animal",
+    keywords=[
+        "animal",
+        "mammal",
+        "predator",
+        "safari",
+        "lion",
+        "elephant",
+        "giraffe",
+        "zebra",
+        "leopard",
+        "cheetah",
+        "tiger",
+        "bear",
+        "deer",
+        "monkey",
+        "wolf",
+        "rhino",
+        "hippo",
+        "dier",
+        "zoogdier",
+        "leeuw",
+        "olifant",
+        "giraf",
+        "luipaard",
+        "tijger",
+        "beer",
+        "hert",
+        "aap",
+        "neushoorn",
+        "nijlpaard",
+    ],
+    system_prompt="You are a wildlife video analyst specializing in wild mammals, predators, and safari animals.",
+    coarse_prompt=WILDLIFE_COARSE_PROMPT,
+    fine_prompt=(
+        "Analyze this wildlife frame for wild mammals, predators, and safari animals.\n\n"
+        "QUALITY EVALUATION RUBRIC (1-10):\n"
+        "Assess both subject presence and shot execution:\n"
+        "1. Lighting: Natural exposure, good contrast, clear subject definition against foliage/savannah.\n"
+        "2. Focus & Clarity: Crisp focus on animal eyes, head, or coat texture, minimal motion blur.\n"
+        "3. Camera Stability: Steady tracking or motionless framing without violent vehicle jitter.\n"
+        "4. Subject Composition: Upright composition with rule-of-thirds, clean line of sight.\n\n"
+        "Scoring Scale:\n"
+        "- 9-10 (Exceptional): Razor-sharp focus on animal, beautiful lighting, rock-steady hold, compelling composition.\n"
+        "- 7-8 (Strong Highlight): Good lighting, animal in clear focus, minimal camera vibration.\n"
+        "- 5-6 (Acceptable): Adequate lighting, slight softness or distant subject, minor camera movement.\n"
+        "- 1-4 (Reject): Dark/murky, out of focus, severe shake, accidental, inverted, dangling, or unusable.\n\n"
+        "Return a JSON object with:\n"
+        "- detected: boolean (is a wild animal clearly visible?)\n"
+        "- subject: string (species name or 'unknown')\n"
+        "- confidence: float (0.0 to 1.0)\n"
+        "- quality_score: int (1-10 based on the rubric above)\n"
+        "- description: string (details on species, behavior, lighting, and camera stability)\n"
+        "- timestamp: float (seconds in the clip)\n"
+    ),
+    color="Yellow",
+    domain="wildlife",
+)
+
+# Cyan: Birds, raptors, flight, nesting, perching
+WILDLIFE_BIRD_TEMPLATE = PromptTemplate(
+    name="wildlife_bird",
+    keywords=[
+        "bird",
+        "vogel",
+        "raptor",
+        "eagle",
+        "hawk",
+        "owl",
+        "falcon",
+        "parrot",
+        "flight",
+        "vliegen",
+        "nest",
+        "nesting",
+        "perch",
+        "heron",
+        "crane",
+        "seabird",
+        "waterfowl",
+        "duck",
+        "goose",
+        "arend",
+        "uil",
+        "valk",
+        "reiger",
+    ],
+    system_prompt="You are a wildlife video analyst specializing in avian species and birds in flight or perching.",
+    coarse_prompt=WILDLIFE_COARSE_PROMPT,
+    fine_prompt=(
+        "Analyze this wildlife frame for birds, raptors, flight dynamics, and perching.\n\n"
+        "QUALITY EVALUATION RUBRIC (1-10):\n"
+        "Assess both subject presence and shot execution:\n"
+        "1. Lighting: Plumage illumination, balanced exposure against bright sky or dense canopy.\n"
+        "2. Focus & Clarity: Sharp eye or feather detail, minimal motion blur on wings in flight.\n"
+        "3. Camera Stability: Smooth flight tracking or motionless perch lock without erratic shake.\n"
+        "4. Subject Composition: Intentional framing with leading space in direction of flight or gaze.\n\n"
+        "Scoring Scale:\n"
+        "- 9-10 (Exceptional): Crisp eye focus, dramatic flight or perch, gorgeous lighting, steady tracking.\n"
+        "- 7-8 (Strong Highlight): Good lighting, bird in clear focus, minimal tracking shake.\n"
+        "- 5-6 (Acceptable): Passable lighting, small in frame or slight softness, minor camera wobble.\n"
+        "- 1-4 (Reject): Underexposed silhouette without detail, blurry, erratic shake, accidental, inverted, dangling, or unusable.\n\n"
+        "Return a JSON object with:\n"
+        "- detected: boolean (is a bird clearly visible?)\n"
+        "- subject: string (species name or 'unknown')\n"
+        "- confidence: float (0.0 to 1.0)\n"
+        "- quality_score: int (1-10 based on the rubric above)\n"
+        "- description: string (details on species, behavior/flight, lighting, and camera stability)\n"
+        "- timestamp: float (seconds in the clip)\n"
+    ),
+    color="Cyan",
+    domain="wildlife",
+)
+
+# Orange: Dynamic animal behaviors (hunting, chasing, feeding, fights)
+WILDLIFE_ACTION_TEMPLATE = PromptTemplate(
+    name="wildlife_action",
+    keywords=[
+        "action",
+        "actie",
+        "hunt",
+        "hunting",
+        "jacht",
+        "jagen",
+        "chase",
+        "kill",
+        "feeding",
+        "eating",
+        "fight",
+        "fighting",
+        "mating",
+        "running",
+        "sprint",
+        "predator",
+        "predation",
+        "attack",
+        "pursuit",
+    ],
+    system_prompt="You are a wildlife video analyst specializing in dynamic animal behaviors and predator-prey interactions.",
+    coarse_prompt=WILDLIFE_COARSE_PROMPT,
+    fine_prompt=(
+        "Analyze this wildlife frame for dynamic animal behavior (hunting, chasing, feeding, fighting).\n\n"
+        "QUALITY EVALUATION RUBRIC (1-10):\n"
+        "Assess both behavioral action and shot execution:\n"
+        "1. Lighting: Clear visibility of the action, balanced exposure throughout dynamic movement.\n"
+        "2. Focus & Clarity: Core behavioral interaction maintained in usable focus, sharp subject definition.\n"
+        "3. Camera Stability: Controlled panning following the action without disorienting shake.\n"
+        "4. Subject Composition: Intentional framing containing the critical animal interaction or chase inside frame.\n\n"
+        "Scoring Scale:\n"
+        "- 9-10 (Exceptional): Dramatic behavioral moment, crisp focus on action, smooth panning, compelling framing.\n"
+        "- 7-8 (Strong Highlight): Clear action, good lighting, stable tracking.\n"
+        "- 5-6 (Acceptable): Distant action, moderate camera movement or partial obstruction by vegetation.\n"
+        "- 1-4 (Reject): Missed action, severe motion smear, heavy shake, accidental, inverted, dangling, or unusable.\n\n"
+        "Return a JSON object with:\n"
+        "- detected: boolean (is dynamic wildlife action visible?)\n"
+        "- subject: string (description of action e.g. 'cheetah chasing gazelle', 'lions feeding')\n"
+        "- confidence: float (0.0 to 1.0)\n"
+        "- quality_score: int (1-10 based on the rubric above)\n"
+        "- description: string (details on action, interaction, lighting, and camera stability)\n"
+        "- timestamp: float (seconds in the clip)\n"
+    ),
+    color="Orange",
+    domain="wildlife",
+)
+
+# Broad wildlife fallback template
+BROAD_WILDLIFE_TEMPLATE = PromptTemplate(
+    name="broad_wildlife",
+    keywords=[],
+    system_prompt="You are a wildlife video analyst evaluating general nature and wildlife footage highlights.",
+    coarse_prompt=WILDLIFE_COARSE_PROMPT,
+    fine_prompt=(
+        "Analyze this wildlife frame for general wildlife, nature, and fauna highlights.\n\n"
+        "QUALITY EVALUATION RUBRIC (1-10):\n"
+        "Assess both subject presence and shot execution:\n"
+        "1. Lighting: Natural lighting, balanced exposure across wildlife subject and natural habitat.\n"
+        "2. Focus & Clarity: Crisp focus on animals, birds, or nature elements, sharp details.\n"
+        "3. Camera Stability: Smooth camera tracking or steady hold, free of jerky shake or heavy motion blur.\n"
+        "4. Subject Composition: Upright, intentional nature composition framing the subject clearly.\n\n"
+        "Scoring Scale:\n"
+        "- 9-10 (Exceptional): Razor-sharp focus, beautiful lighting, rock-steady hold, compelling wildlife composition.\n"
+        "- 7-8 (Strong Highlight): Good lighting, sharp subject, minimal camera shake, well-framed.\n"
+        "- 5-6 (Acceptable): Adequate lighting, slight softness or distant subject, minor camera movement.\n"
+        "- 1-4 (Reject): Dark/murky, out of focus, severe camera shake, accidental, inverted, dangling, or unusable.\n\n"
+        "Return a JSON object with:\n"
+        "- detected: boolean (is wildlife or nature highlight clearly visible?)\n"
+        "- subject: string (species, nature element, or 'unknown')\n"
+        "- confidence: float (0.0 to 1.0)\n"
+        "- quality_score: int (1-10 based on the rubric above)\n"
+        "- description: string (details on subject, habitat, lighting, and camera stability)\n"
+        "- timestamp: float (seconds in the clip)\n"
+    ),
+    color="Yellow",
+    domain="wildlife",
+)
+
+WILDLIFE_DOMAIN = DomainConfig(
+    name="wildlife",
+    keywords=[
+        "wildlife",
+        "animal",
+        "safari",
+        "bird",
+        "nature",
+        "fauna",
+        "mammal",
+        "wilderness",
+        "dier",
+        "natuur",
+    ],
+    description="Wild animals, birds, safari game, predators, dynamic animal behavior, and natural habitat scenes",
+    coarse_prompt=WILDLIFE_COARSE_PROMPT,
+    fallback_template=BROAD_WILDLIFE_TEMPLATE,
+    templates=[WILDLIFE_ACTION_TEMPLATE, WILDLIFE_ANIMAL_TEMPLATE, WILDLIFE_BIRD_TEMPLATE],
 )
 
 
@@ -679,6 +937,7 @@ GENERIC_DOMAIN = DomainConfig(
 BUILTIN_DOMAINS: dict[str, DomainConfig] = {
     "underwater": UNDERWATER_DOMAIN,
     "motorcycle": MOTORCYCLE_DOMAIN,
+    "wildlife": WILDLIFE_DOMAIN,
     "generic": GENERIC_DOMAIN,
 }
 
@@ -689,9 +948,20 @@ MOTORCYCLE_TEMPLATES: list[PromptTemplate] = [
     MOTO_SCENIC_TEMPLATE,
     MOTO_GROUP_TEMPLATE,
 ]
-ALL_DOMAIN_TEMPLATES: list[PromptTemplate] = (
-    UNDERWATER_DOMAIN.templates + MOTORCYCLE_DOMAIN.templates + GENERIC_DOMAIN.templates
-)
+WILDLIFE_TEMPLATES: list[PromptTemplate] = [
+    WILDLIFE_ACTION_TEMPLATE,
+    WILDLIFE_ANIMAL_TEMPLATE,
+    WILDLIFE_BIRD_TEMPLATE,
+]
+ALL_DOMAIN_TEMPLATES: list[PromptTemplate] = [
+    *UNDERWATER_DOMAIN.templates,
+    UNDERWATER_DOMAIN.fallback_template,
+    *MOTORCYCLE_DOMAIN.templates,
+    MOTORCYCLE_DOMAIN.fallback_template,
+    *WILDLIFE_DOMAIN.templates,
+    WILDLIFE_DOMAIN.fallback_template,
+    *GENERIC_DOMAIN.templates,
+]
 
 
 def load_custom_templates(config: dict[str, Any]) -> dict[str, DomainConfig]:
@@ -839,6 +1109,18 @@ def resolve_domain_from_keywords(
     return None
 
 
+def _keyword_matches(kw: str, text: str) -> bool:
+    """Check if keyword matches text as a whole word or phrase, ignoring case."""
+    kw_clean = kw.strip()
+    if not kw_clean:
+        return False
+    parts = [re.escape(p) for p in re.split(r"[\s\-_]+", kw_clean) if p]
+    if not parts:
+        return False
+    pattern = r"\b" + r"[\s\-_]+".join(parts) + r"\b"
+    return bool(re.search(pattern, text, re.IGNORECASE))
+
+
 def resolve_template_for_subject(
     subject: str = "",
     category: str = "",
@@ -875,7 +1157,11 @@ def resolve_template_for_subject(
                         return tpl
 
     # 2. Check category name match
-    cat_clean = category.strip().lower()
+    cat_clean = (
+        category.strip().lower()
+        if isinstance(category, str)
+        else ("" if category is None else str(category).strip().lower())
+    )
     if cat_clean:
         for tpl in dom_config.templates:
             if tpl.name.lower() == cat_clean:
@@ -884,11 +1170,15 @@ def resolve_template_for_subject(
             return dom_config.fallback_template
 
     # 3. Check subject string against templates in current domain
-    subj_clean = subject.strip().lower()
+    subj_clean = (
+        subject.strip().lower()
+        if isinstance(subject, str)
+        else ("" if subject is None else str(subject).strip().lower())
+    )
     if subj_clean:
         for tpl in dom_config.templates:
             for kw in tpl.keywords:
-                if kw.lower() in subj_clean:
+                if _keyword_matches(kw, subj_clean):
                     return tpl
 
         # 4. Check subject string across other domains only if domain was not specified
@@ -898,7 +1188,7 @@ def resolve_template_for_subject(
                     continue
                 for tpl in other_dom.templates:
                     for kw in tpl.keywords:
-                        if kw.lower() in subj_clean:
+                        if _keyword_matches(kw, subj_clean):
                             return tpl
 
     # 5. Return fallback template for domain
@@ -917,3 +1207,260 @@ def get_template_for_keywords(
             if kw.lower() in keywords_lower:
                 return template
     return None
+
+
+def _slugify(text: str) -> str:
+    """Helper to convert text into a clean snake_case slug identifier."""
+    clean = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
+    return clean or "highlight"
+
+
+_CANDIDATE_COLOR = "Magenta"
+_CANDIDATE_THRESHOLD = 0.65  # Default mid-range confidence; tune per candidate during review.
+_MAX_CONTEXT_CHARS = 60
+_MAX_CONTEXT_SUBJECTS = 5
+
+
+def _sanitize_context_text(value: Any) -> str:
+    """Neutralize model-derived text before interpolating it into prompts (injection guard)."""
+    text = re.sub(r"[^A-Za-z0-9 ,'/&-]+", " ", str(value or ""))
+    return re.sub(r"\s+", " ", text).strip()[:_MAX_CONTEXT_CHARS]
+
+
+def infer_generic_context(
+    records: list[Any] | Any,
+) -> dict[str, Any]:
+    """Extract dominant environment and ranked primary subjects from generic clip classifications.
+
+    Args:
+        records: A single ClipClassification, a dict, or a list of ClipClassification/dicts from Pass 0.
+
+    Returns:
+        dict with:
+            - 'environment': str (dominant physical setting/environment, or "" if none)
+            - 'primary_subjects': list[str] (ranked unique visible subjects)
+            - 'template_slug': str (clean slug for template naming)
+            - 'environments': list[str] (all unique non-empty environments seen)
+            - 'clip_count': int (number of generic clips inspected)
+    """
+    if records is None:
+        records_list: list[Any] = []
+    elif isinstance(records, list):
+        records_list = records
+    else:
+        records_list = [records]
+
+    # Filter for generic domain clips if available
+    generic_records: list[Any] = []
+    for r in records_list:
+        domain_val = (
+            getattr(r, "domain", None)
+            if hasattr(r, "domain")
+            else (r.get("domain") if isinstance(r, dict) else None)
+        )
+        if domain_val == "generic" or domain_val is None or domain_val == "":
+            generic_records.append(r)
+
+    if not generic_records:
+        generic_records = list(records_list)
+
+    # 1. Aggregate environment
+    env_counts: dict[str, int] = {}
+    for r in generic_records:
+        env_val = (
+            getattr(r, "environment", "")
+            if hasattr(r, "environment")
+            else (r.get("environment", "") if isinstance(r, dict) else "")
+        )
+        if isinstance(env_val, str) and env_val.strip():
+            clean_env = env_val.strip()
+            env_counts[clean_env] = env_counts.get(clean_env, 0) + 1
+
+    dominant_env = max(env_counts, key=env_counts.get) if env_counts else ""
+    all_envs = sorted(env_counts.keys())
+
+    # 2. Aggregate primary subjects
+    subj_counts: dict[str, int] = {}
+    subj_canonical: dict[str, str] = {}
+    first_seen_keys: list[str] = []
+    for r in generic_records:
+        raw_subjs = (
+            getattr(r, "primary_subjects", [])
+            if hasattr(r, "primary_subjects")
+            else (r.get("primary_subjects", []) if isinstance(r, dict) else [])
+        )
+        if isinstance(raw_subjs, str):
+            raw_subjs = [s.strip() for s in raw_subjs.split(",") if s.strip()]
+        elif not isinstance(raw_subjs, list):
+            raw_subjs = []
+
+        seen_in_record: set[str] = set()
+        for s in raw_subjs:
+            if isinstance(s, str) and s.strip():
+                clean_s = s.strip().rstrip(".,;")
+                if clean_s:
+                    key = clean_s.lower()
+                    if key not in seen_in_record:
+                        seen_in_record.add(key)
+                        subj_counts[key] = subj_counts.get(key, 0) + 1
+                        if key not in subj_canonical:
+                            subj_canonical[key] = clean_s
+                            first_seen_keys.append(key)
+
+    # Sort unique subjects by frequency (descending), preserving first-seen order on ties
+    sorted_subj_keys = sorted(first_seen_keys, key=lambda k: -subj_counts[k])
+    ranked_subjects = [subj_canonical[k] for k in sorted_subj_keys]
+
+    # 3. Derive template slug
+    if ranked_subjects:
+        top_subj_slug = _slugify(ranked_subjects[0])
+        template_slug = (
+            f"generic_{top_subj_slug}"
+            if not top_subj_slug.startswith("generic_")
+            else top_subj_slug
+        )
+    elif dominant_env:
+        env_slug = _slugify(dominant_env)
+        template_slug = f"generic_{env_slug}" if not env_slug.startswith("generic_") else env_slug
+    else:
+        template_slug = "generic_highlight"
+
+    return {
+        "environment": dominant_env,
+        "primary_subjects": ranked_subjects,
+        "template_slug": template_slug,
+        "environments": all_envs,
+        "clip_count": len(generic_records),
+    }
+
+
+def create_prompt_candidate_for_generic(
+    context_or_record: dict[str, Any] | Any,
+    candidate_name: str | None = None,
+) -> dict[str, Any]:
+    """Generate candidate coarse and fine prompt strings with orientation checks and 1-10 quality rubric.
+
+    Args:
+        context_or_record: Context dict from infer_generic_context, or a ClipClassification/dict/list.
+        candidate_name: Optional explicit name override for the candidate template.
+
+    Returns:
+        dict candidate template with:
+            - 'name': str
+            - 'domain': 'generic'
+            - 'coarse_prompt': str
+            - 'fine_prompt': str
+            - 'recommended_threshold': float (0.65)
+            - 'keywords': list[str]
+            - 'system_prompt': str
+            - 'color': str ('Magenta')
+            - 'status': str ('candidate')
+            - 'environment': str
+            - 'primary_subjects': list[str]
+    """
+    if isinstance(context_or_record, dict) and (
+        "template_slug" in context_or_record or "environment" in context_or_record
+    ):
+        context = dict(context_or_record)
+        if "template_slug" not in context:
+            context["template_slug"] = infer_generic_context(context).get(
+                "template_slug", "generic_highlight"
+            )
+    else:
+        context = infer_generic_context(context_or_record)
+
+    environment: str = _sanitize_context_text(context.get("environment"))
+    raw_subjects = context.get("primary_subjects") or []
+    if isinstance(raw_subjects, str):
+        raw_subjects = raw_subjects.split(",")
+    elif not isinstance(raw_subjects, list):
+        raw_subjects = []
+    primary_subjects = []
+    for raw in raw_subjects:
+        cleaned = _sanitize_context_text(raw)
+        if cleaned and cleaned not in primary_subjects:
+            primary_subjects.append(cleaned)
+    primary_subjects = primary_subjects[:_MAX_CONTEXT_SUBJECTS]
+
+    raw_slug = candidate_name or context.get("template_slug") or "generic_highlight"
+    name = _slugify(str(raw_slug))
+    if not name.startswith("generic"):
+        name = f"generic_{name}"
+    if name in {t.name for d in BUILTIN_DOMAINS.values() for t in d.templates}:
+        name = f"{name}_candidate"
+
+    if primary_subjects:
+        subjects_str = ", ".join(primary_subjects[:3])
+        primary_subject_label = primary_subjects[0]
+    else:
+        subjects_str = "highlight action and central subjects"
+        primary_subject_label = "highlight"
+
+    env_phrase = f"in {environment} setting" if environment else "in general footage"
+
+    keywords_list = list(primary_subjects)
+    if environment and environment not in keywords_list:
+        keywords_list.append(environment)
+
+    system_prompt = (
+        f"You are a video analyst specializing in {environment} footage and evaluating {subjects_str} highlights."
+        if environment
+        else f"You are a video analyst evaluating {subjects_str} highlights."
+    )
+
+    coarse_prompt = (
+        f"Analyze this video frame for candidate screening {env_phrase}.\n"
+        f"Target subjects: {subjects_str}.\n\n"
+        "CAMERA ORIENTATION & USABILITY CHECK:\n"
+        "- The camera must be intentionally aimed and upright (right-side up).\n"
+        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
+        "  If the camera is inside a pocket/bag, pointed accidentally at the floor/ground, covered,\n"
+        "  upside down, inverted, dangling on a clip/strap, spinning uncontrollably, or completely blurred,\n"
+        "  you MUST reject the frame:\n"
+        "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
+        "- Accidental, inverted, dangling, or unusable frames must always be rejected even if a subject is partially visible.\n\n"
+        "Return a JSON object with:\n"
+        "- detected: boolean (true ONLY if target subject is present AND camera is upright and usable)\n"
+        f"- subject: string (name of detected subject, e.g. '{primary_subject_label}' or 'none')\n"
+        f"- category: string ('{name}')\n"
+        "- confidence: float (0.0 to 1.0)\n"
+        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
+        "- description: string (short note on subject or rejection reason)\n"
+        "- timestamp: float (seconds in the clip)\n"
+    )
+
+    fine_prompt = (
+        f"Analyze this video frame in detail for {subjects_str} {env_phrase}.\n\n"
+        "QUALITY EVALUATION RUBRIC (1-10):\n"
+        "Assess both subject presence and shot execution:\n"
+        "1. Lighting & Exposure: Well-exposed, balanced natural or artificial lighting, clear subject contrast.\n"
+        f"2. Focus & Clarity: {subjects_str.capitalize()} is in crisp, sharp focus, free of motion blur.\n"
+        "3. Camera Stability: Smooth camera motion or steady hold without jerky shake or rapid vibration.\n"
+        "4. Subject Composition: Intentional upright framing and composition centering or highlighting the subject.\n\n"
+        "Scoring Scale:\n"
+        "- 9-10 (Exceptional): Razor-sharp focus, beautiful lighting, rock-steady camera, compelling subject composition.\n"
+        "- 7-8 (Strong Highlight): Good lighting, sharp subject, minimal camera shake, well-framed composition.\n"
+        "- 5-6 (Acceptable): Adequate lighting, slight softness or distance, minor camera wobble.\n"
+        "- 1-4 (Reject): Dark/murky, out of focus, severe camera shake, accidental, inverted, dangling, or unusable.\n\n"
+        "Return a JSON object with:\n"
+        "- detected: boolean (is this a clear highlight moment?)\n"
+        "- subject: string (subject name or 'unknown')\n"
+        "- confidence: float (0.0 to 1.0)\n"
+        "- quality_score: int (1-10 based on the rubric above)\n"
+        "- description: string (details on subject, lighting, focus, and stability)\n"
+        "- timestamp: float (seconds in the clip)\n"
+    )
+
+    return {
+        "name": name,
+        "domain": "generic",
+        "coarse_prompt": coarse_prompt,
+        "fine_prompt": fine_prompt,
+        "recommended_threshold": _CANDIDATE_THRESHOLD,
+        "keywords": keywords_list,
+        "system_prompt": system_prompt,
+        "color": _CANDIDATE_COLOR,
+        "status": "candidate",
+        "environment": environment,
+        "primary_subjects": primary_subjects,
+    }

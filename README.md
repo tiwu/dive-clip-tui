@@ -128,6 +128,8 @@ uv run dive-clip classify --input ./footage --output ./outputs/classifications.j
 
 Pass 0 samples targeted representative frames dynamically based on clip duration (configured via `scan_parameters.classify_frames_count`, default 3, plus 1 per 5 min up to `classify_frames_max`, default 8) to identify the domain and verify usability without scanning the entire video. Results display each clip's domain, mean confidence, usability status, and uncertainty flags (flagged when frames disagree, when confidence is below 0.6, or when VLM responses are unusable).
 
+To synthesize a reviewable prompt candidate for `generic` clips, add `--specialize-generic` (optionally `--candidate-output <path.json>`; defaults to `prompt_candidates.json` next to the output). Candidates are never used by `dive-clip scan` until you copy them into your config yourself.
+
 #### Reusing classifications in later scans
 
 To reuse confident domain labels and avoid reclassifying clips in a full scan:

@@ -34,7 +34,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
 from utils.config import ConfigError, load_config, load_general_config  # noqa: E402
 from utils.logging_setup import configure_logging, get_console  # noqa: E402
-from utils.models import ClassificationOutput  # noqa: E402
+from utils.models import (  # noqa: E402
+    ClassificationOutput,
+    PromptCandidate,
+    PromptCandidateOutput,
+)
+from utils.prompt_templates import (  # noqa: E402
+    create_prompt_candidate_for_generic,
+    infer_generic_context,
+)
 from utils.run_archive import (  # noqa: E402
     archive_run_artifacts,
     find_latest_run_dir,
@@ -1090,8 +1098,53 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _export_generic_prompt_candidates(
+    classifications: list[Any],
+    output_file: Path,
+    candidate_output: str | None,
+) -> None:
+    """Generate and write prompt candidates for generic clips using inferred context."""
+    generic_clips = [c for c in classifications if c.domain == "generic"]
+    if not generic_clips:
+        logger.info("No generic clips found; prompt candidates not generated.")
+        return
+
+    cand_p = (
+        Path(candidate_output)
+        if candidate_output
+        else output_file.parent / "prompt_candidates.json"
+    )
+    candidate_file = cand_p if cand_p.suffix == ".json" else cand_p / "prompt_candidates.json"
+    candidate_file.parent.mkdir(parents=True, exist_ok=True)
+
+    usable_generic = [c for c in generic_clips if c.usable]
+    clips_for_context = usable_generic if usable_generic else generic_clips
+
+    inferred_context = infer_generic_context(clips_for_context)
+    candidate = PromptCandidate.model_validate(
+        create_prompt_candidate_for_generic(inferred_context)
+    )
+    candidates = [candidate]
+    candidate_output_obj = PromptCandidateOutput(
+        name=candidate.name,
+        inferred_context=inferred_context,
+        coarse_prompt=candidate.coarse_prompt,
+        fine_prompt=candidate.fine_prompt,
+        recommended_threshold=candidate.recommended_threshold,
+        total_candidates=len(candidates),
+        candidates=candidates,
+    )
+    tmp_file = candidate_file.with_suffix(".json.tmp")
+    tmp_file.write_text(candidate_output_obj.model_dump_json(indent=2), encoding="utf-8")
+    tmp_file.replace(candidate_file)
+    logger.info("Saved generic prompt candidate(s) to %s", candidate_file)
+
+
 def cmd_classify(args: argparse.Namespace) -> int:
     """Run standalone Pass 0 domain classification on video footage."""
+    if args.candidate_output and not args.specialize_generic:
+        logger.error("--candidate-output requires --specialize-generic.")
+        return 1
     try:
         general = load_general_config(args.config)
         config = load_config(args.config)
@@ -1165,6 +1218,9 @@ def cmd_classify(args: argparse.Namespace) -> int:
     )
     output_file.write_text(output_obj.model_dump_json(indent=2), encoding="utf-8")
     logger.info("Saved classifications to %s", output_file)
+
+    if args.specialize_generic:
+        _export_generic_prompt_candidates(classifications, output_file, args.candidate_output)
 
     # Print results table
     table = Table(title="Pass 0 Domain Classification Results")
@@ -1300,6 +1356,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional logfile path",
+    )
+    classify_p.add_argument(
+        "--specialize-generic",
+        action="store_true",
+        help="Synthesize candidate coarse and fine prompt templates for generic footage",
+    )
+    classify_p.add_argument(
+        "--candidate-output",
+        default=None,
+        metavar="PATH",
+        help="Destination path for candidate prompt templates JSON; requires --specialize-generic (defaults to <output_dir>/prompt_candidates.json)",
     )
     classify_p.set_defaults(func=cmd_classify)
 
