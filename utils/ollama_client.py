@@ -187,12 +187,9 @@ class OllamaClient:
 
         try:
             logger.debug("Sending Ollama request to %s", self.host)
-            # Use requests.post if explicitly mocked in unit tests, otherwise use pooled session
-            post_fn = (
-                requests.post
-                if getattr(requests.post, "_mock_self", None) is not None
-                else self.session.post
-            )
+            # Use requests.post if mocked in unit tests, otherwise use pooled session
+            is_mocked = hasattr(requests.post, "mock_calls")
+            post_fn = requests.post if is_mocked else self.session.post
             response = post_fn(
                 f"{self.host}/api/generate",
                 json=payload,

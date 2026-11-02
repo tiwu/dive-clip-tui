@@ -1607,6 +1607,8 @@ def main() -> None:
                     logger.info(
                         "Skipping already processed clip: %s (%d/%d)", clip_name, index, len(clips)
                     )
+                    if active_prefetch and active_prefetch.get("clip_id") == get_clip_id(clip):
+                        active_prefetch = None
                     if overall_task is not None:
                         progress.advance(overall_task)
                     continue
@@ -1625,9 +1627,19 @@ def main() -> None:
 
                 def on_coarse_start_cb(idx=index):
                     nonlocal active_prefetch
-                    if prefetch_executor is None or idx >= len(clips):
+                    if prefetch_executor is None:
                         return
-                    next_c = clips[idx]
+                    # Advance to next uncompleted clip when resuming
+                    next_idx = idx
+                    while next_idx < len(clips):
+                        candidate = clips[next_idx]
+                        if not (args.resume and candidate.get("file_name") in completed_clips):
+                            break
+                        next_idx += 1
+
+                    if next_idx >= len(clips):
+                        return
+                    next_c = clips[next_idx]
                     next_cid = get_clip_id(next_c)
                     next_dir = work_dir / next_cid / "coarse"
                     try:
