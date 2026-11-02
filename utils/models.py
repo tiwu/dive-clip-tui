@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -96,3 +98,32 @@ class ClassificationOutput(BaseModel):
 
     total_clips: int = Field(..., ge=0)
     classifications: list[ClipClassification] = Field(default_factory=list)
+
+
+class PromptCandidate(BaseModel):
+    """A generated prompt template candidate for human evaluation; never run by scans."""
+
+    name: str
+    domain: str = "generic"
+    coarse_prompt: str
+    fine_prompt: str
+    recommended_threshold: float = Field(0.65, ge=0.0, le=1.0)
+    keywords: list[str] = Field(default_factory=list)
+    system_prompt: str = ""
+    color: str = "Magenta"
+    status: str = "candidate"
+    environment: str = ""
+    primary_subjects: list[str] = Field(default_factory=list)
+
+
+class PromptCandidateOutput(BaseModel):
+    """Schema of the prompt_candidates.json file written by `dive-clip classify`."""
+
+    name: str
+    domain: str = "generic"
+    inferred_context: dict[str, Any] = Field(default_factory=dict)
+    coarse_prompt: str
+    fine_prompt: str
+    recommended_threshold: float = Field(0.65, ge=0.0, le=1.0)
+    total_candidates: int = Field(..., ge=0)
+    candidates: list[PromptCandidate] = Field(default_factory=list)

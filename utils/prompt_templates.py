@@ -185,7 +185,7 @@ PELAGICS_TEMPLATE = PromptTemplate(
         "1. Lighting: Well-lit with natural or video light, good contrast, minimal backscatter/murk.\n"
         "2. Focus & Clarity: Pelagic subject is in sharp focus, not blurry or soft.\n"
         "3. Camera Stability: Smooth camera movement without excessive shake, rapid tumbling, or heavy motion blur.\n"
-        "4. Framing & Orientation: Upright, intentional composition centering the animal.\n\n"
+        "4. Subject Composition: Upright, intentional composition centering the animal.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Crisp focus on animal, clear water/lighting, smooth stable camera.\n"
         "- 7-8 (Strong Highlight): Good lighting, animal in clear focus, minimal camera shake.\n"
@@ -248,7 +248,7 @@ MACRO_TEMPLATE = PromptTemplate(
         "1. Lighting: Proper lighting illuminating macro details, balanced exposure, no blown-out highlights.\n"
         "2. Focus & Clarity: Macro subject is in crisp, sharp focus (shallow depth of field placed correctly).\n"
         "3. Camera Stability: Rock-steady camera without shake, surge drift, or motion blur.\n"
-        "4. Framing & Orientation: Upright, clean macro composition.\n\n"
+        "4. Subject Composition: Upright, clean macro composition.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Razor-sharp focus on subject, beautiful lighting, steady motionless camera.\n"
         "- 7-8 (Strong Highlight): Sharp focus on macro subject, good lighting, minimal camera motion.\n"
@@ -311,7 +311,7 @@ DIVER_TEMPLATE = PromptTemplate(
         "1. Lighting: Good visibility of diver and background, balanced exposure.\n"
         "2. Focus & Clarity: Diver and gear in sharp focus, clear facial mask/expressions or silhouette.\n"
         "3. Camera Stability: Smooth camera gliding or steady hold, free of jerky movements or motion blur.\n"
-        "4. Framing & Orientation: Upright, cinematic composition with good rule of thirds or leading lines.\n\n"
+        "4. Subject Composition: Upright, cinematic composition with good rule of thirds or leading lines.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Crisp focus, dramatic lighting/silhouette, smooth stable glide, compelling action.\n"
         "- 7-8 (Strong Highlight): Good lighting, sharp diver, stable camera framing.\n"
@@ -365,7 +365,7 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
         "1. Lighting: Proper underwater lighting, natural contrast, clear visibility with minimal backscatter.\n"
         "2. Focus & Clarity: Marine subject is in crisp, sharp focus.\n"
         "3. Camera Stability: Smooth camera tracking or steady hold, free of jerky shake or heavy motion blur.\n"
-        "4. Framing & Orientation: Upright, intentional composition highlighting the subject.\n\n"
+        "4. Subject Composition: Upright, intentional composition highlighting the subject.\n\n"
         "Scoring Scale:\n"
         "- 9-10 (Exceptional): Razor-sharp focus, beautiful lighting, clear water, smooth stable camera.\n"
         "- 7-8 (Strong Highlight): Good lighting, sharp subject, stable camera with minimal motion blur.\n"
@@ -1296,7 +1296,7 @@ def infer_generic_context(
                             first_seen_keys.append(key)
 
     # Sort unique subjects by frequency (descending), preserving first-seen order on ties
-    sorted_subj_keys = sorted(first_seen_keys, key=lambda k: (-subj_counts[k], k))
+    sorted_subj_keys = sorted(first_seen_keys, key=lambda k: -subj_counts[k])
     ranked_subjects = [subj_canonical[k] for k in sorted_subj_keys]
 
     # 3. Derive template slug

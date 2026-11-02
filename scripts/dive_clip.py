@@ -34,7 +34,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
 from utils.config import ConfigError, load_config, load_general_config  # noqa: E402
 from utils.logging_setup import configure_logging, get_console  # noqa: E402
-from utils.models import ClassificationOutput  # noqa: E402
+from utils.models import (  # noqa: E402
+    ClassificationOutput,
+    PromptCandidate,
+    PromptCandidateOutput,
+)
 from utils.prompt_templates import (  # noqa: E402
     create_prompt_candidate_for_generic,
     infer_generic_context,
@@ -1170,17 +1174,10 @@ def cmd_classify(args: argparse.Namespace) -> int:
     output_file.write_text(output_obj.model_dump_json(indent=2), encoding="utf-8")
     logger.info("Saved classifications to %s", output_file)
 
-    specialize_requested = bool(getattr(args, "specialize_generic", False)) or bool(
-        getattr(args, "candidate_output", None)
-    )
-    if specialize_requested:
-        generic_clips = [
-            c
-            for c in classifications
-            if (c.domain if hasattr(c, "domain") else c.get("domain")) == "generic"
-        ]
+    if args.specialize_generic:
+        generic_clips = [c for c in classifications if c.domain == "generic"]
         if generic_clips:
-            if getattr(args, "candidate_output", None):
+            if args.candidate_output:
                 cand_p = Path(args.candidate_output)
             elif isinstance(args.specialize_generic, str):
                 cand_p = Path(args.specialize_generic)
@@ -1192,43 +1189,23 @@ def cmd_classify(args: argparse.Namespace) -> int:
             )
             candidate_file.parent.mkdir(parents=True, exist_ok=True)
 
-            usable_generic = [
-                c
-                for c in generic_clips
-                if (c.usable if hasattr(c, "usable") else c.get("usable", True))
-            ]
+            usable_generic = [c for c in generic_clips if c.usable]
             clips_for_context = usable_generic if usable_generic else generic_clips
 
             inferred_context = infer_generic_context(clips_for_context)
-            candidate_prompt = create_prompt_candidate_for_generic(inferred_context)
-
-            if hasattr(candidate_prompt, "__dict__") and not isinstance(candidate_prompt, dict):
-                cand_dict = {
-                    "name": getattr(candidate_prompt, "name", "generic_specialized"),
-                    "domain": getattr(candidate_prompt, "domain", "generic"),
-                    "coarse_prompt": getattr(candidate_prompt, "coarse_prompt", ""),
-                    "fine_prompt": getattr(candidate_prompt, "fine_prompt", ""),
-                    "recommended_threshold": getattr(
-                        candidate_prompt, "recommended_threshold", 0.65
-                    ),
-                }
-            else:
-                cand_dict = dict(candidate_prompt)
-
-            candidates_list = [cand_dict]
-
-            candidate_payload = {
-                "name": cand_dict.get("name", "generic_specialized"),
-                "domain": "generic",
-                "inferred_context": inferred_context,
-                "coarse_prompt": cand_dict.get("coarse_prompt", ""),
-                "fine_prompt": cand_dict.get("fine_prompt", ""),
-                "recommended_threshold": cand_dict.get("recommended_threshold", 0.65),
-                "total_candidates": len(candidates_list),
-                "candidates": candidates_list,
-            }
-
-            candidate_file.write_text(json.dumps(candidate_payload, indent=2), encoding="utf-8")
+            candidate = PromptCandidate.model_validate(
+                create_prompt_candidate_for_generic(inferred_context)
+            )
+            candidate_output = PromptCandidateOutput(
+                name=candidate.name,
+                inferred_context=inferred_context,
+                coarse_prompt=candidate.coarse_prompt,
+                fine_prompt=candidate.fine_prompt,
+                recommended_threshold=candidate.recommended_threshold,
+                total_candidates=1,
+                candidates=[candidate],
+            )
+            candidate_file.write_text(candidate_output.model_dump_json(indent=2), encoding="utf-8")
             logger.info("Saved generic prompt candidate(s) to %s", candidate_file)
         else:
             logger.info("No generic clips found; prompt candidates not generated.")
@@ -1380,7 +1357,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--candidate-output",
         default=None,
         metavar="PATH",
-        help="Destination path for candidate prompt templates JSON (defaults to <output_dir>/prompt_candidates.json)",
+        help="Destination path for candidate prompt templates JSON; requires --specialize-generic (defaults to <output_dir>/prompt_candidates.json)",
     )
     classify_p.set_defaults(func=cmd_classify)
 

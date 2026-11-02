@@ -346,3 +346,46 @@ def test_load_custom_templates() -> None:
     # Custom template added to underwater domain
     uw_names = [t.name for t in reg["underwater"].templates]
     assert "wreck_specialist" in uw_names
+
+
+def test_wildlife_templates() -> None:
+    """Wildlife domain exposes specialist templates, fallback, and 1-10 rubric."""
+    from utils.prompt_templates import BUILTIN_DOMAINS
+
+    wildlife = BUILTIN_DOMAINS["wildlife"]
+    assert {t.name for t in wildlife.templates} == {
+        "wildlife_animal",
+        "wildlife_bird",
+        "wildlife_action",
+    }
+    assert wildlife.fallback_template.name == "broad_wildlife"
+    assert "accidental, inverted, dangling, or unusable" in wildlife.coarse_prompt
+    for template in [*wildlife.templates, wildlife.fallback_template]:
+        assert "1-10" in template.fine_prompt
+        assert "Subject Composition" in template.fine_prompt
+
+
+def test_underwater_fine_prompts_use_subject_composition() -> None:
+    """Underwater rubrics name subject composition like every other domain."""
+    for template in (PELAGICS_TEMPLATE, MACRO_TEMPLATE, DIVER_TEMPLATE, BROAD_MARINE_TEMPLATE):
+        assert "Subject Composition" in template.fine_prompt
+
+
+def test_infer_generic_context_preserves_first_seen_order_on_ties() -> None:
+    """Equally frequent subjects keep first-seen order, not alphabetical order."""
+    from utils.prompt_templates import infer_generic_context
+
+    records = [{"domain": "generic", "primary_subjects": ["zebra", "ant"]}]
+    assert infer_generic_context(records)["primary_subjects"] == ["zebra", "ant"]
+
+
+def test_prompt_candidate_matches_schema() -> None:
+    """Generated candidates validate against the PromptCandidate model."""
+    from utils.models import PromptCandidate
+    from utils.prompt_templates import create_prompt_candidate_for_generic
+
+    candidate = PromptCandidate.model_validate(
+        create_prompt_candidate_for_generic({"environment": "forest", "primary_subjects": ["fox"]})
+    )
+    assert candidate.status == "candidate"
+    assert candidate.primary_subjects == ["fox"]
