@@ -162,6 +162,26 @@ def test_archive_run_artifacts_with_aftermovie(tmp_path: Path) -> None:
     assert "aftermovie" not in archived_missing
 
 
+def test_archive_run_artifacts_with_classifications(tmp_path: Path) -> None:
+    """archive_run_artifacts copies classifications_path into run_dir as classifications.json."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    classifications = output_dir / "custom_classifications.json"
+    classifications.write_text('{"total_clips": 1, "classifications": []}', encoding="utf-8")
+
+    run_dir = output_dir / "runs" / "run-20261102-120000"
+    archived = archive_run_artifacts(
+        run_dir,
+        classifications_path=classifications,
+    )
+
+    assert "classifications" in archived
+    assert archived["classifications"] == run_dir / "classifications.json"
+    assert (run_dir / "classifications.json").exists()
+    assert "total_clips" in (run_dir / "classifications.json").read_text(encoding="utf-8")
+
+
 def test_resolve_assembly_artifacts(tmp_path: Path) -> None:
     """resolve_assembly_artifacts resolves from explicit paths, latest run, or output dir."""
     from utils.run_archive import resolve_assembly_artifacts, update_latest_symlink

@@ -571,15 +571,65 @@ def merge_classifications_into_manifest(
     return reused_count, ignored_uncertain_count, unmatched_ids
 
 
+def save_classifications_atomic(
+    output_path: Path | str,
+    output_obj: ClassificationOutput,
+) -> None:
+    """Atomically write classification output to disk using a temporary file."""
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = out_path.with_name(f".{out_path.name}.tmp.{os.getpid()}")
+    try:
+        temp_path.write_text(output_obj.model_dump_json(indent=2), encoding="utf-8")
+        temp_path.replace(out_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
 def classify_footage(
     clips: list[dict[str, Any]],
     config: dict[str, Any],
     work_dir: Path | None = None,
     client: OllamaClient | None = None,
+    output_file: Path | str | list[Path | str] | None = None,
+    resume: bool = False,
 ) -> list[ClipClassification]:
     """Run Pass 0 standalone domain classification across all clips in a folder/manifest."""
     if not clips:
         return []
+
+    output_paths: list[Path] = []
+    if output_file is not None:
+        if isinstance(output_file, (list, tuple)):
+            output_paths = [Path(p) for p in output_file]
+        else:
+            output_paths = [Path(output_file)]
+
+    existing_map: dict[str, ClipClassification] = {}
+    if resume:
+        for p in output_paths:
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    loaded = ClassificationOutput.model_validate(data)
+                    for item in loaded.classifications:
+                        if item.clip_id:
+                            existing_map[item.clip_id] = item
+                        if item.file_name:
+                            existing_map[item.file_name] = item
+                    logger.info(
+                        "Loaded %d existing classification(s) for resume from %s",
+                        len(loaded.classifications),
+                        p,
+                    )
+                    break
+                except Exception as exc:
+                    logger.warning(
+                        "Could not load classifications for resume from %s: %s",
+                        p,
+                        exc,
+                    )
 
     scan_params = config.get("scan_parameters", {})
     processing_cfg = config.get("processing", {})
@@ -611,6 +661,33 @@ def classify_footage(
             file_path = clip.get("file_path", "")
             clip_name = clip.get("file_name", Path(file_path).name if file_path else f"clip_{idx}")
             clip_id = get_clip_id(clip)
+
+            if resume and (clip_id in existing_map or clip_name in existing_map):
+                classification = existing_map.get(clip_id) or existing_map[clip_name]
+                logger.info(
+                    "Resuming %s (%d/%d): using existing classification (%s)",
+                    clip_name,
+                    idx,
+                    len(clips),
+                    classification.domain,
+                )
+                results.append(classification)
+                if output_paths:
+                    out_obj = ClassificationOutput(
+                        total_clips=len(results),
+                        classifications=results,
+                    )
+                    for p in output_paths:
+                        try:
+                            save_classifications_atomic(p, out_obj)
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to incrementally save classifications to %s: %s",
+                                p,
+                                exc,
+                            )
+                continue
+
             clip_work = work_dir / f"classify_{clip_id}"
             clip_work.mkdir(parents=True, exist_ok=True)
 
@@ -646,6 +723,21 @@ def classify_footage(
                 )
             results.append(classification)
             cleanup_work_dir(clip_work)
+
+            if output_paths:
+                out_obj = ClassificationOutput(
+                    total_clips=len(results),
+                    classifications=results,
+                )
+                for p in output_paths:
+                    try:
+                        save_classifications_atomic(p, out_obj)
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to incrementally save classifications to %s: %s",
+                            p,
+                            exc,
+                        )
     finally:
         if temp_work_dir:
             cleanup_work_dir(work_dir)

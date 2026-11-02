@@ -1165,24 +1165,70 @@ def cmd_classify(args: argparse.Namespace) -> int:
         logger.error("Input folder does not exist: %s", input_folder)
         return 1
 
-    if args.output:
-        out_p = Path(args.output)
-        output_file = out_p if out_p.suffix == ".json" else out_p / "classifications.json"
+    output_value = args.output or general.get("output_dir") or "./outputs"
+    out_p = Path(output_value)
+    if out_p.suffix == ".json":
+        output_folder = out_p.parent
+        explicit_output_file: Path | None = out_p
     else:
-        output_dir = Path(general.get("output_dir") or "./outputs")
-        output_file = output_dir / "classifications.json"
+        output_folder = out_p
+        explicit_output_file = None
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_folder.mkdir(parents=True, exist_ok=True)
 
-    log_path = args.log_file or (output_file.parent / "classify.log")
+    resume_target = getattr(args, "resume", False)
+    is_resuming = resume_target is not False
+
+    if is_resuming:
+        if isinstance(resume_target, str):
+            try:
+                run_dir = resolve_run_dir(output_folder, resume_target)
+            except FileNotFoundError as exc:
+                logger.error("%s", exc)
+                return 1
+        else:
+            latest_dir = find_latest_run_dir(output_folder)
+            if latest_dir is not None:
+                run_dir = latest_dir
+            else:
+                logger.info(
+                    "No previous run found to resume in %s; starting a new run.", output_folder
+                )
+                run_dir = get_run_dir(output_folder)
+    else:
+        run_dir = get_run_dir(output_folder)
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    state_path = run_dir / "pipeline_state.json"
+    state = PipelineState(state_path)
+
+    state.init_run_metadata(
+        run_id=run_dir.name,
+        input_dir=input_folder,
+        output_dir=output_folder,
+        config_path=args.config,
+        cli_args=sys.argv[1:],
+    )
+
+    run_output_file = run_dir / "classifications.json"
+    dest_output_files: list[Path] = [run_output_file]
+    if explicit_output_file and explicit_output_file.resolve() != run_output_file.resolve():
+        dest_output_files.append(explicit_output_file)
+    root_classifications = output_folder / "classifications.json"
+    if root_classifications.resolve() not in [f.resolve() for f in dest_output_files]:
+        dest_output_files.append(root_classifications)
+
+    log_path = args.log_file or (run_dir / "classify.log")
     configure_logging(debug=args.debug, log_file=log_path)
+    update_latest_symlink(output_folder, run_dir)
 
     console = get_console()
     if console.is_terminal:
         console.print(
             Panel(
                 f"[bold white]Input:[/]  [yellow]{input_folder}[/]\n"
-                f"[bold white]Output:[/] [yellow]{output_file}[/]\n"
+                f"[bold white]Output:[/] [yellow]{run_output_file}[/]\n"
+                f"[bold white]Run:[/]    [cyan]{run_dir}[/]\n"
                 f"[bold white]Config:[/] [yellow]{args.config}[/]",
                 title="[bold cyan]Dive Clip Pass 0 Domain Classification[/bold cyan]",
                 border_style="cyan",
@@ -1190,9 +1236,11 @@ def cmd_classify(args: argparse.Namespace) -> int:
         )
 
     logger.info("Ingesting media from %s", input_folder)
+    manifest_path = run_dir / "manifest.json"
     try:
         ingest_mod = _load_ingest_module()
         clips = ingest_mod.ingest_folder(input_folder)
+        manifest_path.write_text(json.dumps(clips, indent=2), encoding="utf-8")
     except Exception as exc:
         logger.error("Failed to ingest folder %s: %s", input_folder, exc)
         return 1
@@ -1200,14 +1248,27 @@ def cmd_classify(args: argparse.Namespace) -> int:
     if not clips:
         logger.warning("No video files found in %s", input_folder)
         empty_out = ClassificationOutput(total_clips=0, classifications=[])
-        output_file.write_text(empty_out.model_dump_json(indent=2), encoding="utf-8")
-        logger.info("Empty classifications saved to %s", output_file)
+        for dest in dest_output_files:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(empty_out.model_dump_json(indent=2), encoding="utf-8")
+        logger.info("Empty classifications saved to %s", run_output_file)
+        archive_run_artifacts(
+            run_dir,
+            manifest_path=manifest_path,
+            log_file=log_path,
+            classifications_path=run_output_file,
+        )
         return 0
 
     logger.info("Classifying %d clip(s)...", len(clips))
     try:
         scan_mod = _load_scan_module()
-        classifications = scan_mod.classify_footage(clips, config)
+        classifications = scan_mod.classify_footage(
+            clips,
+            config,
+            output_file=dest_output_files,
+            resume=is_resuming,
+        )
     except Exception as exc:
         logger.error("Classification failed: %s", exc)
         return 1
@@ -1216,11 +1277,29 @@ def cmd_classify(args: argparse.Namespace) -> int:
         total_clips=len(classifications),
         classifications=classifications,
     )
-    output_file.write_text(output_obj.model_dump_json(indent=2), encoding="utf-8")
-    logger.info("Saved classifications to %s", output_file)
+    for dest in dest_output_files:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(output_obj.model_dump_json(indent=2), encoding="utf-8")
+    logger.info("Saved classifications to %s", run_output_file)
+
+    archive_run_artifacts(
+        run_dir,
+        manifest_path=manifest_path,
+        log_file=log_path,
+        classifications_path=run_output_file,
+    )
 
     if args.specialize_generic:
-        _export_generic_prompt_candidates(classifications, output_file, args.candidate_output)
+        candidate_dest = (
+            Path(args.candidate_output)
+            if args.candidate_output
+            else (run_dir / "prompt_candidates.json")
+        )
+        _export_generic_prompt_candidates(classifications, run_output_file, str(candidate_dest))
+        if explicit_output_file and not args.candidate_output:
+            cand_root = output_folder / "prompt_candidates.json"
+            if cand_root.resolve() != candidate_dest.resolve() and candidate_dest.exists():
+                shutil.copy2(candidate_dest, cand_root)
 
     # Print results table
     table = Table(title="Pass 0 Domain Classification Results")
@@ -1256,7 +1335,7 @@ def cmd_classify(args: argparse.Namespace) -> int:
         f"Total videos classified: {len(classifications)}",
         f"Confident: {confident_count} | Uncertain: {uncertain_count}",
         f"Domains: {', '.join(f'{k} ({v})' for k, v in sorted(domain_counts.items()))}",
-        f"Saved to: {output_file}",
+        f"Saved to: {run_output_file}",
     ]
     console.print(
         Panel("\n".join(summary_lines), title="Classification Summary", border_style="blue")
@@ -1348,6 +1427,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         default=None,
         help="Path to output classifications JSON (defaults to <general.output_dir>/classifications.json)",
+    )
+    classify_p.add_argument(
+        "--resume",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="RUN_ID_OR_PATH",
+        help="Resume execution (defaults to latest run if no run ID or path specified)",
     )
     classify_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     classify_p.add_argument("--debug", action="store_true", help="Enable debug logging")
