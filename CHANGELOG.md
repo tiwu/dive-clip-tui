@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-11-03
+
 ### Added
 - Incrementally flush stage traceability files (`classifications.json`, `pass1_coarse_trace.json`, `pass2_fine_trace.json`) to disk as clips and scan stages finish processing instead of only at scan completion.
 
