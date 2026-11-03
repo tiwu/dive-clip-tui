@@ -40,6 +40,32 @@ Review `config.yaml` before scanning. In particular, set `general.output_dir`
 and the Ollama model/host. Optionally set `general.input_dir` to the footage
 folder so `dive-clip scan` can run without `--input`.
 
+### Using a cloud VLM (OpenRouter)
+
+Ollama is the default. To run the scan on an OpenRouter vision model instead, set the
+API key and select the provider in `config.yaml`:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+```
+
+```yaml
+vlm:
+  provider: "openrouter"
+  openrouter:
+    model: "nvidia/nemotron-3.5-super-vl:free"
+```
+
+Requests are rate limited (`requests_per_minute`) and retried with backoff on HTTP
+429/5xx. Replies that are not pure JSON are recovered when they contain a JSON object.
+Free-tier models have their own quotas; managing them is up to you.
+
+> [!WARNING]
+> **Privacy:** with `provider: "openrouter"`, sampled video frames are uploaded to
+> OpenRouter and the model provider behind it. Nothing leaves your machine with the
+> default `ollama` provider. The scan logs a warning at startup when a cloud provider is
+> active.
+
 ### Using a remote Ollama
 
 `OLLAMA_HOST` overrides `ollama.host` from the config file, so a remote server can
@@ -296,6 +322,7 @@ utils/
   logging_setup.py         # Shared console and file logging setup
   models.py                # Pydantic manifest and detection models
   ollama_client.py         # Ollama API client and metrics
+  vlm_client.py            # VLM client protocol, OpenRouter backend, provider factory
   prompt_templates.py      # Domain prompts and subject-routed templates
   run_archive.py           # Self-contained run snapshots and latest symlink
   selection.py             # Maximal Marginal Relevance (MMR) highlight selection and diversity

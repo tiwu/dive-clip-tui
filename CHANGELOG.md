@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add OpenRouter as a cloud VLM backend for the scan pipeline, selected with the new `vlm` config section (`provider: ollama | openrouter`, key from `OPENROUTER_API_KEY`). Ollama stays the default (#66).
+
 ## [0.27.1] - 2026-11-03
 
 ### Added

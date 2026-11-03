@@ -15,6 +15,17 @@ ollama:
   model: "qwen2.5vl:3b"
   timeout_seconds: 120
 
+# VLM backend for the scan pipeline (Pass 0, 1 and 2).
+# "ollama" (default) uses the `ollama` section above. "openrouter" uploads sampled frames
+# to OpenRouter's cloud API; set the OPENROUTER_API_KEY environment variable first.
+vlm:
+  provider: "ollama"                # "ollama" or "openrouter"
+  openrouter:
+    model: "nvidia/nemotron-3.5-super-vl:free"
+    timeout_seconds: 120
+    requests_per_minute: 20         # Client-side rate limit
+    max_retries: 3                  # Retries on HTTP 429/5xx with exponential backoff
+
 scan_parameters:
   domain: "auto"                    # "auto" (Pass 0 classifies clip), "underwater", "motorcycle", or "generic"
   classify_clips: "auto"            # "auto" (run Pass 0 unless domain/tags set), "always", or "off"
