@@ -361,6 +361,41 @@ def aggregate_frame_context(
     return aggregated_env, aggregated_subjects
 
 
+def aggregate_suggested_domain(
+    frame_results: list[dict[str, Any]],
+    winning_domain: str | None = None,
+) -> str | None:
+    """Aggregate the most representative suggested_domain for generic clips."""
+    if winning_domain != "generic":
+        return None
+
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    max_conf: dict[str, float] = {}
+
+    for frame in frame_results:
+        sug = frame.get("suggested_domain")
+        if not sug or not isinstance(sug, str):
+            continue
+        clean_sug = sug.strip()
+        if not clean_sug:
+            continue
+        key = clean_sug.lower()
+        counts[key] = counts.get(key, 0) + 1
+        conf = float(frame.get("confidence") or 0.0)
+        if key not in display:
+            display[key] = clean_sug
+            max_conf[key] = conf
+        else:
+            max_conf[key] = max(max_conf[key], conf)
+
+    if not counts:
+        return None
+
+    best_key = max(counts.keys(), key=lambda k: (counts[k], max_conf.get(k, 0.0)))
+    return display[best_key]
+
+
 def classify_clip(
     clip: dict[str, Any] | ClipManifest,
     sample_frames: list[dict[str, Any]],
@@ -446,6 +481,9 @@ def classify_clip(
 
         usable_results.append({
             "domain": matched_domain,
+            "suggested_domain": result.get("suggested_domain")
+            if matched_domain == "generic" and result.get("suggested_domain") is not None
+            else None,
             "confidence": max(0.0, min(1.0, confidence)),
             "usable": usable_val,
             "quality_score": q_score,
@@ -462,12 +500,16 @@ def classify_clip(
     aggregated_env, aggregated_subjects = aggregate_frame_context(
         usable_results, winning_domain=winning_domain
     )
+    aggregated_suggested_domain = aggregate_suggested_domain(
+        usable_results, winning_domain=winning_domain
+    )
 
     return ClipClassification(
         clip_id=clip_id,
         file_name=file_name,
         file_path=str(file_path),
         domain=winning_domain,
+        suggested_domain=aggregated_suggested_domain,
         confidence=mean_conf,
         uncertain=is_uncertain,
         reason=reason,

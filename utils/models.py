@@ -76,6 +76,9 @@ class ClipClassification(BaseModel):
     file_name: str = Field(..., description="Original file name")
     file_path: str = Field(..., description="Absolute file path")
     domain: str = Field(..., description="Classified domain or generic")
+    suggested_domain: str | None = Field(
+        default=None, description="Suggested specific domain if classified as generic"
+    )
     confidence: float | None = Field(
         default=None, ge=0, le=1, description="Mean confidence score for the winning domain"
     )

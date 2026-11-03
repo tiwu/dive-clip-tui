@@ -71,27 +71,44 @@ class DomainConfig:
 # =============================================================================
 
 VIDEO_CLASSIFICATION_PROMPT = (
-    "Analyze this video frame and classify the primary setting, domain, and footage usability.\n\n"
-    "Target domains:\n"
+    "Analyze this video frame from an action camera or smartphone. Your goal is to classify "
+    "the domain and rigorously assess the technical usability of the footage for downstream processing.\n\n"
+    "Target Domains:\n"
     "- 'underwater': Scuba diving, snorkeling, free diving, marine life, coral reefs, "
-    "underwater wrecks, diver action, oceanic or aquatic environments.\n"
-    "- 'motorcycle': Motorcycle, motorbike, scooter, riding, cockpit or handlebar POV, "
-    "pavement, track, twisties, curves, group ride, highway or scenic road ride.\n"
-    "- 'wildlife': Terrestrial animals, safari game, birds, raptors, predators, mammals, "
-    "reptiles, nature reserves, tracking, hunting, flight, or nesting in natural habitats.\n"
-    "- 'generic': Any other domain (e.g. action sports, hiking, travel, city, family, landscape).\n\n"
-    "Usability & Camera State:\n"
-    "- If the camera is inside a bag or pocket, lens is covered/black, upside down, tumbling, "
-    "dangling on a clip/lanyard, or showing only floor/empty darkness with no scene, "
-    "set 'usable': false and 'quality_score': 1.\n"
-    "- Otherwise set 'usable': true with a quality_score from 4 to 10.\n\n"
-    "Return a JSON object with:\n"
-    "- domain: string (one of 'underwater', 'motorcycle', 'wildlife', 'generic')\n"
-    "- confidence: float (0.0 to 1.0)\n"
-    "- usable: boolean (true if footage is normal/usable; false if in-bag, covered, upside-down, or dangling)\n"
-    "- quality_score: integer (1-10; 1-3 for in-bag/dangling/chaotic, 4+ for usable footage)\n"
-    "- environment: string (brief note on setting, e.g. 'coral reef wall', 'mountain pass road', 'savannah grassland')\n"
-    "- primary_subjects: list of strings (main visible subjects/elements)\n"
+    "wrecks, aquatic environments.\n"
+    "- 'motorcycle': Motorbike, scooter, riding, cockpit/handlebar POV, pavement, track, "
+    "curves, group rides.\n"
+    "- 'wildlife': Terrestrial animals, safari game, birds, predators, reptiles, tracking, "
+    "natural habitats.\n"
+    "- 'generic': Any other domain not listed above. If selected, you must provide a specific "
+    "categorization in the `suggested_domain` field.\n Don't limit your categorization to the listed domains.\n"
+    "Usability & Quality Criteria:\n"
+    "Evaluate the frame for lighting, stability (indicated by motion blur), and clear framing.\n"
+    "Set 'usable': false and 'quality_score': 1-3 if ANY of these apply:\n"
+    "- Camera is in a bag/pocket, lens is covered (e.g., by fingers/dirt), or pointing at empty darkness/floor.\n"
+    "- Extreme motion blur indicating severe camera shake, making subjects unrecognizable.\n"
+    "- Severe overexposure or underexposure.\n"
+    "- The camera is clearly tumbling, upside-down (unintentionally), or dangling chaotically.\n\n"
+    "Otherwise, set 'usable': true and assign a 'quality_score' (4-10) based on sharpness, "
+    "lighting balance, and framing.\n\n"
+    "Return ONLY a valid JSON object with the exact following structure:\n"
+    "{\n"
+    '  "domain": "string (strictly ONE of: underwater | motorcycle | wildlife | generic)",\n'
+    '  "suggested_domain": "string (required when domain is \'generic\', suggest a specific category like '
+    "'mountain_biking', 'skiing', 'cityscape', or what you see.)\",\n"
+    '  "confidence": "float (0.0 to 1.0)",\n'
+    '  "usable": "boolean",\n'
+    "  \"reject_reasons\": [\"list of strings (e.g., 'heavy motion blur', 'underexposed', 'lens covered') "
+    'or empty list if usable"],\n'
+    '  "quality_score": "integer (1-10)",\n'
+    '  "technical_details": {\n'
+    '    "lighting": "string (good | overexposed | underexposed | harsh shadows)",\n'
+    '    "sharpness": "string (sharp | slight blur | heavy motion blur)"\n'
+    "  },\n"
+    "  \"environment\": \"string (brief specific setting, e.g., 'coral reef wall', 'mountain pass road')\",\n"
+    '  "primary_subjects": ["list of strings (main visible elements)"],\n'
+    '  "scene_description": "string (a concise 1-2 sentence visual summary of the action and context)"\n'
+    "}\n"
 )
 
 
@@ -583,51 +600,71 @@ BROAD_MOTORCYCLE_TEMPLATE = PromptTemplate(
 # =============================================================================
 
 GENERIC_COARSE_PROMPT = (
-    "Analyze this video frame for candidate screening.\n"
-    "Target subjects: compelling action, clear central subject, scenic view, or notable event.\n\n"
-    "CAMERA ORIENTATION & USABILITY CHECK:\n"
-    "- The camera must be intentionally aimed and upright (right-side up).\n"
-    "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
-    "  If the camera is inside a pocket/bag, pointed accidentally at the floor/ground, covered,\n"
-    "  upside down, inverted, dangling on a clip/strap, spinning uncontrollably, or completely blurred,\n"
-    "  you MUST reject the frame:\n"
-    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-    "- Accidental, inverted, dangling, or unusable frames must always be rejected even if an object is visible.\n\n"
-    "Return a JSON object with:\n"
-    "- detected: boolean (true ONLY if an intentional highlight subject is present AND camera is upright and usable)\n"
-    "- subject: string (name of subject/action or 'none')\n"
-    "- category: string ('generic_highlight')\n"
-    "- confidence: float (0.0 to 1.0)\n"
-    "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
-    "- description: string (short note on subject or rejection reason)\n"
-    "- timestamp: float (seconds in the clip)\n"
+    "Analyze this high-resolution video frame for candidate screening and highlight detection. "
+    "Your objective is to identify compelling action, a clear central subject, scenic views, or notable events.\n\n"
+    "CAMERA ORIENTATION & STRICT REJECTION RULES:\n"
+    "The camera MUST be intentionally aimed and right-side up.\n"
+    "You MUST explicitly reject the frame (set 'detected': false, 'quality_score': 1-3) if ANY of the following apply, "
+    "even if a subject is partially visible:\n"
+    "- Accidental footage: inside a pocket/bag, lens covered, or pointed directly at the floor/ground.\n"
+    "- Bad orientation: upside down, inverted, dangling on a clip/strap, or spinning uncontrollably.\n"
+    "- Technical failure: heavy motion blur making the subject unrecognizable, or severe over/underexposure.\n\n"
+    "HIGHLIGHT CRITERIA (For accepted frames):\n"
+    "To be considered a highlight ('detected': true), the frame must have:\n"
+    "- A clearly visible, intentional subject or a visually appealing landscape.\n"
+    "- Reasonable framing (subject is not entirely cut off).\n"
+    "- Sufficient sharpness and lighting to be visually pleasing.\n\n"
+    "Return ONLY a valid JSON object with the exact following structure:\n"
+    "{\n"
+    '  "detected": "boolean (true ONLY if an intentional highlight is present AND the camera is usable/upright)",\n'
+    '  "subject": "string (specific name of the main subject/action, or \'none\')",\n'
+    "  \"category\": \"string (use 'generic_highlight' or a more specific term like 'mountain_biking_highlight')\",\n"
+    '  "confidence": "float (0.0 to 1.0)",\n'
+    "  \"reject_reasons\": [\"list of strings (e.g., 'upside down', 'dangling', 'motion blur') or empty list if detected=true\"],\n"
+    '  "quality_score": "integer (1-10; 1-3 for accidental/unusable, 4-6 for average, 7-10 for great composition/action)",\n'
+    '  "technical_details": {\n'
+    '    "lighting": "string (good | overexposed | underexposed)",\n'
+    '    "sharpness": "string (sharp | slight blur | heavy motion blur)",\n'
+    '    "framing": "string (well-framed | subject partially cut off | empty scene)"\n'
+    "  },\n"
+    '  "scene_description": "string (short 1-sentence description of the subject or the reason for rejection)",\n'
+    '  "timestamp": "float (seconds in the clip, if provided or estimated, otherwise 0.0)"\n'
+    "}\n"
 )
 
 GENERIC_HIGHLIGHT_TEMPLATE = PromptTemplate(
     name="generic_highlight",
     keywords=[],
-    system_prompt="You are a video analyst evaluating general highlight moments.",
+    system_prompt="You are an expert video analyst evaluating general highlight moments for final selection.",
     coarse_prompt=GENERIC_COARSE_PROMPT,
     fine_prompt=(
-        "Analyze this video frame in detail for highlight quality.\n\n"
+        "Analyze this high-resolution video frame in detail to determine its final highlight quality.\n\n"
         "QUALITY EVALUATION RUBRIC (1-10):\n"
-        "Assess both subject presence and shot execution:\n"
+        "Assess both subject presence and shot execution based on these criteria:\n"
         "1. Lighting & Exposure: Well-exposed, balanced contrast, good natural or artificial light.\n"
-        "2. Focus & Clarity: Subject is in crisp, sharp focus, not blurry.\n"
-        "3. Camera Stability: Smooth camera movement without jerky shake or heavy motion blur.\n"
-        "4. Subject Composition: Intentional upright framing and subject composition highlighting the central event or action.\n\n"
+        "2. Focus & Clarity: Subject is in crisp, sharp focus, not soft or heavily compressed.\n"
+        "3. Stability (Motion Blur): Minimal motion blur on the subject and background, indicating a steady camera.\n"
+        "4. Composition: Intentional, upright framing. Subject is well-placed and not awkwardly cut off.\n\n"
         "Scoring Scale:\n"
-        "- 9-10 (Exceptional): Crisp focus on compelling subject, beautiful lighting, rock-steady camera.\n"
-        "- 7-8 (Strong Highlight): Good lighting, sharp subject, minimal camera shake.\n"
-        "- 5-6 (Acceptable): Adequate lighting, slight softness or minor camera wobble.\n"
-        "- 1-4 (Reject): Dark, out of focus, severe camera shake, upside down, or covered.\n\n"
-        "Return a JSON object with:\n"
-        "- detected: boolean (is this a clear highlight moment?)\n"
-        "- subject: string (subject name or 'unknown')\n"
-        "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10 based on the rubric above)\n"
-        "- description: string (details on subject, lighting, focus, and stability)\n"
-        "- timestamp: float (seconds in the clip)\n"
+        "- 9-10 (Exceptional): Crisp focus on a compelling subject, beautiful lighting, excellent composition, zero blur.\n"
+        "- 7-8 (Strong Highlight): Good lighting, sharp subject, well-framed, minimal motion blur.\n"
+        "- 5-6 (Acceptable): Adequate lighting, visible subject, but slight softness, minor blur, or average framing.\n"
+        "- 1-4 (Reject): Underexposed/overexposed, severe motion blur, upside down, covered lens, or empty scene.\n\n"
+        "Return ONLY a valid JSON object with the exact following structure:\n"
+        "{\n"
+        '  "detected": "boolean (true ONLY if it is a clear highlight scoring 5 or above)",\n'
+        '  "subject": "string (specific main subject/action, or \'none\')",\n'
+        '  "confidence": "float (0.0 to 1.0)",\n'
+        '  "quality_score": "integer (1-10 based on the rubric above)",\n'
+        "  \"reject_reasons\": [\"list of strings (e.g., 'severe motion blur', 'poor composition') or empty list if score is 5+\"],\n"
+        '  "technical_details": {\n'
+        '    "lighting": "string (exceptional | good | acceptable | poor)",\n'
+        '    "sharpness": "string (crisp | slight softness | blurry)",\n'
+        '    "composition": "string (well-framed | average | cut-off)"\n'
+        "  },\n"
+        '  "description": "string (detailed assessment of the action, lighting, focus, and overall aesthetic)",\n'
+        '  "timestamp": "float (seconds in the clip, if provided or estimated, otherwise 0.0)"\n'
+        "}\n"
     ),
     color="Magenta",
     domain="generic",

@@ -432,7 +432,10 @@ def test_universal_coarse_orientation_rejection() -> None:
 
     for config in BUILTIN_DOMAINS.values():
         cp = config.coarse_prompt.lower()
-        assert "accidental, inverted, dangling, or unusable" in cp
+        has_rejection = "accidental, inverted, dangling, or unusable" in cp or (
+            "accidental" in cp and "orientation" in cp and "rejection rules" in cp
+        )
+        assert has_rejection, f"Domain {config.domain} missing orientation rejection rules"
         assert "quality_score" in cp
 
 
