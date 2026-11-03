@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pydantic import ValidationError
 
 from utils.models import DetectionsRefined
+from utils.selection import select_diverse_highlights
 
 
 def build_prompt(detections: DetectionsRefined, target_duration: int = 4) -> str:
@@ -33,9 +34,7 @@ def build_prompt(detections: DetectionsRefined, target_duration: int = 4) -> str
     MAX_DETECTIONS = 200
     det_list = detections.detections
     if len(det_list) > MAX_DETECTIONS:
-        det_list = sorted(det_list, key=lambda d: d.quality_score, reverse=True)[
-            :MAX_DETECTIONS
-        ]
+        det_list = select_diverse_highlights(det_list, top_n=MAX_DETECTIONS)
 
     lines = [
         "You are a professional underwater video editor and storyteller.",
@@ -53,19 +52,17 @@ def build_prompt(detections: DetectionsRefined, target_duration: int = 4) -> str
             f"{det.description}"
         )
 
-    lines.extend(
-        [
-            "",
-            "Requirements for the edit plan:",
-            "1. Determine a logical narrative arc (Establishing -> Reef Scape -> Encounters -> Macro Treasures -> Safety Stop).",
-            "2. Provide a recommended shot order with timecodes.",
-            "3. Suggest music and color grading per segment.",
-            "4. Mark which shots can serve as B-roll.",
-            "5. Take into account the colored markers (Cyan=pelagic, Yellow=macro, Green=diver/composition).",
-            "",
-            "Return the result as markdown with a clear timeline order.",
-        ]
-    )
+    lines.extend([
+        "",
+        "Requirements for the edit plan:",
+        "1. Determine a logical narrative arc (Establishing -> Reef Scape -> Encounters -> Macro Treasures -> Safety Stop).",
+        "2. Provide a recommended shot order with timecodes.",
+        "3. Suggest music and color grading per segment.",
+        "4. Mark which shots can serve as B-roll.",
+        "5. Take into account the colored markers (Cyan=pelagic, Yellow=macro, Green=diver/composition).",
+        "",
+        "Return the result as markdown with a clear timeline order.",
+    ])
     return "\n".join(lines)
 
 
@@ -89,16 +86,12 @@ def call_gemini(api_key: str, model: str, prompt: str) -> str:
 
     genai.configure(api_key=api_key)
     model_instance = genai.GenerativeModel(model)
-    response = model_instance.generate_content(
-        prompt, request_options={"timeout": 120}
-    )
+    response = model_instance.generate_content(prompt, request_options={"timeout": 120})
     return response.text or ""
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Cloud API storyline assembler (Claude / Gemini)"
-    )
+    parser = argparse.ArgumentParser(description="Cloud API storyline assembler (Claude / Gemini)")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     args = parser.parse_args()
 

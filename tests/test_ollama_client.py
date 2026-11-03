@@ -146,3 +146,33 @@ def test_client_session_pooling_and_context_manager(tmp_path: Path) -> None:
         assert mock_session.post.call_count == 1
 
     mock_session.close.assert_called_once()
+
+
+def test_generate_includes_system_prompt_when_provided(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"data")
+    mock_session = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"response": '{"detected": true}'}
+    mock_session.post.return_value = mock_resp
+
+    client = ollama_client.OllamaClient("http://localhost:11434", "model", session=mock_session)
+
+    # When system_prompt is provided and non-empty
+    client.generate(
+        str(image_path),
+        "Prompt",
+        "phase1",
+        system_prompt="You are an expert video analyst.",
+    )
+    payload = mock_session.post.call_args.kwargs["json"]
+    assert payload["system"] == "You are an expert video analyst."
+
+    # When system_prompt is None or whitespace, "system" key must be omitted
+    client.generate(str(image_path), "Prompt", "phase1", system_prompt=None)
+    payload_none = mock_session.post.call_args.kwargs["json"]
+    assert "system" not in payload_none
+
+    client.generate(str(image_path), "Prompt", "phase1", system_prompt="   ")
+    payload_blank = mock_session.post.call_args.kwargs["json"]
+    assert "system" not in payload_blank

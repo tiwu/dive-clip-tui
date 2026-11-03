@@ -24,6 +24,9 @@ meaning.
   does not yet fill the portrait frame with a useful crop.
 - Runs are archived and resumable. CLI commands can assemble clips into an
 aftermovie.
+- Highlight selection applies Maximal Marginal Relevance (MMR) for diversity with
+  chronological assembly sort order, contiguous shot merging, and per-stage decision
+  traceability artifacts.
 - The existing Textual TUI is an unmaintained prototype. A future TUI starts
   from a clean design after its CLI and data contracts are stable.
 

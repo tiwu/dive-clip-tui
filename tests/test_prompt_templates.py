@@ -471,3 +471,18 @@ def test_evaluation_seed_cases_schema_and_domain_coverage() -> None:
     assert "cases" in raw
     domains = {c.get("domain") or c.get("observed", {}).get("domain") for c in raw["cases"]}
     assert {"underwater", "motorcycle", "wildlife", "generic"}.issubset(domains)
+
+
+def test_all_domain_prompts_specify_story_role_and_schema() -> None:
+    """All domain coarse and fine prompts should specify story_role and reject_reasons."""
+    from utils.prompt_templates import BUILTIN_DOMAINS
+
+    for dom_name, config in BUILTIN_DOMAINS.items():
+        assert "story_role" in config.coarse_prompt, (
+            f"coarse prompt in {dom_name} missing story_role"
+        )
+        for tpl in [*config.templates, config.fallback_template]:
+            assert "story_role" in tpl.fine_prompt, f"fine prompt for {tpl.name} missing story_role"
+            assert "reject_reasons" in tpl.fine_prompt, (
+                f"fine prompt for {tpl.name} missing reject_reasons"
+            )

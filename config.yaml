@@ -6,7 +6,7 @@ general:
   # Keep input_dir and output_dir as separate folders that do not nest: ingest
   # walks the input tree recursively and would also pick up its own output.
   # input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/in"
-  input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/x"  
+  input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/in"
   output_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/out"
 
 ollama:
@@ -31,6 +31,10 @@ scan_parameters:
   coarse_confidence_threshold: 0.80 # Minimum confidence to trigger fine scan
   coarse_quality_threshold: 4       # Minimum score (1-10) to reject upside-down/dangling frames in coarse pass
   fine_padding_seconds: 2           # Extra context before/after detected action
+  fine_pre_roll_seconds: 1.5        # Seconds to include before detected fine highlight
+  fine_post_roll_seconds: 2.0       # Seconds to include after detected fine highlight
+  merge_gap_seconds: 1.5            # Max gap between contiguous detections of same subject to merge
+  max_clip_duration: 12.0           # Maximum duration (seconds) for a merged detection window
   quality_threshold: 8              # Min. score (1-10) to include in EDL/Storyline
   checkpoint_interval_frames: 20    # Save intra-clip scan progress every N frames for fast resume
   # Temporary frame storage (RAM disk):
@@ -44,6 +48,10 @@ cloud_storyline:
   provider: "claude"                # "claude" or "gemini"
   model: "claude-3-5-sonnet-latest"
   target_edit_duration_minutes: 4
+
+selection:
+  lambda_quality: 0.65              # MMR trade-off: 0.0 = pure diversity, 1.0 = pure quality
+  per_clip_soft_limit: 1            # Soft quota per source clip before applying exponential penalty
 
 # Custom domains and prompt templates (optional):
 # prompts:

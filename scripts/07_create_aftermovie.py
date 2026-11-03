@@ -24,6 +24,7 @@ from utils.encoder import get_fallback_encoder, get_video_encoder
 from utils.ffmpeg_streamer import concat_clips
 from utils.logging_setup import configure_logging
 from utils.run_archive import resolve_and_validate_assembly_artifacts
+from utils.selection import select_diverse_highlights
 from utils.signals import setup_signal_handlers
 
 logger = logging.getLogger(__name__)
@@ -367,7 +368,7 @@ def main() -> None:
 
     # Resolve detections input path and clips directory
     try:
-        detections_path, clips_dir, _ = resolve_and_validate_assembly_artifacts(
+        detections_path, clips_dir, latest_run = resolve_and_validate_assembly_artifacts(
             output_dir,
             input_detections=args.input,
             clips_dir=args.clips_dir,
@@ -399,9 +400,26 @@ def main() -> None:
         logger.info("No detections found to assemble.")
         sys.exit(0)
 
-    # Sort by quality score (descending) and take top-N
-    sorted_dets = sorted(detections, key=lambda d: d.get("quality_score", 0), reverse=True)
-    top_dets = sorted_dets[:top_n]
+    # Select diverse highlights with MMR and chronological ordering
+    selection_cfg = config.get("selection", {}) if isinstance(config.get("selection"), dict) else {}
+    lambda_quality = float(selection_cfg.get("lambda_quality", 0.65))
+    max_per_clip = (
+        int(selection_cfg["per_clip_soft_limit"])
+        if selection_cfg.get("per_clip_soft_limit") is not None
+        else None
+    )
+    trace_path = (
+        (latest_run / "selection_trace.json")
+        if latest_run is not None
+        else (output_dir / "selection_trace.json")
+    )
+    top_dets = select_diverse_highlights(
+        detections,
+        top_n=top_n,
+        lambda_quality=lambda_quality,
+        max_per_clip=max_per_clip,
+        trace_path=trace_path,
+    )
 
     logger.info("Creating aftermovie from top %d of %d detections", len(top_dets), len(detections))
 
@@ -457,7 +475,7 @@ def main() -> None:
                     timeout=30,
                 )
                 dur = float(duration_probe.stdout.strip())
-            except subprocess.TimeoutExpired, ValueError:
+            except subprocess.TimeoutExpired, ValueError, FileNotFoundError, OSError:
                 dur = 5.0
 
             if not render_clip_with_fade(source, 0, dur, faded, fade_duration=fade_duration):

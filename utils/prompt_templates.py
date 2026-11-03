@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from utils.models import VALID_STORY_ROLES
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +71,11 @@ class DomainConfig:
 # =============================================================================
 # Stage 0: Video Domain Classification Prompt
 # =============================================================================
+
+VIDEO_CLASSIFICATION_SYSTEM_PROMPT = (
+    "You are an expert video analyst specializing in action camera and smartphone "
+    "footage classification and technical quality assessment."
+)
 
 VIDEO_CLASSIFICATION_PROMPT = (
     "Analyze this video frame from an action camera or smartphone. Your goal is to classify "
@@ -153,6 +160,75 @@ def build_classification_prompt(
     return "\n".join(lines)
 
 
+def normalize_vlm_frame_response(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Sanitize and normalize raw VLM frame response to the locked schema."""
+    if not isinstance(raw, dict):
+        return {
+            "detected": False,
+            "subject": "none",
+            "category": "none",
+            "story_role": "none",
+            "confidence": 0.0,
+            "quality_score": 0,
+            "reject_reasons": ["no valid response"],
+            "description": "",
+            "timestamp": 0.0,
+        }
+
+    detected = bool(raw.get("detected", False))
+
+    raw_subject = str(raw.get("subject", "") or "").strip()
+    subject = raw_subject if raw_subject else ("unknown" if detected else "none")
+
+    raw_category = str(raw.get("category", "") or "").strip()
+    category = raw_category if raw_category else ("generic" if detected else "none")
+
+    raw_story_role = str(raw.get("story_role", "") or "").strip().lower()
+    if raw_story_role in VALID_STORY_ROLES:
+        story_role = raw_story_role
+    else:
+        story_role = "hero_subject" if detected else "none"
+
+    try:
+        raw_conf = float(raw.get("confidence", 0.0) or 0.0)
+        confidence = max(0.0, min(1.0, raw_conf))
+    except ValueError, TypeError:
+        confidence = 0.0
+
+    try:
+        raw_q = int(raw.get("quality_score", 0) or 0)
+        quality_score = max(1, min(10, raw_q)) if detected else max(0, min(10, raw_q))
+    except ValueError, TypeError:
+        quality_score = 1 if detected else 0
+
+    raw_reasons = raw.get("reject_reasons", [])
+    if isinstance(raw_reasons, list):
+        reject_reasons = [str(r) for r in raw_reasons if r]
+    elif isinstance(raw_reasons, str) and raw_reasons.strip():
+        reject_reasons = [raw_reasons.strip()]
+    else:
+        reject_reasons = []
+
+    description = str(raw.get("description", "") or "").strip()
+
+    try:
+        timestamp = float(raw.get("timestamp", 0.0) or 0.0)
+    except ValueError, TypeError:
+        timestamp = 0.0
+
+    return {
+        "detected": detected,
+        "subject": subject,
+        "category": category,
+        "story_role": story_role,
+        "confidence": confidence,
+        "quality_score": quality_score,
+        "reject_reasons": reject_reasons,
+        "description": description,
+        "timestamp": timestamp,
+    }
+
+
 # =============================================================================
 # Domain: Underwater / Dive Footage
 # =============================================================================
@@ -178,7 +254,7 @@ PELAGICS_TEMPLATE = PromptTemplate(
     system_prompt="You are an underwater video analyst specializing in large sea life.",
     coarse_prompt=(
         "Analyze this underwater frame for candidate screening.\n"
-        "Target subjects: pelagic species (turtles, sharks, rays, mantas, whales, dolphins).\n\n"
+        "Target subjects: pelagic species (turtles, sharks, rays, mantas, whales, dolphins) or compelling story moments (establishing underwater vistas, boat/gear prep, water entry, buddy interactions, unexpected encounters).\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally aimed and upright (right-side up).\n"
         "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
@@ -187,16 +263,18 @@ PELAGICS_TEMPLATE = PromptTemplate(
         "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
         "- Accidental, inverted, dangling, or unusable footage must always be rejected even if a turtle or shark is partially in view.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if target pelagic is present AND camera is upright and usable)\n"
-        "- subject: string (species name or 'none')\n"
+        "- detected: boolean (true ONLY if target pelagic or story moment is present AND camera is upright and usable)\n"
+        "- subject: string (species name, action, or 'none')\n"
         "- category: string ('pelagics')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
     fine_prompt=(
-        "Analyze this underwater frame for pelagic species (turtles, sharks, rays, mantas).\n\n"
+        "Analyze this underwater frame for pelagic species (turtles, sharks, rays, mantas) or story moments.\n\n"
         "QUALITY EVALUATION RUBRIC (1-10):\n"
         "Assess both subject presence and shot execution:\n"
         "1. Lighting: Well-lit with natural or video light, good contrast, minimal backscatter/murk.\n"
@@ -209,10 +287,13 @@ PELAGICS_TEMPLATE = PromptTemplate(
         "- 5-6 (Acceptable): Passable lighting, slight blur or distance, minor camera movement.\n"
         "- 1-4 (Reject): Murky/dark, out of focus, heavy motion blur, upside down, or dangling.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (is a pelagic species clearly visible?)\n"
+        "- detected: boolean (is a pelagic species or story moment clearly visible?)\n"
         "- subject: string (species or 'unknown')\n"
+        "- category: string ('pelagics')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on species, behavior, lighting, and stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -241,7 +322,7 @@ MACRO_TEMPLATE = PromptTemplate(
     system_prompt="You are an underwater video analyst specializing in macro underwater life.",
     coarse_prompt=(
         "Analyze this underwater frame for candidate screening.\n"
-        "Target subjects: macro subjects (nudibranchs, shrimp, corals, small sea creatures).\n\n"
+        "Target subjects: macro subjects (nudibranchs, shrimp, corals, small sea creatures) or interesting story details.\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally aimed and upright (right-side up).\n"
         "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
@@ -250,16 +331,18 @@ MACRO_TEMPLATE = PromptTemplate(
         "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
         "- Accidental, inverted, dangling, or unusable frames must always be rejected even if coral or macro subjects are visible.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if macro subject is present AND camera is upright and usable)\n"
+        "- detected: boolean (true ONLY if macro subject or story moment is present AND camera is upright and usable)\n"
         "- subject: string (species/subject name or 'none')\n"
         "- category: string ('macro')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
     fine_prompt=(
-        "Analyze this underwater frame for macro subjects (nudibranchs, shrimp, corals, small creatures).\n\n"
+        "Analyze this underwater frame for macro subjects (nudibranchs, shrimp, corals, small creatures) or story details.\n\n"
         "QUALITY EVALUATION RUBRIC (1-10):\n"
         "Assess both subject presence and shot execution:\n"
         "1. Lighting: Proper lighting illuminating macro details, balanced exposure, no blown-out highlights.\n"
@@ -272,10 +355,13 @@ MACRO_TEMPLATE = PromptTemplate(
         "- 5-6 (Acceptable): Soft focus or slight camera movement, acceptable lighting.\n"
         "- 1-4 (Reject): Blurry, missed focus, murky/dark, severe shake, upside down, or dangling.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (is a macro subject clearly visible?)\n"
+        "- detected: boolean (is a macro subject or story moment clearly visible?)\n"
         "- subject: string (subject name or 'unknown')\n"
+        "- category: string ('macro')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on creature, lighting, focus, and stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -304,7 +390,7 @@ DIVER_TEMPLATE = PromptTemplate(
     system_prompt="You are an underwater video analyst specializing in diver action and composition.",
     coarse_prompt=(
         "Analyze this underwater frame for candidate screening.\n"
-        "Target subjects: diver action, buddy interaction, swim-throughs, and intentional composition.\n\n"
+        "Target subjects: diver action, buddy interaction, swim-throughs, intentional composition, and water entries/exits.\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally operated and upright (right-side up).\n"
         "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
@@ -313,11 +399,13 @@ DIVER_TEMPLATE = PromptTemplate(
         "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
         "- Accidental, inverted, dangling, or unusable footage of divers where the camera is dangling or inverted is NOT diver action: mark 'detected': false.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if intentional diver action is present AND camera is upright and usable)\n"
-        "- subject: string (diver activity or 'none')\n"
+        "- detected: boolean (true ONLY if intentional diver action or story moment is present AND camera is upright and usable)\n"
+        "- subject: string (diver activity, story moment, or 'none')\n"
         "- category: string ('diver')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (short note on diver action or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -335,10 +423,13 @@ DIVER_TEMPLATE = PromptTemplate(
         "- 5-6 (Acceptable): Adequate lighting, slight camera wobble or distance.\n"
         "- 1-4 (Reject): Dark/murky, out of focus, erratic camera shake, upside down, or dangling.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (is intentional diver action visible?)\n"
+        "- detected: boolean (is intentional diver action or story moment visible?)\n"
         "- subject: string (e.g. 'diver exploring reef', 'diver entering swimthrough')\n"
+        "- category: string ('diver')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on action, composition, lighting, and stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -356,7 +447,7 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
     coarse_prompt=(
         "Analyze this underwater frame for candidate screening.\n"
         "Target subjects: any marine life: corals, worms, nudibranchs, fish, octopus, moray eels, "
-        "sharks, turtles, whales, frogfish, crocodilefish, seahorses, stonefish, diver action, and sea creatures.\n\n"
+        "sharks, turtles, whales, frogfish, crocodilefish, seahorses, stonefish, diver action, sea creatures, or story moments.\n\n"
         "CAMERA ORIENTATION & USABILITY CHECK:\n"
         "- The camera must be intentionally aimed and upright (right-side up).\n"
         "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
@@ -368,8 +459,10 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
         "- detected: boolean (true ONLY if marine life or diver action is present AND camera is upright and intentionally operated)\n"
         "- subject: string (species name, diver activity, or 'none')\n"
         "- category: string (one of 'pelagics', 'macro', 'diver', 'broad_marine')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -391,8 +484,11 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is marine life clearly visible?)\n"
         "- subject: string (species or 'unknown')\n"
+        "- category: string ('broad_marine')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on species, behavior, lighting, and camera stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -408,7 +504,7 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
 MOTORCYCLE_COARSE_PROMPT = (
     "Analyze this motorcycle footage frame for candidate screening.\n"
     "Target subjects: dynamic motorcycle riding (cornering, lean, acceleration, overtaking), "
-    "scenic road vistas, twisties, hairpins, and fellow riders / group ride action.\n\n"
+    "scenic road vistas, twisties, hairpins, fellow riders / group ride action, roadside prep, or trip story moments.\n\n"
     "CAMERA ORIENTATION & USABILITY CHECK:\n"
     "- The camera must be intentionally aimed at the road, horizon, bike cockpit/handlebar, rider, or scenery.\n"
     "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
@@ -418,11 +514,13 @@ MOTORCYCLE_COARSE_PROMPT = (
     "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
     "- Accidental, inverted, dangling, or unusable frames must always be rejected even if a motorcycle or road is in frame.\n\n"
     "Return a JSON object with:\n"
-    "- detected: boolean (true ONLY if motorcycle highlight action, scenic road, or rider interaction is present AND camera is usable)\n"
+    "- detected: boolean (true ONLY if motorcycle highlight action, scenic road, rider interaction, or story moment is present AND camera is usable)\n"
     "- subject: string (e.g. 'cornering through hairpin', 'scenic mountain pass', 'riding with buddy', or 'none')\n"
     "- category: string (one of 'moto_riding', 'moto_scenic', 'moto_group', 'broad_motorcycle')\n"
+    "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
     "- confidence: float (0.0 to 1.0)\n"
     "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/stationary, 4+ for usable)\n"
+    "- reject_reasons: list of strings (or empty list if detected is true)\n"
     "- description: string (short note on riding action or rejection reason)\n"
     "- timestamp: float (seconds in the clip)\n"
 )
@@ -464,8 +562,11 @@ MOTO_RIDING_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is compelling motorcycle riding action visible?)\n"
         "- subject: string (e.g. 'deep lean right hairpin', 'accelerating out of curve')\n"
+        "- category: string ('moto_riding')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on lean angle, speed, road condition, and stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -510,8 +611,11 @@ MOTO_SCENIC_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is a scenic road vista clearly visible?)\n"
         "- subject: string (e.g. 'mountain pass vista', 'coastal road sunset')\n"
+        "- category: string ('moto_scenic')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on landscape, road framing, lighting, and camera stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -553,8 +657,11 @@ MOTO_GROUP_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (are fellow riders in frame with intentional composition?)\n"
         "- subject: string (e.g. 'two riders in formation', 'biker wave on pass')\n"
+        "- category: string ('moto_group')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on riders, formation, and camera stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -585,8 +692,11 @@ BROAD_MOTORCYCLE_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is this a highlight moment?)\n"
         "- subject: string (description of highlight or 'none')\n"
+        "- category: string ('broad_motorcycle')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on action, view, and stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -611,7 +721,7 @@ GENERIC_COARSE_PROMPT = (
     "- Technical failure: heavy motion blur making the subject unrecognizable, or severe over/underexposure.\n\n"
     "HIGHLIGHT CRITERIA (For accepted frames):\n"
     "To be considered a highlight ('detected': true), the frame must have:\n"
-    "- A clearly visible, intentional subject or a visually appealing landscape.\n"
+    "- A clearly visible, intentional subject, compelling story beat, or a visually appealing landscape.\n"
     "- Reasonable framing (subject is not entirely cut off).\n"
     "- Sufficient sharpness and lighting to be visually pleasing.\n\n"
     "Return ONLY a valid JSON object with the exact following structure:\n"
@@ -619,6 +729,7 @@ GENERIC_COARSE_PROMPT = (
     '  "detected": "boolean (true ONLY if an intentional highlight is present AND the camera is usable/upright)",\n'
     '  "subject": "string (specific name of the main subject/action, or \'none\')",\n'
     "  \"category\": \"string (use 'generic_highlight' or a more specific term like 'mountain_biking_highlight')\",\n"
+    '  "story_role": "string (establishing | entry_transition | hero_subject | human_moment | unexpected_event | none)",\n'
     '  "confidence": "float (0.0 to 1.0)",\n'
     "  \"reject_reasons\": [\"list of strings (e.g., 'upside down', 'dangling', 'motion blur') or empty list if detected=true\"],\n"
     '  "quality_score": "integer (1-10; 1-3 for accidental/unusable, 4-6 for average, 7-10 for great composition/action)",\n'
@@ -627,7 +738,7 @@ GENERIC_COARSE_PROMPT = (
     '    "sharpness": "string (sharp | slight blur | heavy motion blur)",\n'
     '    "framing": "string (well-framed | subject partially cut off | empty scene)"\n'
     "  },\n"
-    '  "scene_description": "string (short 1-sentence description of the subject or the reason for rejection)",\n'
+    '  "description": "string (short 1-sentence description of the subject or the reason for rejection)",\n'
     '  "timestamp": "float (seconds in the clip, if provided or estimated, otherwise 0.0)"\n'
     "}\n"
 )
@@ -654,6 +765,8 @@ GENERIC_HIGHLIGHT_TEMPLATE = PromptTemplate(
         "{\n"
         '  "detected": "boolean (true ONLY if it is a clear highlight scoring 5 or above)",\n'
         '  "subject": "string (specific main subject/action, or \'none\')",\n'
+        '  "category": "string (\'generic_highlight\')",\n'
+        '  "story_role": "string (establishing | entry_transition | hero_subject | human_moment | unexpected_event | none)",\n'
         '  "confidence": "float (0.0 to 1.0)",\n'
         '  "quality_score": "integer (1-10 based on the rubric above)",\n'
         "  \"reject_reasons\": [\"list of strings (e.g., 'severe motion blur', 'poor composition') or empty list if score is 5+\"],\n"
@@ -678,7 +791,7 @@ GENERIC_HIGHLIGHT_TEMPLATE = PromptTemplate(
 WILDLIFE_COARSE_PROMPT = (
     "Analyze this wildlife footage frame for candidate screening.\n"
     "Target subjects: wild animals, mammals, safari game, predators, birds, raptors, "
-    "dynamic animal behavior, and natural habitats.\n\n"
+    "dynamic animal behavior, natural habitats, or expedition story moments.\n\n"
     "CAMERA ORIENTATION & USABILITY CHECK:\n"
     "- The camera must be intentionally aimed and upright (right-side up).\n"
     "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
@@ -688,11 +801,13 @@ WILDLIFE_COARSE_PROMPT = (
     "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
     "- Accidental, inverted, dangling, or unusable frames must always be rejected even if an animal or bird is partially in view.\n\n"
     "Return a JSON object with:\n"
-    "- detected: boolean (true ONLY if wildlife subject is present AND camera is upright and usable)\n"
+    "- detected: boolean (true ONLY if wildlife subject or story moment is present AND camera is upright and usable)\n"
     "- subject: string (species or behavior name, e.g. 'lion pride', 'perched eagle', or 'none')\n"
     "- category: string (one of 'wildlife_animal', 'wildlife_bird', 'wildlife_action', 'broad_wildlife')\n"
+    "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
     "- confidence: float (0.0 to 1.0)\n"
     "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
+    "- reject_reasons: list of strings (or empty list if detected is true)\n"
     "- description: string (short note on wildlife subject or rejection reason)\n"
     "- timestamp: float (seconds in the clip)\n"
 )
@@ -749,8 +864,11 @@ WILDLIFE_ANIMAL_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is a wild animal clearly visible?)\n"
         "- subject: string (species name or 'unknown')\n"
+        "- category: string ('wildlife_animal')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on species, behavior, lighting, and camera stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -804,8 +922,11 @@ WILDLIFE_BIRD_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is a bird clearly visible?)\n"
         "- subject: string (species name or 'unknown')\n"
+        "- category: string ('wildlife_bird')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on species, behavior/flight, lighting, and camera stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -855,8 +976,11 @@ WILDLIFE_ACTION_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is dynamic wildlife action visible?)\n"
         "- subject: string (description of action e.g. 'cheetah chasing gazelle', 'lions feeding')\n"
+        "- category: string ('wildlife_action')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on action, interaction, lighting, and camera stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -886,8 +1010,11 @@ BROAD_WILDLIFE_TEMPLATE = PromptTemplate(
         "Return a JSON object with:\n"
         "- detected: boolean (is wildlife or nature highlight clearly visible?)\n"
         "- subject: string (species, nature element, or 'unknown')\n"
+        "- category: string ('broad_wildlife')\n"
+        "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
         "- quality_score: int (1-10 based on the rubric above)\n"
+        "- reject_reasons: list of strings (or empty list if detected is true)\n"
         "- description: string (details on subject, habitat, lighting, and camera stability)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
