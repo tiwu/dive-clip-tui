@@ -208,13 +208,19 @@ def aggregate_frame_classifications(
         for item in frame_results
         if item.get("quality_score") is not None
     ]
+    has_high_quality_usable_frame = any(
+        bool(item.get("usable")) and int(item.get("quality_score") or 0) >= 5
+        for item in frame_results
+    )
 
     is_unusable = False
-    if usable_flags and len(usable_flags) >= 1:
+    if usable_flags:
         unusable_ratio = (len(usable_flags) - sum(usable_flags)) / len(usable_flags)
-        if unusable_ratio >= 0.66 or (
-            quality_scores and (sum(quality_scores) / len(quality_scores)) <= 2.5
-        ):
+        mean_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
+        if not has_high_quality_usable_frame:
+            if unusable_ratio >= 0.66 or (quality_scores and mean_quality <= 2.5):
+                is_unusable = True
+        elif unusable_ratio >= 0.85 and (quality_scores and mean_quality <= 3.0):
             is_unusable = True
 
     if is_unusable:
@@ -884,6 +890,7 @@ def process_clip(
     pass0_collector: list[ClipClassification] | None = None,
     pass1_collector: list[Pass1ClipTrace] | None = None,
     pass2_collector: list[Pass2ClipTrace] | None = None,
+    on_trace_flush: Callable[[str], None] | None = None,
 ) -> list[RefinedDetection]:
     """Process a single clip through 3-stage domain-aware scanning.
 
@@ -1053,6 +1060,8 @@ def process_clip(
                 detected_domain,
             )
         cleanup_work_dir(pass0_dir)
+        if on_trace_flush is not None:
+            on_trace_flush("pass0")
     elif pass0_collector is not None and not any(c.clip_id == clip_id for c in pass0_collector):
         pass0_collector.append(
             ClipClassification(
@@ -1066,6 +1075,8 @@ def process_clip(
                 sort_key=make_sort_key(clip.get("file_name", ""), 0.0, 0.0, clip_id),
             )
         )
+        if on_trace_flush is not None:
+            on_trace_flush("pass0")
 
     # Check for unusable or non-target footage and early-exit to avoid full decode
     if detected_domain == "unusable":
@@ -1073,6 +1084,8 @@ def process_clip(
             for c in pass0_collector:
                 if c.clip_id == clip_id:
                     c.disposition = "skipped_unusable"
+            if on_trace_flush is not None:
+                on_trace_flush("pass0")
         msg = f"⚡ Skipped {clip['file_name']}: unusable camera footage (inside bag / lens covered / dangling)"
         logger.warning(msg)
         get_console().print(f"[yellow]{msg}[/yellow]")
@@ -1091,6 +1104,8 @@ def process_clip(
             for c in pass0_collector:
                 if c.clip_id == clip_id:
                     c.disposition = "skipped_non_target_domain"
+            if on_trace_flush is not None:
+                on_trace_flush("pass0")
         msg = f"⚡ Skipped {clip['file_name']}: non-target domain '{detected_domain}' (configured: '{configured_domain}')"
         logger.warning(msg)
         get_console().print(f"[yellow]{msg}[/yellow]")
@@ -1480,6 +1495,8 @@ def process_clip(
                     window_routing={},
                 )
             )
+            if on_trace_flush is not None:
+                on_trace_flush("pass1")
         if pass2_collector is not None:
             pass2_collector.append(
                 Pass2ClipTrace(
@@ -1496,6 +1513,8 @@ def process_clip(
                     dropped_overlaps=[],
                 )
             )
+            if on_trace_flush is not None:
+                on_trace_flush("pass2")
         cleanup_work_dir(clip_work_dir)
         return []
 
@@ -1554,6 +1573,8 @@ def process_clip(
                 window_routing={k: v.get("subject", "") for k, v in window_routing.items()},
             )
         )
+        if on_trace_flush is not None:
+            on_trace_flush("pass1")
 
     # ---------- Pass 2: Fine scan ----------
     logger.info(
@@ -1866,6 +1887,8 @@ def process_clip(
                 dropped_overlaps=dropped_overlaps,
             )
         )
+        if on_trace_flush is not None:
+            on_trace_flush("pass2")
 
     if checkpoint is not None:
         checkpoint.pass_stage = "completed"
@@ -2242,6 +2265,26 @@ def main() -> None:
             if temp_path.exists():
                 temp_path.unlink(missing_ok=True)
 
+    def _flush_traces(phase: str | None = None) -> None:
+        trace_dir = target_run_dir or output_dir
+        if (phase is None or phase == "pass0") and pass0_records:
+            c_obj = ClassificationOutput(
+                total_clips=len(pass0_records), classifications=pass0_records
+            )
+            _save_trace_atomic(trace_dir / "classifications.json", c_obj)
+            if target_run_dir is not None and target_run_dir != output_dir:
+                _save_trace_atomic(output_dir / "classifications.json", c_obj)
+        if (phase is None or phase == "pass1") and pass1_records:
+            p1_obj = Pass1TraceOutput(total_clips=len(pass1_records), clips=pass1_records)
+            _save_trace_atomic(trace_dir / "pass1_coarse_trace.json", p1_obj)
+            if target_run_dir is not None and target_run_dir != output_dir:
+                _save_trace_atomic(output_dir / "pass1_coarse_trace.json", p1_obj)
+        if (phase is None or phase == "pass2") and pass2_records:
+            p2_obj = Pass2TraceOutput(total_clips=len(pass2_records), clips=pass2_records)
+            _save_trace_atomic(trace_dir / "pass2_fine_trace.json", p2_obj)
+            if target_run_dir is not None and target_run_dir != output_dir:
+                _save_trace_atomic(output_dir / "pass2_fine_trace.json", p2_obj)
+
     if args.resume and state is not None:
         prev_scan_stats = state.get("scan_stats")
         if isinstance(prev_scan_stats, dict):
@@ -2354,11 +2397,13 @@ def main() -> None:
                     pass0_collector=pass0_records,
                     pass1_collector=pass1_records,
                     pass2_collector=pass2_records,
+                    on_trace_flush=_flush_traces,
                 )
                 refined.detections.extend(detections)
                 refined.total_detections += len(detections)
                 refined.total_clips += 1
                 save_detections_atomic(output_path, refined)
+                _flush_traces()
                 if overall_task is not None:
                     progress.advance(overall_task)
                 if state is not None:
@@ -2414,27 +2459,13 @@ def main() -> None:
         save_stats_json(scan_pipeline_stats, stats_save_path)
 
         # Write traceability artifacts
-        trace_dir = target_run_dir or output_dir
-        classifications_file = trace_dir / "classifications.json"
-        pass1_trace_file = trace_dir / "pass1_coarse_trace.json"
-        pass2_trace_file = trace_dir / "pass2_fine_trace.json"
-
-        classifications_obj = ClassificationOutput(
-            total_clips=len(pass0_records), classifications=pass0_records
-        )
-        pass1_obj = Pass1TraceOutput(total_clips=len(pass1_records), clips=pass1_records)
-        pass2_obj = Pass2TraceOutput(total_clips=len(pass2_records), clips=pass2_records)
-
-        _save_trace_atomic(classifications_file, classifications_obj)
-        _save_trace_atomic(pass1_trace_file, pass1_obj)
-        _save_trace_atomic(pass2_trace_file, pass2_obj)
-
-        if target_run_dir is not None and target_run_dir != output_dir:
-            _save_trace_atomic(output_dir / "classifications.json", classifications_obj)
-            _save_trace_atomic(output_dir / "pass1_coarse_trace.json", pass1_obj)
-            _save_trace_atomic(output_dir / "pass2_fine_trace.json", pass2_obj)
+        _flush_traces()
 
         if target_run_dir is not None:
+            trace_dir = target_run_dir or output_dir
+            classifications_file = trace_dir / "classifications.json"
+            pass1_trace_file = trace_dir / "pass1_coarse_trace.json"
+            pass2_trace_file = trace_dir / "pass2_fine_trace.json"
             archive_run_artifacts(
                 target_run_dir,
                 manifest_path=manifest_path,
@@ -2461,21 +2492,7 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.warning("\nScan interrupted by user (Ctrl+C). Cleaning up...")
         trace_dir = target_run_dir or output_dir
-        if pass0_records:
-            _save_trace_atomic(
-                trace_dir / "classifications.json",
-                ClassificationOutput(total_clips=len(pass0_records), classifications=pass0_records),
-            )
-        if pass1_records:
-            _save_trace_atomic(
-                trace_dir / "pass1_coarse_trace.json",
-                Pass1TraceOutput(total_clips=len(pass1_records), clips=pass1_records),
-            )
-        if pass2_records:
-            _save_trace_atomic(
-                trace_dir / "pass2_fine_trace.json",
-                Pass2TraceOutput(total_clips=len(pass2_records), clips=pass2_records),
-            )
+        _flush_traces()
         if refined.detections:
             save_detections_atomic(output_path, refined)
             logger.info("Saved %d detections before exit.", len(refined.detections))

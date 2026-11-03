@@ -278,6 +278,24 @@ def test_normalize_vlm_frame_response() -> None:
     assert norm_false["quality_score"] == 0
     assert norm_false["reject_reasons"] == []
 
+    # Defensive recovery: detected=False but valid subject and no reject reasons
+    raw_recovery = {
+        "detected": False,
+        "subject": "stonefish",
+        "category": "macro",
+        "story_role": "hero_subject",
+        "confidence": 0.95,
+        "quality_score": 8,
+        "reject_reasons": [],
+        "description": "A stonefish resting on coral",
+    }
+    norm_rec = scan.normalize_vlm_frame_response(raw_recovery)
+    assert norm_rec["detected"] is True
+    assert norm_rec["subject"] == "stonefish"
+    assert norm_rec["confidence"] == 0.95
+    assert norm_rec["quality_score"] == 8
+    assert norm_rec["reject_reasons"] == []
+
 
 def test_call_ollama_success(tmp_path: Path) -> None:
     """call_ollama should parse Ollama JSON response correctly."""
@@ -2156,3 +2174,62 @@ def test_process_clip_traces_and_natural_window_sizing(tmp_path: Path) -> None:
     assert len(p2.frame_traces) == 1
     assert p2.frame_traces[0].detection_id == f"trace_clip_1_{3.5:08.2f}_{7.0:08.2f}"
     assert p2.frame_traces[0].passed_gate is True
+
+
+def test_process_clip_on_trace_flush_called(tmp_path: Path) -> None:
+    """process_clip should invoke on_trace_flush callback across scan phases."""
+    video = tmp_path / "test_flush.mp4"
+    video.touch()
+    clip = {
+        "file_path": str(video),
+        "file_name": "test_flush.mp4",
+        "clip_id": "flush_clip_1",
+        "fps": 25.0,
+        "duration": "00:00:10.00",
+    }
+    config = {
+        "scan_parameters": {
+            "coarse_fps": 0.5,
+            "fine_fps": 2.0,
+            "coarse_confidence_threshold": 0.5,
+            "quality_threshold": 5,
+        },
+        "domain": "diving",
+    }
+    coarse_frames = [
+        {"frame_path": str(tmp_path / "c1.jpg"), "timestamp": 2.0, "frame_number": 50},
+    ]
+    (tmp_path / "c1.jpg").touch()
+
+    def mock_extract(video_path, output_dir, *args, **kwargs):
+        return coarse_frames
+
+    def mock_call(*args, **kwargs):
+        return {
+            "detected": False,
+            "confidence": 0.1,
+            "quality_score": 2,
+            "subject": "",
+        }
+
+    flush_calls: list[str] = []
+    from utils.models import ClipClassification, Pass1ClipTrace
+
+    pass0_collector: list[ClipClassification] = []
+    pass1_collector: list[Pass1ClipTrace] = []
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        scan.process_clip(
+            clip,
+            config,
+            tmp_path / "work",
+            pass0_collector=pass0_collector,
+            pass1_collector=pass1_collector,
+            on_trace_flush=flush_calls.append,
+        )
+
+    assert "pass0" in flush_calls
+    assert "pass1" in flush_calls
