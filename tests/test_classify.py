@@ -94,6 +94,19 @@ def test_aggregate_frame_classifications_disagreement() -> None:
     assert conf == 0.9
 
 
+def test_aggregate_frame_classifications_preserves_clip_with_usable_high_quality() -> None:
+    """A clip with at least one high-quality usable frame must not be discarded as unusable."""
+    # Simulates GX010830-turtle: 1 good underwater frame, 2 overexposed/flared frames
+    frame_results = [
+        {"domain": "underwater", "confidence": 0.95, "usable": True, "quality_score": 7},
+        {"domain": "underwater", "confidence": 0.90, "usable": False, "quality_score": 1},
+        {"domain": "generic", "confidence": 0.85, "usable": False, "quality_score": 1},
+    ]
+    domain, _conf, _uncertain, _reason = scan.aggregate_frame_classifications(frame_results)
+    assert domain != "unusable"
+    assert domain == "underwater"
+
+
 def test_classify_clip_calls_only_classify_phase() -> None:
     """classify_clip must call Ollama with phase='classify' only, never coarse or fine."""
     clip = {

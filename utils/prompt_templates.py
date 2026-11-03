@@ -175,9 +175,53 @@ def normalize_vlm_frame_response(raw: dict[str, Any] | None) -> dict[str, Any]:
             "timestamp": 0.0,
         }
 
-    detected = bool(raw.get("detected", False))
-
+    raw_detected = bool(raw.get("detected", False))
     raw_subject = str(raw.get("subject", "") or "").strip()
+
+    raw_reasons = raw.get("reject_reasons", [])
+    if isinstance(raw_reasons, list):
+        reject_reasons = [
+            str(r).strip()
+            for r in raw_reasons
+            if str(r).strip()
+            and str(r).strip().lower() not in {"none", "n/a", "no", "nil", "empty", "[]"}
+        ]
+    elif isinstance(raw_reasons, str) and raw_reasons.strip():
+        val = raw_reasons.strip()
+        reject_reasons = (
+            [val] if val.lower() not in {"none", "n/a", "no", "nil", "empty", "[]"} else []
+        )
+    else:
+        reject_reasons = []
+
+    try:
+        raw_conf = float(raw.get("confidence", 0.0) or 0.0)
+        confidence = max(0.0, min(1.0, raw_conf))
+    except ValueError, TypeError:
+        confidence = 0.0
+
+    try:
+        raw_q = int(raw.get("quality_score", 0) or 0)
+        raw_quality = max(0, min(10, raw_q))
+    except ValueError, TypeError:
+        raw_quality = 0
+
+    # Defensive recovery: if VLM identified a clear subject with confidence >= 0.5,
+    # quality >= 4, and no reject reasons, but returned detected=False, treat as detected.
+    has_valid_subject = bool(
+        raw_subject and raw_subject.lower() not in {"none", "unknown", "no", "false", ""}
+    )
+    if (
+        not raw_detected
+        and has_valid_subject
+        and not reject_reasons
+        and confidence >= 0.5
+        and raw_quality >= 4
+    ):
+        detected = True
+    else:
+        detected = raw_detected
+
     subject = raw_subject if raw_subject else ("unknown" if detected else "none")
 
     raw_category = str(raw.get("category", "") or "").strip()
@@ -189,26 +233,7 @@ def normalize_vlm_frame_response(raw: dict[str, Any] | None) -> dict[str, Any]:
     else:
         story_role = "hero_subject" if detected else "none"
 
-    try:
-        raw_conf = float(raw.get("confidence", 0.0) or 0.0)
-        confidence = max(0.0, min(1.0, raw_conf))
-    except ValueError, TypeError:
-        confidence = 0.0
-
-    try:
-        raw_q = int(raw.get("quality_score", 0) or 0)
-        quality_score = max(1, min(10, raw_q)) if detected else max(0, min(10, raw_q))
-    except ValueError, TypeError:
-        quality_score = 1 if detected else 0
-
-    raw_reasons = raw.get("reject_reasons", [])
-    if isinstance(raw_reasons, list):
-        reject_reasons = [str(r) for r in raw_reasons if r]
-    elif isinstance(raw_reasons, str) and raw_reasons.strip():
-        reject_reasons = [raw_reasons.strip()]
-    else:
-        reject_reasons = []
-
+    quality_score = max(1, raw_quality) if detected else raw_quality
     description = str(raw.get("description", "") or "").strip()
 
     try:
@@ -255,21 +280,18 @@ PELAGICS_TEMPLATE = PromptTemplate(
     coarse_prompt=(
         "Analyze this underwater frame for candidate screening.\n"
         "Target subjects: pelagic species (turtles, sharks, rays, mantas, whales, dolphins) or compelling story moments (establishing underwater vistas, boat/gear prep, water entry, buddy interactions, unexpected encounters).\n\n"
-        "CAMERA ORIENTATION & USABILITY CHECK:\n"
-        "- The camera must be intentionally aimed and upright (right-side up).\n"
-        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
-        "  If the camera is upside down, inverted, tumbling, dangling on a clip/lanyard, spinning,\n"
-        "  inside a pocket/bag, lens covered/blocked, completely blurred, or pointed accidentally at the seabed/boat/diver gear, you MUST reject the frame:\n"
-        "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Accidental, inverted, dangling, or unusable footage must always be rejected even if a turtle or shark is partially in view.\n\n"
+        "SCREENING INSTRUCTIONS:\n"
+        "- If target pelagic species, marine life, or story moments are visible in usable footage, mark 'detected': true and assign a quality_score (4-10).\n"
+        "- You MUST reject accidental, inverted, dangling, or unusable footage (inside bag/pocket, lens completely blocked/covered, inverted/dangling chaotically). If no target subjects are present or the footage is unusable, reject the frame.\n"
+        "- If rejected as accidental, inverted, dangling, or unusable, set 'detected': false, 'confidence': 0.0, 'quality_score': 1, and list specific reject_reasons.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if target pelagic or story moment is present AND camera is upright and usable)\n"
+        "- detected: boolean (true if target pelagic or story moment is visible in usable footage, false otherwise)\n"
         "- subject: string (species name, action, or 'none')\n"
         "- category: string ('pelagics')\n"
         "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
-        "- reject_reasons: list of strings (or empty list if detected is true)\n"
+        "- quality_score: int (1-10; 1-3 for unusable/chaotic, 4+ for usable footage)\n"
+        "- reject_reasons: list of strings (list issues ONLY if detected is false; empty list [] if detected is true)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -323,21 +345,18 @@ MACRO_TEMPLATE = PromptTemplate(
     coarse_prompt=(
         "Analyze this underwater frame for candidate screening.\n"
         "Target subjects: macro subjects (nudibranchs, shrimp, corals, small sea creatures) or interesting story details.\n\n"
-        "CAMERA ORIENTATION & USABILITY CHECK:\n"
-        "- The camera must be intentionally aimed and upright (right-side up).\n"
-        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
-        "  If the camera is upside down, inverted, tumbling, dangling on a clip/lanyard, spinning,\n"
-        "  inside a pocket/bag, lens covered/blocked, completely blurred, or pointed accidentally at the reef/seabed, you MUST reject the frame:\n"
-        "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Accidental, inverted, dangling, or unusable frames must always be rejected even if coral or macro subjects are visible.\n\n"
+        "SCREENING INSTRUCTIONS:\n"
+        "- If macro subjects, corals, critters, or marine life are visible in usable footage, mark 'detected': true and assign a quality_score (4-10).\n"
+        "- You MUST reject accidental, inverted, dangling, or unusable footage (inside bag/pocket, lens completely covered/blocked, inverted/dangling chaotically). If no macro subjects are present or the footage is unusable, reject the frame.\n"
+        "- If rejected as accidental, inverted, dangling, or unusable, set 'detected': false, 'confidence': 0.0, 'quality_score': 1, and list specific reject_reasons.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if macro subject or story moment is present AND camera is upright and usable)\n"
+        "- detected: boolean (true if macro subject, coral, or marine life is visible in usable footage, false otherwise)\n"
         "- subject: string (species/subject name or 'none')\n"
         "- category: string ('macro')\n"
         "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
-        "- reject_reasons: list of strings (or empty list if detected is true)\n"
+        "- quality_score: int (1-10; 1-3 for unusable/chaotic, 4+ for usable footage)\n"
+        "- reject_reasons: list of strings (list issues ONLY if detected is false; empty list [] if detected is true)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -391,21 +410,18 @@ DIVER_TEMPLATE = PromptTemplate(
     coarse_prompt=(
         "Analyze this underwater frame for candidate screening.\n"
         "Target subjects: diver action, buddy interaction, swim-throughs, intentional composition, and water entries/exits.\n\n"
-        "CAMERA ORIENTATION & USABILITY CHECK:\n"
-        "- The camera must be intentionally operated and upright (right-side up).\n"
-        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
-        "  If the camera is upside down, inverted, tumbling, dangling on a BCD lanyard, spinning,\n"
-        "  inside a pocket/bag, lens covered/blocked, completely blurred, or filming accidentally (e.g. fins/boat ladder/empty blue while dangling), you MUST reject the frame:\n"
-        "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Accidental, inverted, dangling, or unusable footage of divers where the camera is dangling or inverted is NOT diver action: mark 'detected': false.\n\n"
+        "SCREENING INSTRUCTIONS:\n"
+        "- If intentional diver action, buddy interactions, or water entry/exit is visible in usable footage, mark 'detected': true and assign a quality_score (4-10).\n"
+        "- You MUST reject accidental, inverted, dangling, or unusable footage (inside bag/pocket, lens completely covered/blocked, inverted/dangling chaotically). If no diver action is present or the footage is unusable, reject the frame.\n"
+        "- If rejected as accidental, inverted, dangling, or unusable, set 'detected': false, 'confidence': 0.0, 'quality_score': 1, and list specific reject_reasons.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if intentional diver action or story moment is present AND camera is upright and usable)\n"
+        "- detected: boolean (true if diver action or story moment is visible in usable footage, false otherwise)\n"
         "- subject: string (diver activity, story moment, or 'none')\n"
         "- category: string ('diver')\n"
         "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
-        "- reject_reasons: list of strings (or empty list if detected is true)\n"
+        "- quality_score: int (1-10; 1-3 for unusable/chaotic, 4+ for usable footage)\n"
+        "- reject_reasons: list of strings (list issues ONLY if detected is false; empty list [] if detected is true)\n"
         "- description: string (short note on diver action or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -448,21 +464,18 @@ BROAD_MARINE_TEMPLATE = PromptTemplate(
         "Analyze this underwater frame for candidate screening.\n"
         "Target subjects: any marine life: corals, worms, nudibranchs, fish, octopus, moray eels, "
         "sharks, turtles, whales, frogfish, crocodilefish, seahorses, stonefish, diver action, sea creatures, or story moments.\n\n"
-        "CAMERA ORIENTATION & USABILITY CHECK:\n"
-        "- The camera must be intentionally aimed and upright (right-side up).\n"
-        "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
-        "  If the camera is upside down, inverted, tumbling, dangling on a clip/lanyard, spinning,\n"
-        "  inside a pocket/bag, lens covered/blocked, completely blurred, or pointed accidentally at the seabed/hull/diver gear, you MUST reject the frame:\n"
-        "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-        "- Accidental, inverted, dangling, or unusable frames must always be rejected even if background corals or fish are present.\n\n"
+        "SCREENING INSTRUCTIONS:\n"
+        "- If marine life, coral formations, fish, diver action, or reef setting is visible in usable footage, mark 'detected': true and assign a quality_score (4-10).\n"
+        "- You MUST reject accidental, inverted, dangling, or unusable footage (inside bag/pocket, lens completely covered/blocked, inverted/dangling chaotically). If no marine life or action is present, reject the frame.\n"
+        "- If rejected as accidental, inverted, dangling, or unusable, set 'detected': false, 'confidence': 0.0, 'quality_score': 1, and list specific reject_reasons.\n\n"
         "Return a JSON object with:\n"
-        "- detected: boolean (true ONLY if marine life or diver action is present AND camera is upright and intentionally operated)\n"
+        "- detected: boolean (true if marine life, corals, or action is visible in usable footage, false otherwise)\n"
         "- subject: string (species name, diver activity, or 'none')\n"
         "- category: string (one of 'pelagics', 'macro', 'diver', 'broad_marine')\n"
         "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
         "- confidence: float (0.0 to 1.0)\n"
-        "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
-        "- reject_reasons: list of strings (or empty list if detected is true)\n"
+        "- quality_score: int (1-10; 1-3 for unusable/chaotic, 4+ for usable footage)\n"
+        "- reject_reasons: list of strings (list issues ONLY if detected is false; empty list [] if detected is true)\n"
         "- description: string (short note on subject or rejection reason)\n"
         "- timestamp: float (seconds in the clip)\n"
     ),
@@ -505,22 +518,19 @@ MOTORCYCLE_COARSE_PROMPT = (
     "Analyze this motorcycle footage frame for candidate screening.\n"
     "Target subjects: dynamic motorcycle riding (cornering, lean, acceleration, overtaking), "
     "scenic road vistas, twisties, hairpins, fellow riders / group ride action, roadside prep, or trip story moments.\n\n"
-    "CAMERA ORIENTATION & USABILITY CHECK:\n"
-    "- The camera must be intentionally aimed at the road, horizon, bike cockpit/handlebar, rider, or scenery.\n"
-    "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
-    "  If the camera is pointed accidentally at the pavement/ground, fuel tank, inside a helmet, "
-    "blocked/covered, upside down, inverted, dangling, or stationary with zero movement/action (e.g. stopped at a light), "
-    "you MUST reject the frame:\n"
-    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-    "- Accidental, inverted, dangling, or unusable frames must always be rejected even if a motorcycle or road is in frame.\n\n"
+    "SCREENING INSTRUCTIONS:\n"
+    "- Footage may be landscape (16:9) or vertical (9:16 portrait). A forward view of the road, street, or scenery in vertical framing is normal riding footage, NOT pointed at the ground.\n"
+    "- If motorcycle riding action, forward road view, scenic street/highway, rider, or travel story moment is visible in usable footage, mark 'detected': true and assign a quality_score (4-10).\n"
+    "- You MUST reject accidental, inverted, dangling, or unusable footage (inside bag/pocket/helmet, lens completely blocked/covered, inverted/dangling chaotically, or completely stationary with no movement). If no riding action or road view is present, reject the frame.\n"
+    "- If rejected as accidental, inverted, dangling, or unusable, set 'detected': false, 'confidence': 0.0, 'quality_score': 1, and list specific reject_reasons.\n\n"
     "Return a JSON object with:\n"
-    "- detected: boolean (true ONLY if motorcycle highlight action, scenic road, rider interaction, or story moment is present AND camera is usable)\n"
-    "- subject: string (e.g. 'cornering through hairpin', 'scenic mountain pass', 'riding with buddy', or 'none')\n"
+    "- detected: boolean (true if riding action, road view, scenic vista, or story moment is visible in usable footage, false otherwise)\n"
+    "- subject: string (e.g. 'cornering through hairpin', 'scenic road vista', 'riding with buddy', or 'none')\n"
     "- category: string (one of 'moto_riding', 'moto_scenic', 'moto_group', 'broad_motorcycle')\n"
     "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
     "- confidence: float (0.0 to 1.0)\n"
-    "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/stationary, 4+ for usable)\n"
-    "- reject_reasons: list of strings (or empty list if detected is true)\n"
+    "- quality_score: int (1-10; 1-3 for unusable/chaotic, 4+ for usable footage)\n"
+    "- reject_reasons: list of strings (list issues ONLY if detected is false; empty list [] if detected is true)\n"
     "- description: string (short note on riding action or rejection reason)\n"
     "- timestamp: float (seconds in the clip)\n"
 )
@@ -712,27 +722,19 @@ BROAD_MOTORCYCLE_TEMPLATE = PromptTemplate(
 GENERIC_COARSE_PROMPT = (
     "Analyze this high-resolution video frame for candidate screening and highlight detection. "
     "Your objective is to identify compelling action, a clear central subject, scenic views, or notable events.\n\n"
-    "CAMERA ORIENTATION & STRICT REJECTION RULES:\n"
-    "The camera MUST be intentionally aimed and right-side up.\n"
-    "You MUST explicitly reject the frame (set 'detected': false, 'quality_score': 1-3) if ANY of the following apply, "
-    "even if a subject is partially visible:\n"
-    "- Accidental footage: inside a pocket/bag, lens covered, or pointed directly at the floor/ground.\n"
-    "- Bad orientation: upside down, inverted, dangling on a clip/strap, or spinning uncontrollably.\n"
-    "- Technical failure: heavy motion blur making the subject unrecognizable, or severe over/underexposure.\n\n"
-    "HIGHLIGHT CRITERIA (For accepted frames):\n"
-    "To be considered a highlight ('detected': true), the frame must have:\n"
-    "- A clearly visible, intentional subject, compelling story beat, or a visually appealing landscape.\n"
-    "- Reasonable framing (subject is not entirely cut off).\n"
-    "- Sufficient sharpness and lighting to be visually pleasing.\n\n"
+    "SCREENING INSTRUCTIONS:\n"
+    "- If a clear central subject, intentional action, landscape, or story moment is visible in usable footage, mark 'detected': true and assign a quality_score (4-10).\n"
+    "- You MUST reject accidental, inverted, dangling, or unusable footage (inside a pocket/bag, lens completely covered, inverted/dangling chaotically, or severe unrecoverable blur). If no highlight is present, reject the frame.\n"
+    "- If rejected as accidental, inverted, dangling, or unusable, set 'detected': false, 'confidence': 0.0, 'quality_score': 1, and list specific reject_reasons.\n\n"
     "Return ONLY a valid JSON object with the exact following structure:\n"
     "{\n"
-    '  "detected": "boolean (true ONLY if an intentional highlight is present AND the camera is usable/upright)",\n'
+    '  "detected": "boolean (true if an intentional highlight or subject is present in usable footage, false otherwise)",\n'
     '  "subject": "string (specific name of the main subject/action, or \'none\')",\n'
     "  \"category\": \"string (use 'generic_highlight' or a more specific term like 'mountain_biking_highlight')\",\n"
     '  "story_role": "string (establishing | entry_transition | hero_subject | human_moment | unexpected_event | none)",\n'
     '  "confidence": "float (0.0 to 1.0)",\n'
-    "  \"reject_reasons\": [\"list of strings (e.g., 'upside down', 'dangling', 'motion blur') or empty list if detected=true\"],\n"
-    '  "quality_score": "integer (1-10; 1-3 for accidental/unusable, 4-6 for average, 7-10 for great composition/action)",\n'
+    '  "reject_reasons": ["list of strings (list issues ONLY if detected=false; empty list [] if detected=true)"],\n'
+    '  "quality_score": "integer (1-10; 1-3 for unusable/chaotic, 4-6 for average, 7-10 for great composition/action)",\n'
     '  "technical_details": {\n'
     '    "lighting": "string (good | overexposed | underexposed)",\n'
     '    "sharpness": "string (sharp | slight blur | heavy motion blur)",\n'
@@ -792,22 +794,18 @@ WILDLIFE_COARSE_PROMPT = (
     "Analyze this wildlife footage frame for candidate screening.\n"
     "Target subjects: wild animals, mammals, safari game, predators, birds, raptors, "
     "dynamic animal behavior, natural habitats, or expedition story moments.\n\n"
-    "CAMERA ORIENTATION & USABILITY CHECK:\n"
-    "- The camera must be intentionally aimed and upright (right-side up).\n"
-    "- You MUST explicitly reject accidental, inverted, dangling, or unusable footage:\n"
-    "  If the camera is upside down, inverted, tumbling, dangling on a strap/monopod/clip, spinning,\n"
-    "  pointed accidentally at the ground/safari vehicle floor, inside a bag/pocket, lens covered,\n"
-    "  or showing only darkness/blur, you MUST reject the frame:\n"
-    "  Set 'detected': false, 'confidence': 0.0, 'quality_score': 1.\n"
-    "- Accidental, inverted, dangling, or unusable frames must always be rejected even if an animal or bird is partially in view.\n\n"
+    "SCREENING INSTRUCTIONS:\n"
+    "- If wild animals, birds, dynamic animal action, or scenic natural habitats are visible in usable footage, mark 'detected': true and assign a quality_score (4-10).\n"
+    "- You MUST reject accidental, inverted, dangling, or unusable footage (inside bag/pocket, lens completely covered/blocked, inverted/dangling chaotically). If no wildlife or habitat is present, reject the frame.\n"
+    "- If rejected as accidental, inverted, dangling, or unusable, set 'detected': false, 'confidence': 0.0, 'quality_score': 1, and list specific reject_reasons.\n\n"
     "Return a JSON object with:\n"
-    "- detected: boolean (true ONLY if wildlife subject or story moment is present AND camera is upright and usable)\n"
+    "- detected: boolean (true if wildlife subject, action, or habitat is visible in usable footage, false otherwise)\n"
     "- subject: string (species or behavior name, e.g. 'lion pride', 'perched eagle', or 'none')\n"
     "- category: string (one of 'wildlife_animal', 'wildlife_bird', 'wildlife_action', 'broad_wildlife')\n"
     "- story_role: string ('establishing' | 'entry_transition' | 'hero_subject' | 'human_moment' | 'unexpected_event' | 'none')\n"
     "- confidence: float (0.0 to 1.0)\n"
-    "- quality_score: int (1-10; 1-3 for accidental/inverted/dangling/unusable/chaotic, 4+ for usable)\n"
-    "- reject_reasons: list of strings (or empty list if detected is true)\n"
+    "- quality_score: int (1-10; 1-3 for unusable/chaotic, 4+ for usable footage)\n"
+    "- reject_reasons: list of strings (list issues ONLY if detected is false; empty list [] if detected is true)\n"
     "- description: string (short note on wildlife subject or rejection reason)\n"
     "- timestamp: float (seconds in the clip)\n"
 )

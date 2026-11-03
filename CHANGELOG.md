@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Incrementally flush stage traceability files (`classifications.json`, `pass1_coarse_trace.json`, `pass2_fine_trace.json`) to disk as clips and scan stages finish processing instead of only at scan completion.
+
+### Fixed
+- Fixed VLM coarse detection regression where prompt schema biased small models toward hallucinated orientation rejections and dropped valid subject candidates (#64).
+- Added defensive `detected` recovery in `normalize_vlm_frame_response` when valid subjects are identified with high confidence and no rejection reasons.
+- Prevented premature Pass 0 unusable clip skipping on valid action camera footage containing high-quality usable frames.
+- Clarified vertical (9:16 portrait) forward road orientation in motorcycle coarse screening prompts.
+
 ## [0.27.0] - 2026-11-03
 
 ### Added
