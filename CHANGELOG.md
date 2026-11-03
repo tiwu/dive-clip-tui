@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-03
+
 ### Added
 - Add `suggested_domain` cross-frame aggregation for generic clip classification in `classify_clip`.
 - Refine generic coarse screening and highlight prompt criteria with structured rejection rules.
