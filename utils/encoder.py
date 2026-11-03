@@ -36,6 +36,8 @@ def probe_nvenc(ffmpeg_bin: str = "ffmpeg") -> bool:
         "testsrc=duration=1:size=320x240:rate=1",
         "-c:v",
         "h264_nvenc",
+        "-pix_fmt",
+        "yuv420p",
         "-f",
         "null",
         "-",
@@ -77,9 +79,18 @@ def get_video_encoder(
     normalized = (configured_encoder or "auto").strip().lower()
 
     if normalized == "h264_nvenc" or (normalized == "auto" and probe_nvenc(ffmpeg_bin)):
-        return "h264_nvenc", ["-c:v", "h264_nvenc", "-preset", "p4"]
+        return "h264_nvenc", ["-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-preset", "p4"]
 
-    return "libx264", ["-c:v", "libx264", "-preset", "veryfast", "-threads", str(max(1, threads))]
+    return "libx264", [
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-preset",
+        "veryfast",
+        "-threads",
+        str(max(1, threads)),
+    ]
 
 
 def get_fallback_encoder(
@@ -91,6 +102,8 @@ def get_fallback_encoder(
         return "libx264", [
             "-c:v",
             "libx264",
+            "-pix_fmt",
+            "yuv420p",
             "-preset",
             "veryfast",
             "-threads",

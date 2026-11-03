@@ -45,6 +45,8 @@ def test_get_video_encoder_explicit_nvenc() -> None:
     assert encoder_name == "h264_nvenc"
     assert "-c:v" in args
     assert "h264_nvenc" in args
+    assert "-pix_fmt" in args
+    assert args[args.index("-pix_fmt") + 1] == "yuv420p"
 
 
 def test_get_video_encoder_explicit_libx264() -> None:
@@ -52,6 +54,8 @@ def test_get_video_encoder_explicit_libx264() -> None:
     assert encoder_name == "libx264"
     assert "-c:v" in args
     assert "libx264" in args
+    assert "-pix_fmt" in args
+    assert args[args.index("-pix_fmt") + 1] == "yuv420p"
     assert "-threads" in args
     assert "2" in args
 
@@ -62,6 +66,8 @@ def test_get_video_encoder_auto_nvenc_available() -> None:
         encoder_name, args = get_video_encoder("auto")
         assert encoder_name == "h264_nvenc"
         assert "h264_nvenc" in args
+        assert "-pix_fmt" in args
+        assert args[args.index("-pix_fmt") + 1] == "yuv420p"
 
 
 def test_get_video_encoder_auto_nvenc_unavailable() -> None:
@@ -70,6 +76,8 @@ def test_get_video_encoder_auto_nvenc_unavailable() -> None:
         encoder_name, args = get_video_encoder("auto", threads=4)
         assert encoder_name == "libx264"
         assert "libx264" in args
+        assert "-pix_fmt" in args
+        assert args[args.index("-pix_fmt") + 1] == "yuv420p"
         assert "-threads" in args
         assert "4" in args
 
@@ -80,5 +88,7 @@ def test_get_fallback_encoder() -> None:
     name, args = fallback
     assert name == "libx264"
     assert "libx264" in args
+    assert "-pix_fmt" in args
+    assert args[args.index("-pix_fmt") + 1] == "yuv420p"
 
     assert get_fallback_encoder("libx264") is None

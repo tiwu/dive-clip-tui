@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Fixed
+- Fixed NVENC hardware encoding failure on 10-bit source footage (`yuv420p10le`) by explicitly setting `-pix_fmt yuv420p` in encoder arguments, preventing fallback to CPU `libx264`.
+
+### Added
+- Probed and recorded source video pixel format (`pix_fmt`) in `manifest.json` during media ingestion.
+
 ## [0.25.0] - 2026-11-03
 
 ### Added

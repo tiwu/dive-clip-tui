@@ -37,6 +37,7 @@ def test_probe_video_success(tmp_path: Path) -> None:
                 "height": 1080,
                 "r_frame_rate": "25/1",
                 "codec_name": "h264",
+                "pix_fmt": "yuv420p",
             }
         ],
         "format": {"duration": "60.5"},
@@ -56,6 +57,7 @@ def test_probe_video_success(tmp_path: Path) -> None:
     assert result["fps"] == 25.0
     assert result["resolution"] == "1920x1080"
     assert result["codec"] == "h264"
+    assert result["pix_fmt"] == "yuv420p"
     assert "error" not in result
 
 

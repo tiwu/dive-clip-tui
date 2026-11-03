@@ -20,6 +20,7 @@ class ClipManifest(BaseModel):
     duration: str = Field(default="", description="Clip duration")
     start_timecode: str = Field(default="", description="Starting timecode")
     end_timecode: str = Field(default="", description="Ending timecode")
+    pix_fmt: str = Field(default="", description="Pixel format (e.g. yuv420p, yuv420p10le)")
 
 
 class ManifestOutput(BaseModel):

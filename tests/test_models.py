@@ -32,6 +32,7 @@ def test_clip_manifest_minimal() -> None:
     assert clip.resolution == "1920x1080"  # default
     assert clip.tags == []  # default
     assert clip.duration == ""  # default
+    assert clip.pix_fmt == ""  # default
 
 
 def test_clip_manifest_full() -> None:
@@ -46,8 +47,10 @@ def test_clip_manifest_full() -> None:
         duration="120.5",
         start_timecode="00:00:00:00",
         end_timecode="00:02:00:00",
+        pix_fmt="yuv420p10le",
     )
     assert clip.fps == "30.0"
+    assert clip.pix_fmt == "yuv420p10le"
     assert clip.resolution == "3840x2160"
     assert clip.tags == ["shark", "pelagic"]
     assert clip.duration == "120.5"

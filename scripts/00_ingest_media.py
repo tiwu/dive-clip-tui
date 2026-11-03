@@ -40,7 +40,7 @@ def probe_video(video_path: Path) -> dict:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=width,height,r_frame_rate,codec_name",
+        "stream=width,height,r_frame_rate,codec_name,pix_fmt",
         "-show_entries",
         "format=duration",
         "-of",
@@ -76,6 +76,7 @@ def probe_video(video_path: Path) -> dict:
             "fps": fps,
             "resolution": f"{stream.get('width', '?')}x{stream.get('height', '?')}",
             "codec": stream.get("codec_name", "unknown"),
+            "pix_fmt": stream.get("pix_fmt", "unknown"),
         }
 
     except subprocess.TimeoutExpired:
