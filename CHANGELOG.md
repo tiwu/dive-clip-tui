@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-11-03
+
 ### Added
 - Add canonical Maximal Marginal Relevance (MMR) highlight selection (`utils/selection.py`) with chronological assembly sort order, pairwise similarity, and per-clip soft quota limits across video assembly and storyline planning.
 - Add deterministic contiguous shot merging via content-token overlap (`merge_gap_seconds: 1.5`, `max_clip_duration: 12.0`) and natural window sizing (`fine_pre_roll_seconds: 1.5`, `fine_post_roll_seconds: 2.0`) in `scripts/02_scan_footage.py`.
