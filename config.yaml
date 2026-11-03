@@ -6,7 +6,7 @@ general:
   # Keep input_dir and output_dir as separate folders that do not nest: ingest
   # walks the input tree recursively and would also pick up its own output.
   # input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/in"
-  input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/in"  
+  input_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/in"
   output_dir: "/run/media/twuytens/SAMSUNG T9/dive-processing-test/out"
 
 ollama:

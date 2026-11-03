@@ -244,3 +244,69 @@ def test_concat_clips_rejects_newlines(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Path contains newline character"):
         assemble.concat_clips([malicious_path], output)
+
+
+def test_main_forwards_selection_config(tmp_path: Path) -> None:
+    """main should forward selection.lambda_quality and selection.per_clip_soft_limit to select_diverse_highlights."""
+    detections = {
+        "detections": [
+            {
+                "clip_id": "clip001",
+                "file_name": "dive1.mp4",
+                "file_path": str(tmp_path / "source1.mp4"),
+                "start_time": 10.0,
+                "end_time": 15.0,
+                "subject": "turtle",
+                "quality_score": 9,
+                "confidence": 0.9,
+            },
+        ]
+    }
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(json.dumps(detections))
+
+    highlights_dir = tmp_path / "outputs" / "highlights"
+    highlights_dir.mkdir(parents=True)
+    (highlights_dir / "clip001_turtle_q9.mp4").write_text("clip 1")
+    (tmp_path / "source1.mp4").touch()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'general:\n  output_dir: "./outputs"\nselection:\n  lambda_quality: 0.85\n  per_clip_soft_limit: 2\n'
+    )
+
+    original_argv = sys_module.argv
+    original_exit = sys_module.exit
+    original_cwd = Path.cwd()
+
+    called_kwargs: dict = {}
+
+    def mock_select(dets, **kwargs):
+        nonlocal called_kwargs
+        called_kwargs = kwargs
+        return dets
+
+    try:
+        sys_module.argv = [
+            "06_assemble_video.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "out.mp4"),
+            "--config",
+            str(config_path),
+        ]
+        sys_module.exit = lambda code=0: None
+        os.chdir(tmp_path)
+        with (
+            patch.object(assemble, "select_diverse_highlights", side_effect=mock_select),
+            patch.object(assemble, "concat_clips", return_value=True),
+        ):
+            assemble.main()
+    finally:
+        sys_module.argv = original_argv
+        sys_module.exit = original_exit
+        os.chdir(original_cwd)
+
+    assert called_kwargs.get("lambda_quality") == 0.85
+    assert called_kwargs.get("max_per_clip") == 2

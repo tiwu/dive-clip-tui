@@ -105,7 +105,7 @@ def calculate_pairwise_similarity(d_i: Any, d_j: Any) -> float:
     subj_i = str(_get_val(d_i, "subject", "") or "").strip().lower()
     subj_j = str(_get_val(d_j, "subject", "") or "").strip().lower()
 
-    if subj_i and subj_i == subj_j:
+    if subj_i and subj_i not in {"none", "unknown"} and subj_i == subj_j:
         j_subj = 1.0
     else:
         j_subj = _jaccard(tokenize_content_words(subj_i), tokenize_content_words(subj_j))
@@ -259,7 +259,11 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
             count_selected_for_clip = sum(
                 1 for s_idx in selected_indices if trace_details[s_idx]["clip_id"] == clip_id
             )
-            q_penalty = 0.35 if count_selected_for_clip >= per_clip_limit else 0.0
+            q_penalty = (
+                min(1.0, 0.35 * (count_selected_for_clip - per_clip_limit + 1))
+                if count_selected_for_clip >= per_clip_limit
+                else 0.0
+            )
 
             mmr = round(lambda_quality * r - (1.0 - lambda_quality) * max_sim - q_penalty, 6)
 
@@ -343,7 +347,11 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
         t_path = Path(trace_path)
         t_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = t_path.with_name(f".{t_path.name}.tmp.{os.getpid()}")
-        temp_path.write_text(out_trace.model_dump_json(indent=2), encoding="utf-8")
-        temp_path.replace(t_path)
+        try:
+            temp_path.write_text(out_trace.model_dump_json(indent=2), encoding="utf-8")
+            temp_path.replace(t_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
 
     return final_selected

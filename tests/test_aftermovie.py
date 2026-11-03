@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import os
+import sys as sys_module
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -314,3 +316,76 @@ def test_render_clip_with_fade_encoder_and_fallback(tmp_path: Path) -> None:
         assert mock_run.call_count == 2
         assert "h264_nvenc" in mock_run.call_args_list[0][0][0]
         assert "libx264" in mock_run.call_args_list[1][0][0]
+
+
+def test_aftermovie_main_forwards_selection_config(tmp_path: Path) -> None:
+    """aftermovie main should forward selection.lambda_quality and selection.per_clip_soft_limit to select_diverse_highlights."""
+    detections = {
+        "detections": [
+            {
+                "clip_id": "clip001",
+                "file_name": "dive1.mp4",
+                "file_path": str(tmp_path / "source1.mp4"),
+                "start_time": 10.0,
+                "end_time": 15.0,
+                "subject": "turtle",
+                "quality_score": 9,
+                "confidence": 0.9,
+            },
+        ]
+    }
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(json.dumps(detections))
+
+    highlights_dir = tmp_path / "outputs" / "highlights"
+    highlights_dir.mkdir(parents=True)
+    (highlights_dir / "clip001_turtle_q9.mp4").write_text("clip 1")
+    (tmp_path / "source1.mp4").touch()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'general:\n  output_dir: "./outputs"\nselection:\n  lambda_quality: 0.72\n  per_clip_soft_limit: 3\n'
+    )
+
+    original_argv = sys_module.argv
+    original_exit = sys_module.exit
+    original_cwd = Path.cwd()
+
+    called_kwargs: dict = {}
+
+    def mock_select(dets, **kwargs):
+        nonlocal called_kwargs
+        called_kwargs = kwargs
+        return dets
+
+    try:
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "aftermovie.mp4"),
+            "--config",
+            str(config_path),
+        ]
+        sys_module.exit = lambda code=0: None
+        os.chdir(tmp_path)
+
+        def mock_concat(clips, out, *args, **kwargs):
+            Path(out).parent.mkdir(parents=True, exist_ok=True)
+            Path(out).touch()
+            return True
+
+        with (
+            patch.object(aftermovie, "select_diverse_highlights", side_effect=mock_select),
+            patch.object(aftermovie, "render_clip_with_fade", return_value=True),
+            patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
+        ):
+            aftermovie.main()
+    finally:
+        sys_module.argv = original_argv
+        sys_module.exit = original_exit
+        os.chdir(original_cwd)
+
+    assert called_kwargs.get("lambda_quality") == 0.72
+    assert called_kwargs.get("max_per_clip") == 3

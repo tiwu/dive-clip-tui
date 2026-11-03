@@ -231,3 +231,49 @@ def test_select_diverse_highlights_dict_input() -> None:
     assert isinstance(selected[0], dict)
     assert selected[0]["selection_rank"] is not None
     assert selected[0]["chronological_rank"] is not None
+
+
+def test_pairwise_similarity_fallback_subjects_not_penalized() -> None:
+    """Pairwise similarity should not treat 'none' or 'unknown' fallback subjects as identical."""
+    d1 = {"subject": "none", "description": "", "clip_id": "c1", "template": "t1"}
+    d2 = {"subject": "none", "description": "", "clip_id": "c2", "template": "t2"}
+    sim_none = calculate_pairwise_similarity(d1, d2)
+    assert sim_none == 0.0
+
+    d3 = {"subject": "unknown", "description": "", "clip_id": "c1", "template": "t1"}
+    d4 = {"subject": "unknown", "description": "", "clip_id": "c2", "template": "t2"}
+    sim_unknown = calculate_pairwise_similarity(d3, d4)
+    assert sim_unknown == 0.0
+
+
+def test_quota_penalty_scaling_on_repeated_clip(tmp_path: Path) -> None:
+    """Quota penalty should scale when multiple clips from the same source file are selected."""
+    detections = [
+        RefinedDetection(
+            clip_id="same_clip",
+            file_name="same.mp4",
+            file_path="/videos/same.mp4",
+            start_time=float(i * 10),
+            end_time=float(i * 10 + 5),
+            subject=f"unique_subject_{i}",
+            quality_score=9,
+            confidence=0.95,
+            description=f"shot {i}",
+        )
+        for i in range(4)
+    ]
+    trace_path = tmp_path / "scale_trace.json"
+    selected = select_diverse_highlights(
+        detections,
+        top_n=3,
+        max_per_clip=1,
+        trace_path=trace_path,
+    )
+    assert len(selected) == 3
+    with open(trace_path, encoding="utf-8") as f:
+        data = json.load(f)
+    # The first candidate chosen had penalty 0.0, second had penalty 0.35, third had penalty 0.70
+    ranks = {c["selection_rank"]: c["quota_penalty"] for c in data["candidates"] if c["selected"]}
+    assert ranks[1] == 0.0
+    assert pytest.approx(ranks[2], rel=1e-3) == 0.35
+    assert pytest.approx(ranks[3], rel=1e-3) == 0.70

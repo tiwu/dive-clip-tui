@@ -2231,6 +2231,17 @@ def main() -> None:
     pass0_records: list[ClipClassification] = []
     pass1_records: list[Pass1ClipTrace] = []
     pass2_records: list[Pass2ClipTrace] = []
+
+    def _save_trace_atomic(path: Path, model_obj: Any) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+        try:
+            temp_path.write_text(model_obj.model_dump_json(indent=2), encoding="utf-8")
+            temp_path.replace(path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
     if args.resume and state is not None:
         prev_scan_stats = state.get("scan_stats")
         if isinstance(prev_scan_stats, dict):
@@ -2408,16 +2419,6 @@ def main() -> None:
         pass1_trace_file = trace_dir / "pass1_coarse_trace.json"
         pass2_trace_file = trace_dir / "pass2_fine_trace.json"
 
-        def _save_trace_atomic(path: Path, model_obj: Any) -> None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-            try:
-                temp_path.write_text(model_obj.model_dump_json(indent=2), encoding="utf-8")
-                temp_path.replace(path)
-            finally:
-                if temp_path.exists():
-                    temp_path.unlink(missing_ok=True)
-
         classifications_obj = ClassificationOutput(
             total_clips=len(pass0_records), classifications=pass0_records
         )
@@ -2459,6 +2460,22 @@ def main() -> None:
 
     except KeyboardInterrupt:
         logger.warning("\nScan interrupted by user (Ctrl+C). Cleaning up...")
+        trace_dir = target_run_dir or output_dir
+        if pass0_records:
+            _save_trace_atomic(
+                trace_dir / "classifications.json",
+                ClassificationOutput(total_clips=len(pass0_records), classifications=pass0_records),
+            )
+        if pass1_records:
+            _save_trace_atomic(
+                trace_dir / "pass1_coarse_trace.json",
+                Pass1TraceOutput(total_clips=len(pass1_records), clips=pass1_records),
+            )
+        if pass2_records:
+            _save_trace_atomic(
+                trace_dir / "pass2_fine_trace.json",
+                Pass2TraceOutput(total_clips=len(pass2_records), clips=pass2_records),
+            )
         if refined.detections:
             save_detections_atomic(output_path, refined)
             logger.info("Saved %d detections before exit.", len(refined.detections))
@@ -2469,6 +2486,15 @@ def main() -> None:
                         manifest_path=manifest_path,
                         detections_path=output_path,
                         log_file=args.log_file,
+                        classifications_path=(trace_dir / "classifications.json")
+                        if pass0_records
+                        else None,
+                        pass1_coarse_trace_path=(trace_dir / "pass1_coarse_trace.json")
+                        if pass1_records
+                        else None,
+                        pass2_fine_trace_path=(trace_dir / "pass2_fine_trace.json")
+                        if pass2_records
+                        else None,
                     )
                 except Exception as exc:
                     logger.warning("Could not archive partial run artifacts on interrupt: %s", exc)

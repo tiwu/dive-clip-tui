@@ -1190,6 +1190,17 @@ def test_scan_main_keyboard_interrupt_handles_gracefully(tmp_path: Path) -> None
     )
 
     def mock_process_clip(clip, *args, **kwargs):
+        if "pass0_collector" in kwargs and kwargs["pass0_collector"] is not None:
+            from utils.models import ClipClassification
+
+            kwargs["pass0_collector"].append(
+                ClipClassification(
+                    clip_id="c1",
+                    file_name="clip1.mp4",
+                    file_path=str(tmp_path / "clip1.mp4"),
+                    domain="underwater",
+                )
+            )
         if clip["file_name"] == "clip1.mp4":
             return [det1]
         raise KeyboardInterrupt
@@ -1221,6 +1232,8 @@ def test_scan_main_keyboard_interrupt_handles_gracefully(tmp_path: Path) -> None
     saved_data = json.loads((output_dir / "detections_refined.json").read_text(encoding="utf-8"))
     assert len(saved_data["detections"]) == 1
     assert saved_data["detections"][0]["subject"] == "turtle"
+    # Ensure classifications were saved before exit
+    assert (output_dir / "classifications.json").exists()
     # Ensure cleanup_work_dir was called
     assert len(cleaned_dirs) > 0
 

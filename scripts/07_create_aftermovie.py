@@ -401,6 +401,13 @@ def main() -> None:
         sys.exit(0)
 
     # Select diverse highlights with MMR and chronological ordering
+    selection_cfg = config.get("selection", {}) if isinstance(config.get("selection"), dict) else {}
+    lambda_quality = float(selection_cfg.get("lambda_quality", 0.65))
+    max_per_clip = (
+        int(selection_cfg["per_clip_soft_limit"])
+        if selection_cfg.get("per_clip_soft_limit") is not None
+        else None
+    )
     trace_path = (
         (latest_run / "selection_trace.json")
         if latest_run is not None
@@ -409,6 +416,8 @@ def main() -> None:
     top_dets = select_diverse_highlights(
         detections,
         top_n=top_n,
+        lambda_quality=lambda_quality,
+        max_per_clip=max_per_clip,
         trace_path=trace_path,
     )
 
