@@ -945,3 +945,37 @@ def test_cmd_classify_resume_existing_run(tmp_path: Path) -> None:
     mock_scan.classify_footage.assert_called_once()
     _, kwargs = mock_scan.classify_footage.call_args
     assert kwargs.get("resume") is True
+
+
+def test_classify_footage_uses_configured_vlm_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression (#66): standalone classify must honor vlm.provider, not fall back to Ollama."""
+    from utils.vlm_client import OpenRouterClient
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "key")
+    clip_path = tmp_path / "vid1.mp4"
+    clip_path.touch()
+    clips = [{"file_name": "vid1.mp4", "file_path": str(clip_path), "duration": 10.0}]
+    classification = ClipClassification(
+        clip_id="vid1",
+        file_name="vid1.mp4",
+        file_path=str(clip_path),
+        domain="generic",
+        confidence=0.8,
+        uncertain=False,
+    )
+    seen: list[Any] = []
+
+    def fake_classify(clip: Any, **kwargs: Any) -> ClipClassification:
+        seen.append(kwargs.get("client"))
+        return classification
+
+    with (
+        patch.object(scan, "extract_classification_frames", return_value=["f.jpg"]),
+        patch.object(scan, "classify_clip", side_effect=fake_classify),
+    ):
+        scan.classify_footage(clips, {"vlm": {"provider": "openrouter"}})
+
+    assert len(seen) == 1
+    assert isinstance(seen[0], OpenRouterClient)

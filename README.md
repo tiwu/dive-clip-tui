@@ -46,8 +46,12 @@ Ollama is the default. To run the scan on an OpenRouter vision model instead, se
 API key and select the provider in `config.yaml`:
 
 ```bash
-export OPENROUTER_API_KEY=sk-or-...
+cp .env.example .env   # then set OPENROUTER_API_KEY in .env (git-ignored)
+# or: export OPENROUTER_API_KEY=sk-or-...
 ```
+
+`.env` is read from the config file's folder or the working directory; variables already
+set in your shell win over it.
 
 ```yaml
 vlm:

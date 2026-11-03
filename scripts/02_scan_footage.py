@@ -750,7 +750,7 @@ def classify_footage(
     ollama_host = resolve_host(ollama_cfg.get("host"))
     ollama_model = ollama_cfg.get("model", "qwen2.5-vl:7b")
     ollama_timeout = ollama_cfg.get("timeout_seconds", 90)
-    ollama_client = client or OllamaClient(ollama_host, ollama_model, ollama_timeout)
+    ollama_client = client or create_vlm_client(config)
 
     registry = load_custom_templates(config)
     classify_frames_count = scan_params.get("classify_frames_count", 3)
@@ -960,7 +960,7 @@ def process_clip(
     ollama_host = resolve_host(ollama_cfg.get("host"))
     ollama_model = ollama_cfg.get("model", "qwen2.5-vl:7b")
     ollama_timeout = ollama_cfg.get("timeout_seconds", 90)
-    client = ollama_client or OllamaClient(ollama_host, ollama_model, ollama_timeout)
+    client = ollama_client or create_vlm_client(config)
 
     tags = clip.get("tags", [])
 

@@ -866,7 +866,7 @@ def test_process_clip_honours_ollama_host_env(
     }
 
     with (
-        patch.object(scan, "OllamaClient") as client_cls,
+        patch("utils.vlm_client.OllamaClient") as client_cls,
         patch.object(scan, "extract_frames", return_value=[]),
     ):
         scan.process_clip(clip, config, tmp_path / "work")
