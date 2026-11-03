@@ -475,7 +475,7 @@ def main() -> None:
                     timeout=30,
                 )
                 dur = float(duration_probe.stdout.strip())
-            except subprocess.TimeoutExpired, ValueError:
+            except subprocess.TimeoutExpired, ValueError, FileNotFoundError, OSError:
                 dur = 5.0
 
             if not render_clip_with_fade(source, 0, dur, faded, fade_duration=fade_duration):

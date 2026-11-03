@@ -376,7 +376,10 @@ def test_aftermovie_main_forwards_selection_config(tmp_path: Path) -> None:
             Path(out).touch()
             return True
 
+        mock_subproc = MagicMock(returncode=0, stdout="5.0\n", stderr="")
+
         with (
+            patch.object(aftermovie.subprocess, "run", return_value=mock_subproc),
             patch.object(aftermovie, "select_diverse_highlights", side_effect=mock_select),
             patch.object(aftermovie, "render_clip_with_fade", return_value=True),
             patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
