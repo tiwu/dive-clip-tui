@@ -158,9 +158,57 @@ def test_classify_clip_handles_unusable_responses() -> None:
         )
 
     assert res.domain == "generic"
+    assert res.suggested_domain is None
     assert res.confidence is None
     assert res.uncertain is True
     assert res.reason is not None
+
+
+def test_classify_clip_aggregates_suggested_domain() -> None:
+    """Generic clips should aggregate suggested_domain by frequency and confidence."""
+    clip = {
+        "clip_id": "gen_01",
+        "file_name": "gen_01.mp4",
+        "file_path": "/videos/gen_01.mp4",
+    }
+    sample_frames = [
+        {"frame_path": "/tmp/f1.jpg", "timestamp": 1.0, "frame_number": 1},
+        {"frame_path": "/tmp/f2.jpg", "timestamp": 2.0, "frame_number": 2},
+        {"frame_path": "/tmp/f3.jpg", "timestamp": 3.0, "frame_number": 3},
+    ]
+    registry = scan.load_custom_templates({})
+
+    mock_responses = [
+        {
+            "domain": "generic",
+            "suggested_domain": "mountain_biking",
+            "confidence": 0.8,
+            "usable": True,
+        },
+        {
+            "domain": "generic",
+            "suggested_domain": "mountain_biking",
+            "confidence": 0.9,
+            "usable": True,
+        },
+        {"domain": "generic", "suggested_domain": "hiking", "confidence": 0.7, "usable": True},
+    ]
+
+    with patch.object(scan, "call_ollama", side_effect=mock_responses):
+        res = scan.classify_clip(
+            clip=clip,
+            sample_frames=sample_frames,
+            client=MagicMock(),
+            ollama_host="http://localhost:11434",
+            ollama_model="qwen2.5-vl:7b",
+            ollama_timeout=90,
+            registry=registry,
+        )
+
+    assert res.domain == "generic"
+    assert res.suggested_domain == "mountain_biking"
+    assert res.confidence == 0.8
+    assert res.uncertain is False
 
 
 def test_load_and_validate_classifications(tmp_path: Path) -> None:
