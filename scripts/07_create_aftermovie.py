@@ -24,6 +24,7 @@ from utils.encoder import get_fallback_encoder, get_video_encoder
 from utils.ffmpeg_streamer import concat_clips
 from utils.logging_setup import configure_logging
 from utils.run_archive import resolve_and_validate_assembly_artifacts
+from utils.selection import select_diverse_highlights
 from utils.signals import setup_signal_handlers
 
 logger = logging.getLogger(__name__)
@@ -367,7 +368,7 @@ def main() -> None:
 
     # Resolve detections input path and clips directory
     try:
-        detections_path, clips_dir, _ = resolve_and_validate_assembly_artifacts(
+        detections_path, clips_dir, latest_run = resolve_and_validate_assembly_artifacts(
             output_dir,
             input_detections=args.input,
             clips_dir=args.clips_dir,
@@ -399,9 +400,17 @@ def main() -> None:
         logger.info("No detections found to assemble.")
         sys.exit(0)
 
-    # Sort by quality score (descending) and take top-N
-    sorted_dets = sorted(detections, key=lambda d: d.get("quality_score", 0), reverse=True)
-    top_dets = sorted_dets[:top_n]
+    # Select diverse highlights with MMR and chronological ordering
+    trace_path = (
+        (latest_run / "selection_trace.json")
+        if latest_run is not None
+        else (output_dir / "selection_trace.json")
+    )
+    top_dets = select_diverse_highlights(
+        detections,
+        top_n=top_n,
+        trace_path=trace_path,
+    )
 
     logger.info("Creating aftermovie from top %d of %d detections", len(top_dets), len(detections))
 

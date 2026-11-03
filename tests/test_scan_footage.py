@@ -127,6 +127,158 @@ def test_deduplicate_detections_merges_contiguous_same_subject() -> None:
     assert result[0].description == "turtle close up"
 
 
+def test_deduplicate_detections_merges_fuzzy_token_overlap() -> None:
+    """_deduplicate_detections should merge contiguous windows sharing content tokens."""
+    from utils.models import MergeEvent, RefinedDetection
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=10.0,
+        end_time=12.0,
+        subject="green sea turtle",
+        confidence=0.85,
+        quality_score=8,
+        description="turtle swimming",
+    )
+    det2 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=12.5,
+        end_time=14.5,
+        subject="sea turtle swimming",
+        confidence=0.95,
+        quality_score=9,
+        description="turtle close up",
+    )
+    merge_events: list[MergeEvent] = []
+    result = scan._deduplicate_detections([det1, det2], trace_merge_events=merge_events)
+    assert len(result) == 1
+    assert result[0].start_time == 10.0
+    assert result[0].end_time == 14.5
+    assert result[0].quality_score == 9
+    assert result[0].subject == "sea turtle swimming"
+    assert len(merge_events) == 1
+    assert merge_events[0].action == "merged"
+    assert "turtle" in merge_events[0].matched_tokens
+
+
+def test_deduplicate_detections_splits_on_max_clip_duration() -> None:
+    """_deduplicate_detections should split into separate segments when max_clip_duration is exceeded."""
+    from utils.models import MergeEvent, RefinedDetection
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=10.0,
+        end_time=20.0,
+        subject="turtle",
+        confidence=0.9,
+        quality_score=8,
+        description="turtle moving",
+    )
+    det2 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=20.5,
+        end_time=24.0,  # 24.0 - 10.0 = 14.0s > 12.0s
+        subject="turtle",
+        confidence=0.9,
+        quality_score=8,
+        description="turtle continuing",
+    )
+    merge_events: list[MergeEvent] = []
+    result = scan._deduplicate_detections(
+        [det1, det2],
+        max_clip_duration=12.0,
+        trace_merge_events=merge_events,
+    )
+    assert len(result) == 2
+    assert result[0].start_time == 10.0
+    assert result[0].end_time == 20.0
+    assert result[1].start_time == 20.5
+    assert result[1].end_time == 24.0
+    assert any(ev.action == "split_max_duration" for ev in merge_events)
+
+
+def test_deduplicate_detections_preserves_single_char_unrelated_subjects() -> None:
+    """Single character subjects ('a' vs 'b') should not merge."""
+    from utils.models import RefinedDetection
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=10.0,
+        end_time=12.0,
+        subject="a",
+        confidence=0.85,
+        quality_score=8,
+        description="test a",
+    )
+    det2 = RefinedDetection(
+        clip_id="c1",
+        file_name="a.mp4",
+        file_path="/a.mp4",
+        start_time=11.0,
+        end_time=13.0,
+        subject="b",
+        confidence=0.95,
+        quality_score=9,
+        description="test b",
+    )
+    result = scan._deduplicate_detections([det1, det2])
+    # Overlapping windows with different single-letter subjects: Step 2 keeps higher quality
+    assert len(result) == 1
+    assert result[0].subject == "b"
+
+
+def test_normalize_vlm_frame_response() -> None:
+    """normalize_vlm_frame_response sanitizes invalid story_role and strips arbitrary keys."""
+    raw = {
+        "detected": True,
+        "subject": "green turtle",
+        "category": "pelagics",
+        "story_role": "invalid_role",
+        "confidence": 1.5,
+        "quality_score": 11,
+        "reject_reasons": "some string reason",
+        "description": "good shot",
+        "timestamp": 12.5,
+        "invented_vlm_key": "ignore me",
+    }
+    norm = scan.normalize_vlm_frame_response(raw)
+    assert norm["detected"] is True
+    assert norm["subject"] == "green turtle"
+    assert norm["category"] == "pelagics"
+    # Invalid role with detected=True defaults to hero_subject
+    assert norm["story_role"] == "hero_subject"
+    # Clamping
+    assert norm["confidence"] == 1.0
+    assert norm["quality_score"] == 10
+    assert norm["reject_reasons"] == ["some string reason"]
+    assert "invented_vlm_key" not in norm
+
+    # False detected defaults story_role to none
+    raw_false = {
+        "detected": False,
+        "subject": "none",
+        "category": "none",
+        "confidence": -0.5,
+        "quality_score": None,
+    }
+    norm_false = scan.normalize_vlm_frame_response(raw_false)
+    assert norm_false["detected"] is False
+    assert norm_false["story_role"] == "none"
+    assert norm_false["confidence"] == 0.0
+    assert norm_false["quality_score"] == 0
+    assert norm_false["reject_reasons"] == []
+
+
 def test_call_ollama_success(tmp_path: Path) -> None:
     """call_ollama should parse Ollama JSON response correctly."""
     image_path = tmp_path / "frame.jpg"
@@ -143,6 +295,29 @@ def test_call_ollama_success(tmp_path: Path) -> None:
     assert result is not None
     assert result["detected"] is True
     assert result["subject"] == "turtle"
+
+
+def test_call_ollama_forwards_system_prompt(tmp_path: Path) -> None:
+    """call_ollama forwards system_prompt to OllamaClient."""
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"data")
+    mock_client = MagicMock()
+    mock_client.generate.return_value = {"detected": True}
+
+    scan.call_ollama(
+        "http://localhost:11434",
+        "model",
+        str(image_path),
+        "prompt",
+        client=mock_client,
+        system_prompt="Custom system instructions",
+    )
+    mock_client.generate.assert_called_once_with(
+        str(image_path),
+        "prompt",
+        "unspecified",
+        system_prompt="Custom system instructions",
+    )
 
 
 def test_call_ollama_request_failure(tmp_path: Path) -> None:
@@ -1375,7 +1550,7 @@ def test_process_clip_with_pass0_classification(
 
     calls_by_phase: dict[str, list[dict]] = {"classify": [], "coarse": [], "fine": []}
 
-    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
         if phase == "classify":
             calls_by_phase["classify"].append({"prompt": prompt})
             return {
@@ -1474,7 +1649,7 @@ def test_process_clip_domain_override(tmp_path: Path, caplog: pytest.LogCaptureF
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         return [{"frame_path": str(frame), "timestamp": 2.0, "frame_number": 1}]
 
-    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
         calls.append(phase)
         return {
             "detected": True,
@@ -1549,7 +1724,7 @@ def test_process_clip_subject_routing_multicategory(tmp_path: Path) -> None:
 
     fine_prompts_seen: list[str] = []
 
-    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
         if phase == "coarse":
             # If timestamp is around 2.0 -> cornering (moto_riding)
             # If timestamp is around 20.0 -> mountain pass vista (moto_scenic)
@@ -1638,7 +1813,7 @@ def test_process_clip_unusable_early_exit(tmp_path: Path, caplog: pytest.LogCapt
             for idx, ts in enumerate(timestamps, start=1)
         ]
 
-    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
         if phase == "classify":
             return {
                 "domain": "unusable",
@@ -1714,7 +1889,7 @@ def test_process_clip_non_target_domain_early_exit(
             for idx, ts in enumerate(timestamps, start=1)
         ]
 
-    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
         if phase == "classify":
             return {
                 "domain": "motorcycle",
@@ -1785,7 +1960,7 @@ def test_process_clip_reuses_prefetched_coarse_frames_and_triggers_callback(
             coarse_extracted = True
         return [{"frame_path": str(f_frame), "timestamp": 2.0, "frame_number": 1}]
 
-    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
         if phase == "coarse":
             return {
                 "detected": True,
@@ -1861,3 +2036,110 @@ def test_extract_classification_frames_duration_sampling(tmp_path: Path) -> None
     assert len(captured_timestamps) == 4
     # Evenly spaced across 1200s (step = 1200 / 5 = 240)
     assert captured_timestamps == [240.0, 480.0, 720.0, 960.0]
+
+
+def test_process_clip_traces_and_natural_window_sizing(tmp_path: Path) -> None:
+    """process_clip should populate pass1 and pass2 collectors and apply natural window sizing."""
+    from utils.models import Pass1ClipTrace, Pass2ClipTrace
+
+    video = tmp_path / "test_traces.mp4"
+    video.touch()
+    clip = {
+        "clip_id": "trace_clip_1",
+        "file_name": "test_traces.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+        "domain": "underwater",
+    }
+    config = {
+        "scan_parameters": {
+            "domain": "underwater",
+            "classify_clips": "off",
+            "coarse_fps": 0.5,
+            "fine_fps": 2.0,
+            "coarse_confidence_threshold": 0.65,
+            "coarse_quality_threshold": 4,
+            "quality_threshold": 7,
+            "fine_pre_roll_seconds": 1.5,
+            "fine_post_roll_seconds": 2.0,
+            "merge_gap_seconds": 1.5,
+            "max_clip_duration": 12.0,
+        },
+        "ollama": {
+            "host": "http://localhost:11434",
+            "model": "qwen2.5-vl:7b",
+        },
+    }
+
+    c_frame = tmp_path / "c.jpg"
+    c_frame.touch()
+    f_frame = tmp_path / "f.jpg"
+    f_frame.touch()
+
+    def mock_extract(video_path, output_dir, *args, **kwargs):
+        if "fine" in str(output_dir):
+            return [{"frame_path": str(f_frame), "timestamp": 5.0, "frame_number": 1}]
+        return [{"frame_path": str(c_frame), "timestamp": 4.0, "frame_number": 1}]
+
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
+        if phase == "coarse":
+            return {
+                "detected": True,
+                "confidence": 0.9,
+                "quality_score": 8,
+                "subject": "green sea turtle",
+                "category": "pelagics",
+                "story_role": "hero_subject",
+            }
+        return {
+            "detected": True,
+            "confidence": 0.95,
+            "quality_score": 9,
+            "subject": "green sea turtle",
+            "category": "pelagics",
+            "story_role": "hero_subject",
+            "description": "Green sea turtle gliding over reef",
+        }
+
+    pass1_collector: list[Pass1ClipTrace] = []
+    pass2_collector: list[Pass2ClipTrace] = []
+
+    with (
+        patch.object(scan, "extract_frames", side_effect=mock_extract),
+        patch.object(scan, "call_ollama", side_effect=mock_call),
+    ):
+        detections = scan.process_clip(
+            clip,
+            config,
+            tmp_path / "work",
+            pass1_collector=pass1_collector,
+            pass2_collector=pass2_collector,
+        )
+
+    assert len(detections) == 1
+    det = detections[0]
+    # Frame timestamp was 5.0: start_sec = 5.0 - 1.5 = 3.5, end_sec = 5.0 + 2.0 = 7.0
+    assert det.start_time == 3.5
+    assert det.end_time == 7.0
+    assert det.story_role == "hero_subject"
+    assert det.detection_id == f"trace_clip_1_{3.5:08.2f}_{7.0:08.2f}"
+    assert det.sort_key == f"test_traces.mp4:{3.5:08.2f}:{7.0:08.2f}:trace_clip_1"
+
+    # Verify Pass 1 trace
+    assert len(pass1_collector) == 1
+    p1 = pass1_collector[0]
+    assert p1.clip_id == "trace_clip_1"
+    assert p1.source_file == "test_traces.mp4"
+    assert len(p1.frame_traces) == 1
+    assert p1.frame_traces[0].detection_id == f"trace_clip_1_{4.0:08.2f}_{4.0:08.2f}"
+    assert p1.frame_traces[0].passed_gate is True
+
+    # Verify Pass 2 trace
+    assert len(pass2_collector) == 1
+    p2 = pass2_collector[0]
+    assert p2.clip_id == "trace_clip_1"
+    assert p2.fine_pre_roll_seconds == 1.5
+    assert p2.fine_post_roll_seconds == 2.0
+    assert len(p2.frame_traces) == 1
+    assert p2.frame_traces[0].detection_id == f"trace_clip_1_{3.5:08.2f}_{7.0:08.2f}"
+    assert p2.frame_traces[0].passed_gate is True

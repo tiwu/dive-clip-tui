@@ -328,3 +328,149 @@ def test_clip_classification_context_fields() -> None:
     dumped = json.loads(c.model_dump_json())
     assert dumped["environment"] == "alpine meadow"
     assert dumped["primary_subjects"] == ["marmot", "pine tree"]
+
+
+def test_traceability_models() -> None:
+    """Per-stage traceability models should serialize and validate properly."""
+    from utils.models import (
+        CoarseFrameTrace,
+        DroppedOverlap,
+        FineFrameTrace,
+        MergeEvent,
+        Pass0FrameTrace,
+        Pass1ClipTrace,
+        Pass1TraceOutput,
+        Pass2ClipTrace,
+        Pass2TraceOutput,
+        SelectionCandidateTrace,
+        SelectionTraceOutput,
+    )
+
+    p0 = Pass0FrameTrace(
+        timestamp=1.0,
+        start_time=1.0,
+        end_time=1.0,
+        domain="underwater",
+        confidence=0.9,
+        usable=True,
+        quality_score=8,
+        reject_reasons=[],
+        scene_description="clear water with coral",
+    )
+    assert p0.domain == "underwater"
+
+    p1_frame = CoarseFrameTrace(
+        detection_id="c1_00005.00_00005.00",
+        clip_id="c1",
+        source_file="dive.mp4",
+        timestamp=5.0,
+        start_time=5.0,
+        end_time=5.0,
+        sort_key="dive.mp4:00005.00:00005.00:c1",
+        detected=True,
+        subject="turtle",
+        category="pelagics",
+        story_role="hero_subject",
+        confidence=0.9,
+        quality_score=8,
+        reject_reasons=[],
+        description="turtle swimming",
+        passed_gate=True,
+        decision_reason="passed coarse thresholds",
+        candidate_window=[3.0, 7.0],
+    )
+    p1_clip = Pass1ClipTrace(
+        clip_id="c1",
+        source_file="dive.mp4",
+        sort_key="dive.mp4:00000.00:00000.00:c1",
+        detected_domain="underwater",
+        template_used="pelagics",
+        coarse_threshold=0.6,
+        coarse_quality_threshold=5,
+        frame_traces=[p1_frame],
+        merged_windows=[[3.0, 7.0]],
+        window_routing={"[3.0, 7.0]": "pelagics"},
+    )
+    p1_out = Pass1TraceOutput(total_clips=1, clips=[p1_clip])
+    assert p1_out.total_clips == 1
+
+    p2_frame = FineFrameTrace(
+        window_index=1,
+        detection_id="c1_00004.00_00007.50",
+        clip_id="c1",
+        source_file="dive.mp4",
+        start_time=4.0,
+        end_time=7.5,
+        sort_key="dive.mp4:00004.00:00007.50:c1",
+        template="pelagics",
+        detected=True,
+        subject="turtle",
+        story_role="hero_subject",
+        confidence=0.95,
+        quality_score=9,
+        reject_reasons=[],
+        passed_gate=True,
+        decision_reason="high quality highlight",
+    )
+    merge_ev = MergeEvent(
+        merged_detection_id="c1_00004.00_00010.00",
+        constituent_ids=["c1_00004.00_00007.50", "c1_00007.00_00010.00"],
+        matched_tokens=["turtle"],
+        action="merged",
+    )
+    dropped = DroppedOverlap(
+        dropped_detection_id="c1_00005.00_00008.00",
+        dropped_subject="diver",
+        dropped_quality_score=6,
+        superseded_by_detection_id="c1_00004.00_00010.00",
+        superseded_by_subject="turtle",
+        superseded_by_quality_score=9,
+        reason="lower_quality_or_confidence",
+    )
+    p2_clip = Pass2ClipTrace(
+        clip_id="c1",
+        source_file="dive.mp4",
+        sort_key="dive.mp4:00000.00:00000.00:c1",
+        quality_threshold=6,
+        fine_pre_roll_seconds=1.5,
+        fine_post_roll_seconds=2.0,
+        merge_gap_seconds=1.5,
+        max_clip_duration=12.0,
+        frame_traces=[p2_frame],
+        merge_events=[merge_ev],
+        dropped_overlaps=[dropped],
+    )
+    p2_out = Pass2TraceOutput(total_clips=1, clips=[p2_clip])
+    assert p2_out.total_clips == 1
+
+    cand_trace = SelectionCandidateTrace(
+        detection_id="c1_00004.00_00010.00",
+        clip_id="c1",
+        source_file="dive.mp4",
+        start_time=4.0,
+        end_time=10.0,
+        sort_key="dive.mp4:00004.00:00010.00:c1",
+        subject="turtle",
+        story_role="hero_subject",
+        template="pelagics",
+        quality_score=9,
+        confidence=0.95,
+        relevance_score=0.9075,
+        max_similarity_penalty=0.0,
+        most_similar_selected_id=None,
+        quota_penalty=0.0,
+        mmr_score=0.589875,
+        selected=True,
+        selection_rank=1,
+        chronological_rank=1,
+        decision_reason="highest initial relevance",
+    )
+    sel_out = SelectionTraceOutput(
+        top_n=1,
+        lambda_quality=0.65,
+        per_clip_limit=1,
+        total_candidates=1,
+        selected_count=1,
+        candidates=[cand_trace],
+    )
+    assert sel_out.selected_count == 1

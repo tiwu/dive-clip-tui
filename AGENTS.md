@@ -63,6 +63,7 @@ interesting bits → get back a watchable highlight video.
 │   ├── ollama_client.py      # Shared Ollama requests and metrics
 │   ├── prompt_templates.py   # Domain prompts and subject-routed templates
 │   ├── run_archive.py        # Run directory snapshots and latest symlink
+│   ├── selection.py          # Maximal Marginal Relevance (MMR) highlight selection
 │   ├── stats.py              # Scan throughput and pipeline metrics
 │   ├── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
 │   └── version.py            # Dynamic package version helper

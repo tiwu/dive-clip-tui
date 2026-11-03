@@ -57,19 +57,31 @@ from utils.models import (
     ClassificationOutput,
     ClipClassification,
     ClipManifest,
+    CoarseFrameTrace,
     DetectionsRefined,
+    DroppedOverlap,
+    FineFrameTrace,
+    MergeEvent,
+    Pass0FrameTrace,
+    Pass1ClipTrace,
+    Pass1TraceOutput,
+    Pass2ClipTrace,
+    Pass2TraceOutput,
     RefinedDetection,
 )
 from utils.ollama_client import OllamaClient, resolve_host
 from utils.prompt_templates import (
     BUILTIN_DOMAINS,
+    VIDEO_CLASSIFICATION_SYSTEM_PROMPT,
     build_classification_prompt,
     get_template_for_keywords,
     load_custom_templates,
+    normalize_vlm_frame_response,
     resolve_domain_from_keywords,
     resolve_template_for_subject,
 )
 from utils.run_archive import archive_run_artifacts, get_run_dir
+from utils.selection import make_detection_id, make_sort_key, tokenize_content_words
 from utils.signals import setup_signal_handlers
 from utils.stats import (
     Phase0Stats,
@@ -94,10 +106,11 @@ def call_ollama(
     *,
     client: OllamaClient | None = None,
     phase: str = "unspecified",
+    system_prompt: str | None = None,
 ) -> dict[str, Any] | None:
     """Compatibility wrapper around the shared Ollama client."""
     request_client = client or OllamaClient(host, model, timeout)
-    return request_client.generate(image_path, prompt, phase)
+    return request_client.generate(image_path, prompt, phase, system_prompt=system_prompt)
 
 
 def _summarize_scores(scores: list[float]) -> str:
@@ -426,8 +439,10 @@ def classify_clip(
 
     prompt = build_classification_prompt(registry)
     usable_results: list[dict[str, Any]] = []
+    frame_traces: list[Pass0FrameTrace] = []
 
     for frame in sample_frames:
+        frame_ts = float(frame.get("timestamp", 0.0))
         start_time = time.perf_counter()
         result = call_ollama(
             ollama_host,
@@ -437,6 +452,7 @@ def classify_clip(
             ollama_timeout,
             client=client,
             phase="classify",
+            system_prompt=VIDEO_CLASSIFICATION_SYSTEM_PROMPT,
         )
         elapsed = time.perf_counter() - start_time
         if phase0_stats is not None:
@@ -479,11 +495,39 @@ def classify_clip(
         except ValueError, TypeError:
             q_score = None
 
+        sug_dom = (
+            result.get("suggested_domain")
+            if matched_domain == "generic" and result.get("suggested_domain") is not None
+            else None
+        )
+        raw_reasons = result.get("reject_reasons", [])
+        if isinstance(raw_reasons, list):
+            reject_reasons = [str(r) for r in raw_reasons if r]
+        elif isinstance(raw_reasons, str) and raw_reasons.strip():
+            reject_reasons = [raw_reasons.strip()]
+        else:
+            reject_reasons = []
+
+        scene_desc = str(result.get("scene_description", "") or "").strip()
+
+        frame_traces.append(
+            Pass0FrameTrace(
+                timestamp=frame_ts,
+                start_time=frame_ts,
+                end_time=frame_ts,
+                domain=matched_domain,
+                suggested_domain=sug_dom,
+                confidence=confidence,
+                usable=usable_val,
+                quality_score=q_score,
+                reject_reasons=reject_reasons,
+                scene_description=scene_desc,
+            )
+        )
+
         usable_results.append({
             "domain": matched_domain,
-            "suggested_domain": result.get("suggested_domain")
-            if matched_domain == "generic" and result.get("suggested_domain") is not None
-            else None,
+            "suggested_domain": sug_dom,
             "confidence": max(0.0, min(1.0, confidence)),
             "usable": usable_val,
             "quality_score": q_score,
@@ -504,6 +548,9 @@ def classify_clip(
         usable_results, winning_domain=winning_domain
     )
 
+    disposition = "accepted" if usable_clip else "skipped_unusable"
+    sort_key = make_sort_key(file_name, 0.0, 0.0, clip_id)
+
     return ClipClassification(
         clip_id=clip_id,
         file_name=file_name,
@@ -516,6 +563,9 @@ def classify_clip(
         usable=usable_clip,
         environment=aggregated_env,
         primary_subjects=aggregated_subjects,
+        sort_key=sort_key,
+        disposition=disposition,
+        frame_evaluations=frame_traces,
     )
 
 
@@ -528,6 +578,7 @@ def classify_clip_domain(
     ollama_timeout: int,
     registry: dict[str, Any],
     phase0_stats: Phase0Stats | None = None,
+    out_classification: list[ClipClassification] | None = None,
 ) -> str:
     """Classify video domain by evaluating sample frames with the VLM."""
     classification = classify_clip(
@@ -540,6 +591,8 @@ def classify_clip_domain(
         registry=registry,
         phase0_stats=phase0_stats,
     )
+    if out_classification is not None:
+        out_classification.append(classification)
     return classification.domain
 
 
@@ -828,6 +881,9 @@ def process_clip(
     phase0_stats: Phase0Stats | None = None,
     prefetched_coarse_frames: list[dict] | None = None,
     on_coarse_start: Callable[[], None] | None = None,
+    pass0_collector: list[ClipClassification] | None = None,
+    pass1_collector: list[Pass1ClipTrace] | None = None,
+    pass2_collector: list[Pass2ClipTrace] | None = None,
 ) -> list[RefinedDetection]:
     """Process a single clip through 3-stage domain-aware scanning.
 
@@ -856,6 +912,10 @@ def process_clip(
     fine_padding = scan_params.get("fine_padding_seconds", 4)
     quality_threshold = scan_params.get("quality_threshold", 7)
     checkpoint_interval = scan_params.get("checkpoint_interval_frames", 20)
+    fine_pre_roll_seconds = float(scan_params.get("fine_pre_roll_seconds", 1.5))
+    fine_post_roll_seconds = float(scan_params.get("fine_post_roll_seconds", 2.0))
+    merge_gap_seconds = float(scan_params.get("merge_gap_seconds", 1.5))
+    max_clip_duration = float(scan_params.get("max_clip_duration", 12.0))
 
     checkpoint: ClipScanCheckpoint | None = None
     checkpoint_file: Path | None = None
@@ -980,6 +1040,7 @@ def process_clip(
                 ollama_timeout,
                 registry,
                 phase0_stats=phase0_stats,
+                out_classification=pass0_collector,
             )
             if phase0_stats is not None:
                 phase0_stats.clips_classified += 1
@@ -992,9 +1053,26 @@ def process_clip(
                 detected_domain,
             )
         cleanup_work_dir(pass0_dir)
+    elif pass0_collector is not None and not any(c.clip_id == clip_id for c in pass0_collector):
+        pass0_collector.append(
+            ClipClassification(
+                clip_id=clip_id,
+                file_name=clip.get("file_name", ""),
+                file_path=str(file_path),
+                domain=detected_domain or "generic",
+                confidence=1.0 if detected_domain else None,
+                usable=detected_domain != "unusable",
+                disposition="reused_from_input",
+                sort_key=make_sort_key(clip.get("file_name", ""), 0.0, 0.0, clip_id),
+            )
+        )
 
     # Check for unusable or non-target footage and early-exit to avoid full decode
     if detected_domain == "unusable":
+        if pass0_collector is not None:
+            for c in pass0_collector:
+                if c.clip_id == clip_id:
+                    c.disposition = "skipped_unusable"
         msg = f"⚡ Skipped {clip['file_name']}: unusable camera footage (inside bag / lens covered / dangling)"
         logger.warning(msg)
         get_console().print(f"[yellow]{msg}[/yellow]")
@@ -1009,6 +1087,10 @@ def process_clip(
         return []
 
     if configured_domain and configured_domain != "auto" and detected_domain != configured_domain:
+        if pass0_collector is not None:
+            for c in pass0_collector:
+                if c.clip_id == clip_id:
+                    c.disposition = "skipped_non_target_domain"
         msg = f"⚡ Skipped {clip['file_name']}: non-target domain '{detected_domain}' (configured: '{configured_domain}')"
         logger.warning(msg)
         get_console().print(f"[yellow]{msg}[/yellow]")
@@ -1102,6 +1184,40 @@ def process_clip(
 
     matched_template = get_template_for_keywords(tags, dom_config.templates) if tags else None
     coarse_prompt = matched_template.coarse_prompt if matched_template else dom_config.coarse_prompt
+    coarse_system_prompt = (
+        matched_template.system_prompt
+        if matched_template and matched_template.system_prompt
+        else (
+            dom_config.fallback_template.system_prompt
+            if getattr(dom_config, "fallback_template", None)
+            and dom_config.fallback_template.system_prompt
+            else VIDEO_CLASSIFICATION_SYSTEM_PROMPT
+        )
+    )
+
+    pass1_frame_traces: list[CoarseFrameTrace] = []
+
+    if skip_coarse_inference and checkpoint is not None:
+        pass1_frame_traces.extend(
+            CoarseFrameTrace(
+                detection_id=make_detection_id(clip_id, r.timestamp, r.timestamp),
+                clip_id=clip_id,
+                source_file=clip["file_name"],
+                timestamp=r.timestamp,
+                start_time=r.timestamp,
+                end_time=r.timestamp,
+                sort_key=make_sort_key(clip["file_name"], r.timestamp, r.timestamp, clip_id),
+                detected=r.detected,
+                subject=r.subject,
+                category=r.category,
+                confidence=r.confidence,
+                quality_score=r.quality_score,
+                passed_gate=r.candidate_window is not None,
+                decision_reason="passed" if r.candidate_window is not None else "failed_gate",
+                candidate_window=r.candidate_window,
+            )
+            for r in checkpoint.coarse_results.values()
+        )
 
     if not skip_coarse_inference:
         task_id = None
@@ -1134,6 +1250,27 @@ def process_clip(
                             cached.category,
                             cached.confidence,
                         ))
+                    pass1_frame_traces.append(
+                        CoarseFrameTrace(
+                            detection_id=make_detection_id(clip_id, ts, ts),
+                            clip_id=clip_id,
+                            source_file=clip["file_name"],
+                            timestamp=ts,
+                            start_time=ts,
+                            end_time=ts,
+                            sort_key=make_sort_key(clip["file_name"], ts, ts, clip_id),
+                            detected=cached.detected,
+                            subject=cached.subject,
+                            category=cached.category,
+                            confidence=cached.confidence,
+                            quality_score=cached.quality_score,
+                            passed_gate=cached.candidate_window is not None,
+                            decision_reason="passed"
+                            if cached.candidate_window is not None
+                            else "failed_gate",
+                            candidate_window=cached.candidate_window,
+                        )
+                    )
                     if progress is not None and task_id is not None:
                         progress.advance(task_id)
                         progress.update(task_id, status=f"({len(candidate_windows)} hits)")
@@ -1144,7 +1281,7 @@ def process_clip(
                 logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
 
                 start_time = time.perf_counter()
-                result = call_ollama(
+                raw_result = call_ollama(
                     ollama_host,
                     ollama_model,
                     frame["frame_path"],
@@ -1152,11 +1289,12 @@ def process_clip(
                     ollama_timeout,
                     client=client,
                     phase="coarse",
+                    system_prompt=coarse_system_prompt,
                 )
                 elapsed = time.perf_counter() - start_time
                 coarse_elapsed_total += elapsed
 
-                if result is None:
+                if raw_result is None:
                     coarse_failures += 1
                     logger.debug(
                         "[Pass 1] Frame %d @ %.1fs: no result (%.1fs)",
@@ -1164,15 +1302,36 @@ def process_clip(
                         frame["timestamp"],
                         elapsed,
                     )
+                    pass1_frame_traces.append(
+                        CoarseFrameTrace(
+                            detection_id=make_detection_id(clip_id, ts, ts),
+                            clip_id=clip_id,
+                            source_file=clip["file_name"],
+                            timestamp=ts,
+                            start_time=ts,
+                            end_time=ts,
+                            sort_key=make_sort_key(clip["file_name"], ts, ts, clip_id),
+                            detected=False,
+                            confidence=0.0,
+                            quality_score=0,
+                            reject_reasons=["ollama call failed"],
+                            passed_gate=False,
+                            decision_reason="ollama_call_failed",
+                        )
+                    )
                     if progress is not None and task_id is not None:
                         progress.advance(task_id)
                     continue
 
+                result = normalize_vlm_frame_response(raw_result)
                 detected = bool(result.get("detected"))
                 confidence = float(result.get("confidence", 0.0) or 0.0)
                 quality_score = int(result.get("quality_score", 0) or 0)
                 subject = str(result.get("subject", "") or "")
                 category = str(result.get("category", "") or "")
+                story_role = str(result.get("story_role", "hero_subject") or "hero_subject")
+                reject_reasons = result.get("reject_reasons", [])
+                description = str(result.get("description", "") or "")
                 coarse_confidences.append(confidence)
                 if detected:
                     coarse_detected += 1
@@ -1185,11 +1344,41 @@ def process_clip(
                     and quality_score >= coarse_quality_threshold
                 )
                 if frame_passes:
-                    cand_win = (max(0, ts - fine_padding), ts + fine_padding)
+                    cand_win = (max(0.0, ts - fine_padding), ts + fine_padding)
                     candidate_windows.append(cand_win)
                     coarse_hits.append((ts, cand_win, subject, category, confidence))
+                    decision_reason = "passed"
                 else:
                     cand_win = None
+                    if not detected:
+                        decision_reason = "not_detected"
+                    elif confidence < coarse_threshold:
+                        decision_reason = "low_confidence"
+                    else:
+                        decision_reason = "low_quality"
+
+                pass1_frame_traces.append(
+                    CoarseFrameTrace(
+                        detection_id=make_detection_id(clip_id, ts, ts),
+                        clip_id=clip_id,
+                        source_file=clip["file_name"],
+                        timestamp=ts,
+                        start_time=ts,
+                        end_time=ts,
+                        sort_key=make_sort_key(clip["file_name"], ts, ts, clip_id),
+                        detected=detected,
+                        subject=subject,
+                        category=category,
+                        story_role=story_role,
+                        confidence=confidence,
+                        quality_score=quality_score,
+                        reject_reasons=reject_reasons,
+                        description=description,
+                        passed_gate=frame_passes,
+                        decision_reason=decision_reason,
+                        candidate_window=cand_win,
+                    )
+                )
 
                 if progress is not None and task_id is not None:
                     progress.advance(task_id)
@@ -1276,6 +1465,37 @@ def process_clip(
         logger.info("[Pass 1] No candidates found for %s", clip["file_name"])
         if phase1_stats is not None:
             phase1_stats.elapsed_seconds += coarse_elapsed_total
+        if pass1_collector is not None:
+            pass1_collector.append(
+                Pass1ClipTrace(
+                    clip_id=clip_id,
+                    source_file=clip["file_name"],
+                    sort_key=make_sort_key(clip["file_name"], 0.0, 0.0, clip_id),
+                    detected_domain=detected_domain,
+                    template_used=matched_template.name if matched_template else dom_config.name,
+                    coarse_threshold=coarse_threshold,
+                    coarse_quality_threshold=coarse_quality_threshold,
+                    frame_traces=pass1_frame_traces,
+                    merged_windows=[],
+                    window_routing={},
+                )
+            )
+        if pass2_collector is not None:
+            pass2_collector.append(
+                Pass2ClipTrace(
+                    clip_id=clip_id,
+                    source_file=clip["file_name"],
+                    sort_key=make_sort_key(clip["file_name"], 0.0, 0.0, clip_id),
+                    quality_threshold=quality_threshold,
+                    fine_pre_roll_seconds=fine_pre_roll_seconds,
+                    fine_post_roll_seconds=fine_post_roll_seconds,
+                    merge_gap_seconds=merge_gap_seconds,
+                    max_clip_duration=max_clip_duration,
+                    frame_traces=[],
+                    merge_events=[],
+                    dropped_overlaps=[],
+                )
+            )
         cleanup_work_dir(clip_work_dir)
         return []
 
@@ -1319,6 +1539,22 @@ def process_clip(
     if checkpoint is not None:
         checkpoint.window_routing = window_routing
 
+    if pass1_collector is not None:
+        pass1_collector.append(
+            Pass1ClipTrace(
+                clip_id=clip_id,
+                source_file=clip["file_name"],
+                sort_key=make_sort_key(clip["file_name"], 0.0, 0.0, clip_id),
+                detected_domain=detected_domain,
+                template_used=matched_template.name if matched_template else dom_config.name,
+                coarse_threshold=coarse_threshold,
+                coarse_quality_threshold=coarse_quality_threshold,
+                frame_traces=pass1_frame_traces,
+                merged_windows=[[w[0], w[1]] for w in merged],
+                window_routing={k: v.get("subject", "") for k, v in window_routing.items()},
+            )
+        )
+
     # ---------- Pass 2: Fine scan ----------
     logger.info(
         "[Pass 2] Fine scan @ %.1f FPS: %s (%d windows)", fine_fps, clip["file_name"], len(merged)
@@ -1331,6 +1567,9 @@ def process_clip(
     fine_failures = 0
     fine_elapsed_total = 0.0
     fine_confidences: list[float] = []
+    pass2_frame_traces: list[FineFrameTrace] = []
+    merge_events: list[MergeEvent] = []
+    dropped_overlaps: list[DroppedOverlap] = []
 
     if checkpoint is not None:
         checkpoint.pass_stage = "fine"
@@ -1419,8 +1658,14 @@ def process_clip(
                         frame_index,
                         len(fine_frames),
                     )
+                    ts = float(frame["timestamp"])
+                    start_sec = max(0.0, ts - fine_pre_roll_seconds)
+                    end_sec = ts + fine_post_roll_seconds
+                    det_id = make_detection_id(clip_id, start_sec, end_sec)
+                    det_sort_key = make_sort_key(clip["file_name"], start_sec, end_sec, clip_id)
+
                     start_time = time.perf_counter()
-                    result = call_ollama(
+                    raw_result = call_ollama(
                         ollama_host,
                         ollama_model,
                         frame["frame_path"],
@@ -1428,44 +1673,94 @@ def process_clip(
                         ollama_timeout,
                         client=client,
                         phase="fine",
+                        system_prompt=window_template.system_prompt,
                     )
                     elapsed = time.perf_counter() - start_time
                     fine_elapsed_total += elapsed
 
-                    if result is None:
+                    if raw_result is None:
                         fine_failures += 1
-                        logger.debug(
-                            "[Pass 2] Frame @ %.2fs: no result (%.1fs)", frame["timestamp"], elapsed
+                        logger.debug("[Pass 2] Frame @ %.2fs: no result (%.1fs)", ts, elapsed)
+                        pass2_frame_traces.append(
+                            FineFrameTrace(
+                                window_index=window_index,
+                                detection_id=det_id,
+                                clip_id=clip_id,
+                                source_file=clip["file_name"],
+                                start_time=start_sec,
+                                end_time=end_sec,
+                                sort_key=det_sort_key,
+                                template=window_template.name,
+                                detected=False,
+                                subject="none",
+                                story_role="none",
+                                confidence=0.0,
+                                quality_score=0,
+                                reject_reasons=["ollama call failed"],
+                                passed_gate=False,
+                                decision_reason="ollama_call_failed",
+                            )
                         )
                         if progress is not None and fine_task_id is not None:
                             progress.advance(fine_task_id)
                         continue
 
+                    result = normalize_vlm_frame_response(raw_result)
                     detected = bool(result.get("detected"))
                     confidence = float(result.get("confidence", 0.0) or 0.0)
                     quality_score = int(result.get("quality_score", 0) or 0)
+                    subject = result.get("subject", win_subject or "unknown")
+                    story_role = result.get("story_role", "hero_subject")
+                    reject_reasons = result.get("reject_reasons", [])
+                    description = result.get("description", "")
                     frame_passes = detected and quality_score >= quality_threshold
                     fine_confidences.append(confidence)
+
                     if frame_passes:
                         fine_passed += 1
                         if phase2_stats is not None:
                             phase2_stats.detections_found += 1
-                            ts = frame["timestamp"]
-                            phase2_stats.detections_duration += (ts + 1.0) - max(0.0, ts - 1.0)
+                            phase2_stats.detections_duration += end_sec - start_sec
 
                     if progress is not None and fine_task_id is not None:
                         progress.advance(fine_task_id)
                         progress.update(fine_task_id, status=f"({fine_passed} hits)")
 
+                    decision_reason = (
+                        "passed"
+                        if frame_passes
+                        else ("low_quality" if detected else "not_detected")
+                    )
+                    pass2_frame_traces.append(
+                        FineFrameTrace(
+                            window_index=window_index,
+                            detection_id=det_id,
+                            clip_id=clip_id,
+                            source_file=clip["file_name"],
+                            start_time=start_sec,
+                            end_time=end_sec,
+                            sort_key=det_sort_key,
+                            template=window_template.name,
+                            detected=detected,
+                            subject=subject,
+                            story_role=story_role,
+                            confidence=confidence,
+                            quality_score=quality_score,
+                            reject_reasons=reject_reasons,
+                            passed_gate=frame_passes,
+                            decision_reason=decision_reason,
+                        )
+                    )
+
                     logger.debug(
                         "[Pass 2] Frame @ %.2fs: detected=%s confidence=%.2f quality=%d "
                         "passes_threshold=%s subject=%s (%.1fs)",
-                        frame["timestamp"],
+                        ts,
                         detected,
                         confidence,
                         quality_score,
                         frame_passes,
-                        result.get("subject", "-"),
+                        subject or "-",
                         elapsed,
                     )
 
@@ -1479,15 +1774,18 @@ def process_clip(
                                 file_name=clip["file_name"],
                                 file_path=file_path,
                                 fps=str(clip.get("fps") or "25.0"),
-                                start_time=max(0, frame["timestamp"] - 1),
-                                end_time=frame["timestamp"] + 1,
-                                subject=result.get("subject", win_subject or "unknown"),
+                                start_time=start_sec,
+                                end_time=end_sec,
+                                subject=subject,
                                 confidence=confidence,
                                 quality_score=quality_score,
-                                description=result.get("description", ""),
+                                description=description,
                                 color=color,
                                 template=window_template.name,
                                 domain=detected_domain,
+                                story_role=story_role,
+                                detection_id=det_id,
+                                sort_key=det_sort_key,
                             )
                         )
                     except (ValueError, TypeError) as exc:
@@ -1524,7 +1822,13 @@ def process_clip(
 
     # Deduplicate overlapping detections (keep highest quality_score)
     before_dedup = len(all_detections)
-    all_detections = _deduplicate_detections(all_detections)
+    all_detections = _deduplicate_detections(
+        all_detections,
+        merge_gap_seconds=merge_gap_seconds,
+        max_clip_duration=max_clip_duration,
+        trace_merge_events=merge_events,
+        trace_dropped_overlaps=dropped_overlaps,
+    )
     if phase2_stats is not None:
         phase2_stats.detections_dedup += len(all_detections)
         phase2_stats.detections_dedup_duration += sum(
@@ -1546,6 +1850,23 @@ def process_clip(
         fine_elapsed_total,
     )
 
+    if pass2_collector is not None:
+        pass2_collector.append(
+            Pass2ClipTrace(
+                clip_id=clip_id,
+                source_file=clip["file_name"],
+                sort_key=make_sort_key(clip["file_name"], 0.0, 0.0, clip_id),
+                quality_threshold=quality_threshold,
+                fine_pre_roll_seconds=fine_pre_roll_seconds,
+                fine_post_roll_seconds=fine_post_roll_seconds,
+                merge_gap_seconds=merge_gap_seconds,
+                max_clip_duration=max_clip_duration,
+                frame_traces=pass2_frame_traces,
+                merge_events=merge_events,
+                dropped_overlaps=dropped_overlaps,
+            )
+        )
+
     if checkpoint is not None:
         checkpoint.pass_stage = "completed"
         checkpoint.refined_detections = list(all_detections)
@@ -1558,57 +1879,125 @@ def process_clip(
 
 def _deduplicate_detections(
     detections: list[RefinedDetection],
+    merge_gap_seconds: float = 1.5,
+    max_clip_duration: float = 12.0,
+    trace_merge_events: list[MergeEvent] | None = None,
+    trace_dropped_overlaps: list[DroppedOverlap] | None = None,
 ) -> list[RefinedDetection]:
     """Merge contiguous detections of the same subject and deduplicate overlapping windows.
 
-    1. Contiguous or adjacent windows of the same subject in the same clip are merged
-       into a continuous highlight segment, preserving the highest quality score,
-       highest confidence, and most descriptive detail.
+    1. Contiguous or adjacent windows sharing content tokens within the same clip are merged
+       into a continuous highlight segment (up to max_clip_duration), preserving the highest
+       quality score, highest confidence, and most descriptive detail.
     2. Any remaining overlapping windows of different subjects are deduplicated by
        keeping the detection with the higher quality score.
     """
     if not detections:
         return []
 
-    # Step 1: Group by clip and subject (case-insensitive) to merge contiguous segments
     from collections import defaultdict
 
-    groups: dict[tuple[str, str], list[RefinedDetection]] = defaultdict(list)
+    # Group by clip_id
+    clip_groups: dict[str, list[RefinedDetection]] = defaultdict(list)
     for det in detections:
-        key = (det.clip_id, det.subject.strip().lower())
-        groups[key].append(det)
+        clip_groups[det.clip_id].append(det)
 
     all_merged: list[RefinedDetection] = []
-    for group in groups.values():
-        sorted_group = sorted(group, key=lambda d: d.start_time)
+
+    for group in clip_groups.values():
+        sorted_group = sorted(
+            group,
+            key=lambda d: (d.start_time, d.end_time, -d.quality_score, -d.confidence),
+        )
         merged_group: list[RefinedDetection] = []
+
         for det in sorted_group:
             if not merged_group:
                 merged_group.append(det)
                 continue
+
             prev = merged_group[-1]
-            # Merge if overlapping or adjacent (within 1.0 second tolerance)
-            if det.start_time <= prev.end_time + 1.0:
-                new_end = max(prev.end_time, det.end_time)
-                new_quality = max(prev.quality_score, det.quality_score)
-                new_confidence = max(prev.confidence, det.confidence)
-                new_desc = (
-                    det.description if det.quality_score > prev.quality_score else prev.description
-                )
-                new_subject = (
-                    det.subject if det.quality_score > prev.quality_score else prev.subject
-                )
-                merged_group[-1] = prev.model_copy(
-                    update={
-                        "end_time": new_end,
-                        "quality_score": new_quality,
-                        "confidence": new_confidence,
-                        "description": new_desc,
-                        "subject": new_subject,
-                    }
-                )
+
+            # Check temporal adjacency
+            is_adjacent = det.start_time <= prev.end_time + merge_gap_seconds
+
+            # Check subject match (exact lowercase or shared content token >= 3 chars)
+            prev_subj = prev.subject.strip().lower()
+            det_subj = det.subject.strip().lower()
+            prev_tokens = tokenize_content_words(prev_subj)
+            det_tokens = tokenize_content_words(det_subj)
+            shared_tokens = prev_tokens & det_tokens
+            subjects_match = (bool(prev_subj and prev_subj == det_subj)) or bool(shared_tokens)
+
+            # Check duration cap
+            merged_duration = max(prev.end_time, det.end_time) - prev.start_time
+            within_cap = merged_duration <= max_clip_duration
+
+            if is_adjacent and subjects_match:
+                if not within_cap:
+                    # Duration cap exceeded: start new segment and record split
+                    if trace_merge_events is not None:
+                        trace_merge_events.append(
+                            MergeEvent(
+                                merged_detection_id=make_detection_id(
+                                    det.clip_id, det.start_time, det.end_time
+                                ),
+                                constituent_ids=[
+                                    make_detection_id(prev.clip_id, prev.start_time, prev.end_time),
+                                    make_detection_id(det.clip_id, det.start_time, det.end_time),
+                                ],
+                                matched_tokens=sorted(shared_tokens),
+                                action="split_max_duration",
+                            )
+                        )
+                    merged_group.append(det)
+                else:
+                    new_end = max(prev.end_time, det.end_time)
+                    new_quality = max(prev.quality_score, det.quality_score)
+                    new_confidence = max(prev.confidence, det.confidence)
+                    new_desc = (
+                        det.description
+                        if det.quality_score > prev.quality_score
+                        else prev.description
+                    )
+                    new_subject = (
+                        det.subject if det.quality_score > prev.quality_score else prev.subject
+                    )
+                    new_role = (
+                        getattr(det, "story_role", "hero_subject")
+                        if det.quality_score > prev.quality_score
+                        else getattr(prev, "story_role", "hero_subject")
+                    )
+                    new_color = det.color if det.quality_score > prev.quality_score else prev.color
+
+                    prev_id = make_detection_id(prev.clip_id, prev.start_time, prev.end_time)
+                    curr_id = make_detection_id(det.clip_id, det.start_time, det.end_time)
+                    merged_id = make_detection_id(prev.clip_id, prev.start_time, new_end)
+
+                    merged_group[-1] = prev.model_copy(
+                        update={
+                            "end_time": new_end,
+                            "quality_score": new_quality,
+                            "confidence": new_confidence,
+                            "description": new_desc,
+                            "subject": new_subject,
+                            "story_role": new_role,
+                            "color": new_color,
+                        }
+                    )
+
+                    if trace_merge_events is not None:
+                        trace_merge_events.append(
+                            MergeEvent(
+                                merged_detection_id=merged_id,
+                                constituent_ids=[prev_id, curr_id],
+                                matched_tokens=sorted(shared_tokens),
+                                action="merged",
+                            )
+                        )
             else:
                 merged_group.append(det)
+
         all_merged.extend(merged_group)
 
     # Step 2: For any remaining overlapping detections across different subjects, keep higher quality
@@ -1616,14 +2005,37 @@ def _deduplicate_detections(
     kept: list[RefinedDetection] = []
 
     for det in sorted_dets:
-        overlaps = any(
-            det.clip_id == kept_det.clip_id
-            and det.start_time < kept_det.end_time
-            and det.end_time > kept_det.start_time
-            for kept_det in kept
+        overlapping_kept = next(
+            (
+                k
+                for k in kept
+                if det.clip_id == k.clip_id
+                and det.start_time < k.end_time
+                and det.end_time > k.start_time
+            ),
+            None,
         )
-        if not overlaps:
+        if overlapping_kept is None:
             kept.append(det)
+        else:
+            if trace_dropped_overlaps is not None:
+                trace_dropped_overlaps.append(
+                    DroppedOverlap(
+                        dropped_detection_id=make_detection_id(
+                            det.clip_id, det.start_time, det.end_time
+                        ),
+                        dropped_subject=det.subject,
+                        dropped_quality_score=det.quality_score,
+                        superseded_by_detection_id=make_detection_id(
+                            overlapping_kept.clip_id,
+                            overlapping_kept.start_time,
+                            overlapping_kept.end_time,
+                        ),
+                        superseded_by_subject=overlapping_kept.subject,
+                        superseded_by_quality_score=overlapping_kept.quality_score,
+                        reason="lower_quality_or_confidence",
+                    )
+                )
 
     kept.sort(key=lambda d: (d.file_name, d.start_time))
     return kept
@@ -1816,6 +2228,9 @@ def main() -> None:
     p0_stats = Phase0Stats()
     p1_stats = Phase1Stats()
     p2_stats = Phase2Stats()
+    pass0_records: list[ClipClassification] = []
+    pass1_records: list[Pass1ClipTrace] = []
+    pass2_records: list[Pass2ClipTrace] = []
     if args.resume and state is not None:
         prev_scan_stats = state.get("scan_stats")
         if isinstance(prev_scan_stats, dict):
@@ -1925,6 +2340,9 @@ def main() -> None:
                     phase0_stats=p0_stats,
                     prefetched_coarse_frames=prefetched_frames,
                     on_coarse_start=on_coarse_start_cb,
+                    pass0_collector=pass0_records,
+                    pass1_collector=pass1_records,
+                    pass2_collector=pass2_records,
                 )
                 refined.detections.extend(detections)
                 refined.total_detections += len(detections)
@@ -1984,6 +2402,37 @@ def main() -> None:
         )
         save_stats_json(scan_pipeline_stats, stats_save_path)
 
+        # Write traceability artifacts
+        trace_dir = target_run_dir or output_dir
+        classifications_file = trace_dir / "classifications.json"
+        pass1_trace_file = trace_dir / "pass1_coarse_trace.json"
+        pass2_trace_file = trace_dir / "pass2_fine_trace.json"
+
+        def _save_trace_atomic(path: Path, model_obj: Any) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+            try:
+                temp_path.write_text(model_obj.model_dump_json(indent=2), encoding="utf-8")
+                temp_path.replace(path)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink(missing_ok=True)
+
+        classifications_obj = ClassificationOutput(
+            total_clips=len(pass0_records), classifications=pass0_records
+        )
+        pass1_obj = Pass1TraceOutput(total_clips=len(pass1_records), clips=pass1_records)
+        pass2_obj = Pass2TraceOutput(total_clips=len(pass2_records), clips=pass2_records)
+
+        _save_trace_atomic(classifications_file, classifications_obj)
+        _save_trace_atomic(pass1_trace_file, pass1_obj)
+        _save_trace_atomic(pass2_trace_file, pass2_obj)
+
+        if target_run_dir is not None and target_run_dir != output_dir:
+            _save_trace_atomic(output_dir / "classifications.json", classifications_obj)
+            _save_trace_atomic(output_dir / "pass1_coarse_trace.json", pass1_obj)
+            _save_trace_atomic(output_dir / "pass2_fine_trace.json", pass2_obj)
+
         if target_run_dir is not None:
             archive_run_artifacts(
                 target_run_dir,
@@ -1991,6 +2440,9 @@ def main() -> None:
                 detections_path=output_path,
                 log_file=args.log_file,
                 stats_path=stats_save_path,
+                classifications_path=classifications_file,
+                pass1_coarse_trace_path=pass1_trace_file,
+                pass2_fine_trace_path=pass2_trace_file,
             )
             logger.info("Archived run artifacts to %s", target_run_dir)
 

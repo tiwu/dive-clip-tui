@@ -298,6 +298,7 @@ utils/
   ollama_client.py         # Ollama API client and metrics
   prompt_templates.py      # Domain prompts and subject-routed templates
   run_archive.py           # Self-contained run snapshots and latest symlink
+  selection.py             # Maximal Marginal Relevance (MMR) highlight selection and diversity
   stats.py                 # Scan throughput, phase metrics, and summary tables
   timecode_math.py         # Frame-rate and SMPTE timecode helpers
   version.py               # Dynamic package version helper

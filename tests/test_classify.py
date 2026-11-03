@@ -109,7 +109,7 @@ def test_classify_clip_calls_only_classify_phase() -> None:
 
     phases_called = []
 
-    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified"):
+    def mock_call(host, model, img, prompt, timeout, client=None, phase="unspecified", **kwargs):
         phases_called.append(phase)
         return {"domain": "underwater", "confidence": 0.85}
 

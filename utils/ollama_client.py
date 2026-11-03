@@ -161,6 +161,7 @@ class OllamaClient:
         image_path: str,
         prompt: str,
         phase: str = "unspecified",
+        system_prompt: str | None = None,
     ) -> dict[str, Any] | None:
         """Analyze one image, preserving Ollama's JSON-mode response contract."""
         started = time.perf_counter()
@@ -177,13 +178,15 @@ class OllamaClient:
 
         logger.debug("Payload size: %d bytes", len(image_b64))
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
             "images": [image_b64],
             "format": "json",
             "stream": False,
         }
+        if system_prompt and system_prompt.strip():
+            payload["system"] = system_prompt.strip()
 
         try:
             logger.debug("Sending Ollama request to %s", self.host)
