@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+from utils.env import load_dotenv
+
 
 class ConfigError(Exception):
     """Raised when configuration file cannot be read, parsed, or validated."""
@@ -39,6 +41,9 @@ def load_config(
         contains invalid YAML syntax, or top-level content is not a mapping.
     """
     path = Path(config_path)
+    # Secrets such as OPENROUTER_API_KEY may live in a .env next to the config or in the cwd.
+    load_dotenv(path.resolve().parent / ".env")
+    load_dotenv(".env")
     if not path.exists():
         if default_to_empty:
             return {}

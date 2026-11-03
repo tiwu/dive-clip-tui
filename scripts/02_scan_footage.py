@@ -93,6 +93,7 @@ from utils.stats import (
     parse_duration,
     save_stats_json,
 )
+from utils.vlm_client import VLMClient, create_vlm_client
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def call_ollama(
     prompt: str,
     timeout: int = 90,
     *,
-    client: OllamaClient | None = None,
+    client: VLMClient | None = None,
     phase: str = "unspecified",
     system_prompt: str | None = None,
 ) -> dict[str, Any] | None:
@@ -418,7 +419,7 @@ def aggregate_suggested_domain(
 def classify_clip(
     clip: dict[str, Any] | ClipManifest,
     sample_frames: list[dict[str, Any]],
-    client: OllamaClient,
+    client: VLMClient,
     ollama_host: str,
     ollama_model: str,
     ollama_timeout: int,
@@ -578,7 +579,7 @@ def classify_clip(
 def classify_clip_domain(
     clip: dict,
     sample_frames: list[dict],
-    client: OllamaClient,
+    client: VLMClient,
     ollama_host: str,
     ollama_model: str,
     ollama_timeout: int,
@@ -692,7 +693,7 @@ def classify_footage(
     clips: list[dict[str, Any]],
     config: dict[str, Any],
     work_dir: Path | None = None,
-    client: OllamaClient | None = None,
+    client: VLMClient | None = None,
     output_file: Path | str | list[Path | str] | None = None,
     resume: bool = False,
 ) -> list[ClipClassification]:
@@ -749,7 +750,7 @@ def classify_footage(
     ollama_host = resolve_host(ollama_cfg.get("host"))
     ollama_model = ollama_cfg.get("model", "qwen2.5-vl:7b")
     ollama_timeout = ollama_cfg.get("timeout_seconds", 90)
-    ollama_client = client or OllamaClient(ollama_host, ollama_model, ollama_timeout)
+    ollama_client = client or create_vlm_client(config)
 
     registry = load_custom_templates(config)
     classify_frames_count = scan_params.get("classify_frames_count", 3)
@@ -877,7 +878,7 @@ def process_clip(
     clip: dict,
     config: dict,
     work_dir: Path,
-    ollama_client: OllamaClient | None = None,
+    ollama_client: VLMClient | None = None,
     state: PipelineState | None = None,
     progress: Progress | None = None,
     phase1_stats: Phase1Stats | None = None,
@@ -959,7 +960,7 @@ def process_clip(
     ollama_host = resolve_host(ollama_cfg.get("host"))
     ollama_model = ollama_cfg.get("model", "qwen2.5-vl:7b")
     ollama_timeout = ollama_cfg.get("timeout_seconds", 90)
-    client = ollama_client or OllamaClient(ollama_host, ollama_model, ollama_timeout)
+    client = ollama_client or create_vlm_client(config)
 
     tags = clip.get("tags", [])
 
@@ -2183,12 +2184,13 @@ def main() -> None:
     logger.info("Using work directory: %s (ramdisk=%s)", work_dir, use_ramdisk)
     setup_signal_handlers()
 
-    ollama_cfg = config.get("ollama", {})
-    ollama_client = OllamaClient(
-        resolve_host(ollama_cfg.get("host")),
-        ollama_cfg.get("model", "qwen2.5-vl:7b"),
-        ollama_cfg.get("timeout_seconds", 90),
-    )
+    ollama_client = create_vlm_client(config)
+    vlm_provider = str((config.get("vlm") or {}).get("provider", "ollama")).lower()
+    if vlm_provider != "ollama":
+        logger.warning(
+            "VLM provider is %s: sampled frames are uploaded to a third-party cloud service.",
+            vlm_provider,
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "detections_refined.json"
 
