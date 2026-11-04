@@ -486,3 +486,58 @@ def test_all_domain_prompts_specify_story_role_and_schema() -> None:
             assert "reject_reasons" in tpl.fine_prompt, (
                 f"fine prompt for {tpl.name} missing reject_reasons"
             )
+
+
+def test_build_contact_sheet_prompt_documents_tile_layout() -> None:
+    """The sheet prompt keeps the base prompt and states the tile count/order."""
+    from utils.prompt_templates import build_contact_sheet_prompt
+
+    prompt = build_contact_sheet_prompt("BASE_PROMPT_TEXT", 4)
+
+    assert prompt.startswith("BASE_PROMPT_TEXT")
+    assert "### Contact sheet" in prompt
+    assert "4-frame" in prompt
+    assert "reading order" in prompt
+    assert "'tiles'" in prompt
+    assert "exactly 4 objects" in prompt
+
+
+def test_normalize_vlm_sheet_response_orders_tiles_by_index() -> None:
+    """Tiles are returned in index order regardless of reply ordering."""
+    from utils.prompt_templates import normalize_vlm_sheet_response
+
+    raw = {
+        "tiles": [
+            {"index": 1, "detected": True, "subject": "turtle", "confidence": 0.9},
+            {"index": 0, "detected": False, "subject": "", "confidence": 0.0},
+        ]
+    }
+    tiles = normalize_vlm_sheet_response(raw, 2)
+
+    assert tiles is not None
+    assert [tile["detected"] for tile in tiles] == [False, True]
+    assert tiles[1]["subject"] == "turtle"
+
+
+def test_normalize_vlm_sheet_response_rejects_untrustworthy_payloads() -> None:
+    """Malformed sheets return ``None`` so callers fall back to per-frame calls."""
+    from utils.prompt_templates import normalize_vlm_sheet_response
+
+    assert normalize_vlm_sheet_response(None, 4) is None
+    assert normalize_vlm_sheet_response({"tiles": []}, 4) is None
+    assert normalize_vlm_sheet_response({"tiles": [{"index": 0}]}, 4) is None
+    assert normalize_vlm_sheet_response({"tiles": [{"index": 0}, {"index": 0}]}, 2) is None
+    assert normalize_vlm_sheet_response({"tiles": [{"index": 5}, {"index": 6}]}, 2) is None
+    assert normalize_vlm_sheet_response({"tiles": ["nope", "nope"]}, 2) is None
+    assert normalize_vlm_sheet_response({}, 0) is None
+
+
+def test_normalize_vlm_sheet_response_accepts_single_tile_frame_schema() -> None:
+    """A one-tile sheet may reply with the plain frame schema."""
+    from utils.prompt_templates import normalize_vlm_sheet_response
+
+    tiles = normalize_vlm_sheet_response({"detected": True, "subject": "ray"}, 1)
+
+    assert tiles is not None
+    assert len(tiles) == 1
+    assert tiles[0]["subject"] == "ray"

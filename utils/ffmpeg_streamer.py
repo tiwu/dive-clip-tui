@@ -8,10 +8,12 @@ on systems without shared memory (e.g. macOS).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -325,3 +327,341 @@ def concat_clips(clip_paths: list[Path], output_path: Path) -> bool:
         return True
     finally:
         list_path.unlink(missing_ok=True)
+
+
+def extract_raw_frames(
+    video_path: str | Path,
+    fps: float = 0.5,
+    size: int = 64,
+    count: int | None = None,
+    keyframes_only: bool = False,
+    start_seconds: float | None = None,
+    duration_seconds: float | None = None,
+    timeout: int | float | None = None,
+) -> list[bytes]:
+    """Extract downscaled RGB24 frames through a pipe for programmatic screening.
+
+    The ``fps`` filter is applied the same way as :func:`extract_frames`, so frame
+    ``n`` (0-based) corresponds to ``start_seconds + n / fps``. That keeps the
+    prescreen metrics aligned with the JPEG frames sent to the VLM.
+
+    ``keyframes_only`` adds ``-skip_frame nokey`` before the input so FFmpeg skips
+    non-key frames during decode (Stage C fast path). Because the ``fps`` filter
+    still emits one frame per interval, the output stays index-aligned with the
+    regular path; if the keyframe pass yields nothing, the call retries without
+    the skip flag.
+    """
+    video_path = Path(video_path)
+    if fps <= 0 or size <= 0:
+        return []
+
+    frame_bytes = size * size * 3
+    timeout_sec = int(timeout) if timeout is not None else 300
+
+    def _run(skip_keyframes: bool) -> bytes:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+        if skip_keyframes:
+            cmd.extend(["-skip_frame", "nokey"])
+        if start_seconds is not None:
+            cmd.extend(["-ss", str(start_seconds)])
+        cmd.extend(["-i", str(video_path)])
+        if duration_seconds is not None:
+            cmd.extend(["-t", str(duration_seconds)])
+        cmd.extend([
+            "-vf",
+            f"fps={fps},scale={size}:{size}:flags=area",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ])
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            logger.warning("Raw frame extraction timeout after %ds for %s", timeout_sec, video_path)
+            return b""
+        except Exception as exc:
+            logger.warning("Raw frame extraction error for %s: %s", video_path, exc)
+            return b""
+        if result.returncode != 0:
+            logger.debug(
+                "Raw frame extraction returned %d for %s: %s",
+                result.returncode,
+                video_path,
+                (result.stderr or b"").decode("utf-8", "replace").strip()[:200],
+            )
+            return b""
+        return result.stdout or b""
+
+    payload = _run(keyframes_only)
+    if not payload and keyframes_only:
+        logger.debug(
+            "Keyframe-only sampling produced nothing for %s; retrying full decode", video_path
+        )
+        payload = _run(False)
+    if not payload:
+        return []
+
+    total = len(payload) // frame_bytes
+    if count is not None and count >= 0:
+        total = min(total, count)
+    return [payload[i * frame_bytes : (i + 1) * frame_bytes] for i in range(total)]
+
+
+def compose_frame_mosaic(
+    frame_paths: Sequence[str | Path],
+    output_path: str | Path,
+    tile: int = 2,
+    padding: int = 2,
+    timeout: float = 60.0,
+) -> str | None:
+    """Compose existing frame images into a ``tile x tile`` contact sheet.
+
+    Frames keep their given order (left-to-right, top-to-bottom). Slots left
+    empty are filled by repeating the last frame so the grid stays rectangular.
+    Returns the sheet path, or ``None`` when composition fails.
+    """
+    paths = [str(path) for path in frame_paths]
+    slot_count = max(1, tile * tile)
+    if not paths or slot_count < 1:
+        return None
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(paths) > slot_count:
+        paths = paths[:slot_count]
+    while len(paths) < slot_count:
+        paths.append(paths[-1])
+
+    pad = max(0, padding)
+    cmd: list[str] = ["ffmpeg", "-hide_banner", "-loglevel", "warning"]
+    for path in paths:
+        cmd.extend(["-i", path])
+
+    filters: list[str] = []
+    for index in range(slot_count):
+        if pad:
+            filters.append(
+                f"[{index}]pad=iw+{pad}:ih+{pad}:{pad // 2}:{pad // 2}:color=black[p{index}]"
+            )
+        else:
+            filters.append(f"[{index}]null[p{index}]")
+    layout = "|".join(f"{index % tile}*w0_{index // tile}*h0" for index in range(slot_count))
+    inputs = "".join(f"[p{index}]" for index in range(slot_count))
+    filters.append(f"{inputs}xstack=inputs={slot_count}:layout={layout}[out]")
+    cmd.extend([
+        "-filter_complex",
+        ";".join(filters),
+        "-map",
+        "[out]",
+        "-frames:v",
+        "1",
+        "-qscale:v",
+        "2",
+        "-y",
+        str(output_path),
+    ])
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout))
+    except Exception as exc:
+        logger.debug("Frame mosaic compose failed for %s: %s", output_path, exc)
+        return None
+    if res.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+        logger.debug(
+            "Frame mosaic unusable for %s: %s",
+            output_path,
+            (res.stderr or "").strip()[:200],
+        )
+        return None
+    return str(output_path)
+
+
+def extract_contact_sheet(
+    video_path: str | Path,
+    output_dir: str | Path,
+    timestamp: float,
+    tile: int = 2,
+    tiles: int = 4,
+    interval_seconds: float = 1.0,
+    scale: str = "320:-2",
+    timeout: float = 60.0,
+) -> dict | None:
+    """Build a ``tile x tile`` temporal contact sheet around ``timestamp``.
+
+    Tiles are ordered left-to-right, top-to-bottom and sample consecutive
+    ``interval_seconds`` offsets starting at ``timestamp``. Each tile keeps its
+    stable index and source timestamp so VLM results can be mapped back to the
+    original timestamps. Returns ``None`` when extraction fails so the caller can
+    fall back to the single-frame Pass 1 path.
+    """
+    video_path = Path(video_path)
+    output_dir = Path(output_dir)
+    slot_count = max(1, tile * tile)
+    tile_count = max(1, min(tiles, slot_count))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tiles_out: list[dict] = []
+    for index in range(tile_count):
+        tile_ts = timestamp + index * interval_seconds
+        tile_file = output_dir / f"tile_{index:02d}.jpg"
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-ss",
+            str(max(0.0, tile_ts)),
+            "-i",
+            str(video_path),
+            "-vframes",
+            "1",
+            "-vf",
+            f"scale={scale}",
+            "-qscale:v",
+            "2",
+            "-y",
+            str(tile_file),
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout))
+        except Exception as exc:
+            logger.debug("Contact sheet tile %d failed for %s: %s", index, video_path, exc)
+            continue
+        if res.returncode == 0 and tile_file.exists() and tile_file.stat().st_size > 0:
+            tiles_out.append({
+                "index": index,
+                "timestamp": round(tile_ts, 3),
+                "frame_path": str(tile_file),
+            })
+        else:
+            logger.debug(
+                "Contact sheet tile %d empty at %.2fs for %s",
+                index,
+                tile_ts,
+                video_path,
+            )
+
+    if not tiles_out:
+        return None
+
+    sheet_path = output_dir / "contact_sheet.jpg"
+    compose_cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-framerate",
+        "1",
+        "-i",
+        str(output_dir / "tile_%02d.jpg"),
+        "-vf",
+        f"tile={tile}x{tile}:padding=2",
+        "-frames:v",
+        "1",
+        "-qscale:v",
+        "2",
+        "-y",
+        str(sheet_path),
+    ]
+    try:
+        res = subprocess.run(compose_cmd, capture_output=True, text=True, timeout=int(timeout))
+    except Exception as exc:
+        logger.debug("Contact sheet compose failed for %s: %s", video_path, exc)
+        return None
+    if res.returncode != 0 or not sheet_path.exists() or sheet_path.stat().st_size == 0:
+        logger.debug(
+            "Contact sheet compose unusable for %s: %s",
+            video_path,
+            res.stderr.strip()[:200],
+        )
+        return None
+
+    return {
+        "sheet_path": str(sheet_path),
+        "tile_count": len(tiles_out),
+        "tiles": tiles_out,
+    }
+
+
+def extract_audio_peak_levels(
+    video_path: str | Path,
+    timeout: float = 120.0,
+) -> list[tuple[float, float]]:
+    """Return ``(pts_time, peak_level_db)`` samples from FFmpeg ``astats``.
+
+    Uses one decode pass with ``astats=metadata=1:reset=1`` and prints
+    ``lavfi.astats.Overall.Peak_level`` per audio window. Clips without an audio
+    track return an empty list.
+    """
+    video_path = Path(video_path)
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-af",
+        "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.Peak_level",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout))
+    except Exception as exc:
+        logger.debug("astats probe failed for %s: %s", video_path, exc)
+        return []
+    if result.returncode != 0:
+        logger.debug(
+            "astats probe returned %d for %s: %s",
+            result.returncode,
+            video_path,
+            (result.stderr or "").strip()[:200],
+        )
+        return []
+    return parse_astats_peaks(result.stdout or "")
+
+
+def parse_astats_peaks(text: str) -> list[tuple[float, float]]:
+    """Parse ``ametadata=print`` output into ``(pts_time, peak_db)`` tuples."""
+    peaks: list[tuple[float, float]] = []
+    current_time: float | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("frame:"):
+            current_time = _parse_pts_time(stripped)
+            continue
+        if "Peak_level=" in stripped:
+            value = _parse_peak_level(stripped)
+            if value is not None:
+                peaks.append((current_time if current_time is not None else 0.0, value))
+    return peaks
+
+
+def _parse_pts_time(line: str) -> float | None:
+    """Extract ``pts_time`` from an ``ametadata`` frame header line."""
+    for token in line.split():
+        if token.startswith("pts_time:"):
+            try:
+                return float(token.split(":", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
+def _parse_peak_level(line: str) -> float | None:
+    """Extract the numeric dB value from a ``Peak_level`` metadata line.
+
+    Digital silence prints ``-inf``, which is not a usable dB measurement and
+    would poison the rolling-median baseline, so non-finite values are dropped.
+    """
+    _, _, raw = line.partition("Peak_level=")
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None

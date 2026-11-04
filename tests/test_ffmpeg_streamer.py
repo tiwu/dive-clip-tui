@@ -298,3 +298,402 @@ def test_concat_clips_rejects_newlines(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Path contains newline character"):
         concat_clips([bad_path], out)
+
+
+# --- Stage C/D primitives ----------------------------------------------------
+
+
+def _raw_payload(frames: list[bytes]) -> bytes:
+    """Join frames into the single payload FFmpeg writes to stdout."""
+    return b"".join(frames)
+
+
+def _run_result(stdout: bytes = b"", returncode: int = 0, stderr: bytes = b"") -> MagicMock:
+    result = MagicMock()
+    result.returncode = returncode
+    result.stdout = stdout
+    result.stderr = stderr
+    return result
+
+
+def test_extract_raw_frames_slices_payload_into_frames() -> None:
+    """The raw pipe payload is sliced on exact frame boundaries."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    frames = [bytes([1, 2, 3] * 4), bytes([4, 5, 6] * 4)]
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=_run_result(_raw_payload(frames)),
+    ):
+        assert extract_raw_frames("clip.mp4", fps=1.0, size=2) == frames
+
+
+def test_extract_raw_frames_respects_count() -> None:
+    """``count`` caps the number of returned frames."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    frames = [bytes([1, 2, 3] * 4)] * 5
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=_run_result(_raw_payload(frames)),
+    ):
+        assert len(extract_raw_frames("clip.mp4", fps=1.0, size=2, count=2)) == 2
+
+
+def test_extract_raw_frames_drops_partial_trailing_frame() -> None:
+    """A truncated final frame is discarded rather than returned short."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    payload = bytes([7] * 12) + b"\x01\x02"
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=_run_result(payload),
+    ):
+        frames = extract_raw_frames("clip.mp4", fps=1.0, size=2)
+    assert len(frames) == 1
+
+
+def test_extract_raw_frames_rejects_invalid_sampling() -> None:
+    """Non-positive fps or size short-circuits without spawning FFmpeg."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    with patch("utils.ffmpeg_streamer.subprocess.run") as mock_run:
+        assert extract_raw_frames("clip.mp4", fps=0, size=2) == []
+        assert extract_raw_frames("clip.mp4", fps=1.0, size=0) == []
+    mock_run.assert_not_called()
+
+
+def test_extract_raw_frames_seek_and_duration_flags() -> None:
+    """``start_seconds``/``duration_seconds`` map to ffmpeg ``-ss`` and ``-t``."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=_run_result(bytes([0] * 12)),
+    ) as mock_run:
+        extract_raw_frames("clip.mp4", fps=2.0, size=2, start_seconds=1.5, duration_seconds=4.0)
+    cmd = mock_run.call_args.args[0]
+    assert cmd[cmd.index("-ss") + 1] == "1.5"
+    assert cmd[cmd.index("-t") + 1] == "4.0"
+    assert "fps=2.0,scale=2:2:flags=area" in cmd
+
+
+def test_extract_raw_frames_keyframe_only_adds_skip_frame_flag() -> None:
+    """``keyframes_only`` prepends ``-skip_frame nokey`` before the input."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=_run_result(bytes([0] * 12)),
+    ) as mock_run:
+        extract_raw_frames("clip.mp4", fps=1.0, size=2, keyframes_only=True)
+    cmd = mock_run.call_args.args[0]
+    assert cmd.index("-skip_frame") < cmd.index("-i")
+    assert cmd[cmd.index("-skip_frame") + 1] == "nokey"
+
+
+def test_extract_raw_frames_keyframe_empty_falls_back_to_full_decode() -> None:
+    """An empty keyframe pass retries without ``-skip_frame``."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    payload = bytes([9] * 12)
+    results = [_run_result(b""), _run_result(payload)]
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=results) as mock_run:
+        frames = extract_raw_frames("clip.mp4", fps=1.0, size=2, keyframes_only=True)
+    assert frames == [payload]
+    assert mock_run.call_count == 2
+    assert "-skip_frame" not in mock_run.call_args_list[1].args[0]
+
+
+def test_extract_raw_frames_missing_keyframes_and_empty_fallback_returns_empty() -> None:
+    """Both passes failing yields an empty list without raising."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=_run_result(b""),
+    ) as mock_run:
+        assert extract_raw_frames("clip.mp4", fps=1.0, size=2, keyframes_only=True) == []
+    assert mock_run.call_count == 2
+
+
+def test_extract_raw_frames_handles_ffmpeg_failure_and_timeout() -> None:
+    """Non-zero exits and timeouts degrade to an empty frame list."""
+    from utils.ffmpeg_streamer import extract_raw_frames
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=_run_result(b"", returncode=1, stderr=b"boom"),
+    ):
+        assert extract_raw_frames("clip.mp4", fps=1.0, size=2) == []
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1),
+    ):
+        assert extract_raw_frames("clip.mp4", fps=1.0, size=2) == []
+
+
+def test_extract_contact_sheet_orders_tiles_and_maps_timestamps(tmp_path: Path) -> None:
+    """Tiles are ordered left-to-right/top-to-bottom with per-tile timestamps."""
+    from utils.ffmpeg_streamer import extract_contact_sheet
+
+    def fake_run(cmd, **kwargs):
+        target = Path(cmd[-1])
+        if "tile=" not in " ".join(cmd):
+            target.write_bytes(b"jpeg")
+        else:
+            target.write_bytes(b"sheet")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run):
+        sheet = extract_contact_sheet("clip.mp4", tmp_path, timestamp=2.0, tile=2, tiles=4)
+
+    assert sheet is not None
+    assert sheet["tile_count"] == 4
+    assert [tile["index"] for tile in sheet["tiles"]] == [0, 1, 2, 3]
+    assert [tile["timestamp"] for tile in sheet["tiles"]] == [2.0, 3.0, 4.0, 5.0]
+    assert Path(sheet["sheet_path"]).name == "contact_sheet.jpg"
+
+
+def test_extract_contact_sheet_caps_tiles_to_slot_count(tmp_path: Path) -> None:
+    """``tiles`` cannot exceed ``tile x tile`` slots."""
+    from utils.ffmpeg_streamer import extract_contact_sheet
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"data")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run):
+        sheet = extract_contact_sheet("clip.mp4", tmp_path, timestamp=0.0, tile=2, tiles=16)
+
+    assert sheet is not None
+    assert sheet["tile_count"] == 4
+
+
+def test_extract_contact_sheet_keeps_partial_sheets(tmp_path: Path) -> None:
+    """A sheet with some failed tiles still reports the surviving tiles."""
+    from utils.ffmpeg_streamer import extract_contact_sheet
+
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["n"] += 1
+        is_compose = "tile=" in " ".join(cmd)
+        if is_compose:
+            Path(cmd[-1]).write_bytes(b"sheet")
+            return MagicMock(returncode=0, stdout="", stderr="")
+        if calls["n"] % 2 == 0:
+            return MagicMock(returncode=1, stdout="", stderr="skip")
+        Path(cmd[-1]).write_bytes(b"jpeg")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run):
+        sheet = extract_contact_sheet("clip.mp4", tmp_path, timestamp=0.0, tile=2, tiles=4)
+
+    assert sheet is not None
+    assert sheet["tile_count"] == 2
+    assert [tile["index"] for tile in sheet["tiles"]] == [0, 2]
+
+
+def test_extract_contact_sheet_returns_none_without_tiles(tmp_path: Path) -> None:
+    """Every tile failing returns ``None`` so Pass 1 falls back to single frames."""
+    from utils.ffmpeg_streamer import extract_contact_sheet
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=MagicMock(returncode=1, stdout="", stderr="nope"),
+    ):
+        assert extract_contact_sheet("clip.mp4", tmp_path, timestamp=1.0) is None
+
+
+def test_extract_contact_sheet_returns_none_when_compose_fails(tmp_path: Path) -> None:
+    """A failed compose step is not reported as a usable sheet."""
+    from utils.ffmpeg_streamer import extract_contact_sheet
+
+    def fake_run(cmd, **kwargs):
+        if "tile=" in " ".join(cmd):
+            return MagicMock(returncode=1, stdout="", stderr="bad filter")
+        Path(cmd[-1]).write_bytes(b"jpeg")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run):
+        assert extract_contact_sheet("clip.mp4", tmp_path, timestamp=1.0) is None
+
+
+def test_extract_contact_sheet_clamps_negative_timestamp(tmp_path: Path) -> None:
+    """A negative start is clamped to zero rather than passed to FFmpeg."""
+    from utils.ffmpeg_streamer import extract_contact_sheet
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"data")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run) as mock_run:
+        extract_contact_sheet("clip.mp4", tmp_path, timestamp=-2.0, tile=2, tiles=1)
+
+    first_cmd = mock_run.call_args_list[0].args[0]
+    assert first_cmd[first_cmd.index("-ss") + 1] == "0.0"
+
+
+def test_parse_astats_peaks_extracts_time_and_level() -> None:
+    """``ametadata=print`` blocks map ``pts_time`` to ``Peak_level``."""
+    from utils.ffmpeg_streamer import parse_astats_peaks
+
+    text = (
+        "frame:0    pts:0       pts_time:0\n"
+        "lavfi.astats.Overall.Peak_level=-21.5\n"
+        "frame:1    pts:48000   pts_time:1.5\n"
+        "lavfi.astats.Overall.Peak_level=-3.25\n"
+    )
+    assert parse_astats_peaks(text) == [(0.0, -21.5), (1.5, -3.25)]
+
+
+def test_parse_astats_peaks_skips_unparsable_lines() -> None:
+    """Noise, missing timestamps, and ``-inf`` levels are tolerated."""
+    from utils.ffmpeg_streamer import parse_astats_peaks
+
+    text = (
+        "\n"
+        "  \n"
+        "lavfi.astats.Overall.Peak_level=-inf\n"
+        "frame:2    pts:0       pts_time:not-a-number\n"
+        "lavfi.astats.Overall.Peak_level=-9\n"
+        "unrelated output\n"
+    )
+    assert parse_astats_peaks(text) == [(0.0, -9.0)]
+
+
+def test_parse_astats_peaks_empty_input() -> None:
+    """Silence or a missing audio track yields no peaks."""
+    from utils.ffmpeg_streamer import parse_astats_peaks
+
+    assert parse_astats_peaks("") == []
+
+
+def test_extract_audio_peak_levels_returns_parsed_peaks() -> None:
+    """The astats command decodes audio only and returns parsed peaks."""
+    from utils.ffmpeg_streamer import extract_audio_peak_levels
+
+    stdout = "frame:0    pts:0       pts_time:0\nlavfi.astats.Overall.Peak_level=-12.0\n"
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout=stdout, stderr=""),
+    ) as mock_run:
+        peaks = extract_audio_peak_levels("clip.mp4")
+    assert peaks == [(0.0, -12.0)]
+    cmd = mock_run.call_args.args[0]
+    assert "-vn" in cmd
+    assert any("astats=metadata=1:reset=1" in part for part in cmd)
+
+
+def test_extract_audio_peak_levels_handles_failure() -> None:
+    """A failing or raising probe yields an empty peak list."""
+    from utils.ffmpeg_streamer import extract_audio_peak_levels
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=MagicMock(returncode=1, stdout="", stderr="no audio"),
+    ):
+        assert extract_audio_peak_levels("clip.mp4") == []
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        side_effect=OSError("ffmpeg missing"),
+    ):
+        assert extract_audio_peak_levels("clip.mp4") == []
+
+
+def test_compose_frame_mosaic_builds_xstack_command(tmp_path: Path) -> None:
+    """Four frames are padded, stacked into one image, and written to disk."""
+    from utils.ffmpeg_streamer import compose_frame_mosaic
+
+    frames = [tmp_path / f"f{index}.jpg" for index in range(4)]
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"sheet")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run) as mock_run:
+        out = compose_frame_mosaic(frames, tmp_path / "sheet.jpg", tile=2, padding=2)
+
+    assert out == str(tmp_path / "sheet.jpg")
+    cmd = mock_run.call_args.args[0]
+    assert cmd.count("-i") == 4
+    filter_complex = cmd[cmd.index("-filter_complex") + 1]
+    assert "xstack=inputs=4" in filter_complex
+    assert filter_complex.count("pad=iw+2:ih+2:1:1:color=black") == 4
+    assert "layout=0*w0_0*h0|1*w0_0*h0|0*w0_1*h0|1*w0_1*h0" in filter_complex
+
+
+def test_compose_frame_mosaic_fills_empty_slots_with_last_frame(tmp_path: Path) -> None:
+    """A short frame list is padded by repeating the final frame."""
+    from utils.ffmpeg_streamer import compose_frame_mosaic
+
+    frames = [tmp_path / "a.jpg", tmp_path / "b.jpg"]
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"sheet")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run) as mock_run:
+        compose_frame_mosaic(frames, tmp_path / "sheet.jpg", tile=2, padding=0)
+
+    cmd = mock_run.call_args.args[0]
+    inputs = [cmd[i + 1] for i, part in enumerate(cmd) if part == "-i"]
+    assert inputs == [str(frames[0]), str(frames[1]), str(frames[1]), str(frames[1])]
+    filter_complex = cmd[cmd.index("-filter_complex") + 1]
+    assert "null" in filter_complex
+
+
+def test_compose_frame_mosaic_truncates_extra_frames(tmp_path: Path) -> None:
+    """More frames than slots keeps only the first ``tile x tile`` inputs."""
+    from utils.ffmpeg_streamer import compose_frame_mosaic
+
+    frames = [tmp_path / f"f{index}.jpg" for index in range(6)]
+
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"sheet")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=fake_run) as mock_run:
+        compose_frame_mosaic(frames, tmp_path / "sheet.jpg", tile=2)
+
+    cmd = mock_run.call_args.args[0]
+    inputs = [cmd[i + 1] for i, part in enumerate(cmd) if part == "-i"]
+    assert inputs == [str(path) for path in frames[:4]]
+
+
+def test_compose_frame_mosaic_returns_none_without_frames(tmp_path: Path) -> None:
+    """An empty frame list short-circuits without invoking ffmpeg."""
+    from utils.ffmpeg_streamer import compose_frame_mosaic
+
+    with patch("utils.ffmpeg_streamer.subprocess.run") as mock_run:
+        assert compose_frame_mosaic([], tmp_path / "sheet.jpg") is None
+    mock_run.assert_not_called()
+
+
+def test_compose_frame_mosaic_returns_none_on_failure(tmp_path: Path) -> None:
+    """Non-zero exits, empty output, and exceptions all degrade to ``None``."""
+    from utils.ffmpeg_streamer import compose_frame_mosaic
+
+    frames = [tmp_path / "a.jpg"]
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        return_value=MagicMock(returncode=1, stdout="", stderr="boom"),
+    ):
+        assert compose_frame_mosaic(frames, tmp_path / "sheet.jpg", tile=2) is None
+
+    def empty_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("utils.ffmpeg_streamer.subprocess.run", side_effect=empty_run):
+        assert compose_frame_mosaic(frames, tmp_path / "sheet.jpg", tile=2) is None
+
+    with patch(
+        "utils.ffmpeg_streamer.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1),
+    ):
+        assert compose_frame_mosaic(frames, tmp_path / "sheet.jpg", tile=2) is None

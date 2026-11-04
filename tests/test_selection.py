@@ -9,6 +9,7 @@ import pytest
 
 from utils.models import RefinedDetection
 from utils.selection import (
+    HSV_SIMILARITY_WEIGHT,
     STOPWORDS,
     calculate_intrinsic_relevance,
     calculate_pairwise_similarity,
@@ -277,3 +278,173 @@ def test_quota_penalty_scaling_on_repeated_clip(tmp_path: Path) -> None:
     assert ranks[1] == 0.0
     assert pytest.approx(ranks[2], rel=1e-3) == 0.35
     assert pytest.approx(ranks[3], rel=1e-3) == 0.70
+
+
+def test_pairwise_similarity_ignores_missing_histograms() -> None:
+    """Text-only behaviour must be unchanged when either histogram is absent."""
+    base = {
+        "clip_id": "clip_1",
+        "start_time": 10.0,
+        "end_time": 15.0,
+        "subject": "green sea turtle",
+        "description": "turtle over reef",
+        "template": "pelagics",
+    }
+    other = dict(base, clip_id="clip_2", start_time=20.0, end_time=25.0)
+
+    text_only = calculate_pairwise_similarity(base, other)
+    # Empty histograms on both sides
+    assert (
+        calculate_pairwise_similarity(dict(base, hsv_histogram=[]), dict(other, hsv_histogram=[]))
+        == text_only
+    )
+    # Histogram on one side only
+    hist = [0.5, 0.5]
+    assert calculate_pairwise_similarity(dict(base, hsv_histogram=hist), other) == text_only
+    assert calculate_pairwise_similarity(base, dict(other, hsv_histogram=hist)) == text_only
+
+
+def test_pairwise_similarity_blends_identical_histograms() -> None:
+    """Identical histograms raise similarity above the text-only baseline."""
+    base = {
+        "clip_id": "clip_1",
+        "start_time": 10.0,
+        "end_time": 15.0,
+        "subject": "green sea turtle",
+        "description": "turtle over reef",
+        "template": "pelagics",
+    }
+    other = dict(base, clip_id="clip_2", start_time=20.0, end_time=25.0)
+    hist = [0.2, 0.3, 0.5]
+
+    text_only = calculate_pairwise_similarity(base, other)
+    with_hist = calculate_pairwise_similarity(
+        dict(base, hsv_histogram=hist), dict(other, hsv_histogram=hist)
+    )
+
+    assert with_hist > text_only
+    expected = (1.0 - HSV_SIMILARITY_WEIGHT) * text_only + HSV_SIMILARITY_WEIGHT * 1.0
+    assert pytest.approx(with_hist, rel=1e-6) == expected
+
+
+def test_pairwise_similarity_disjoint_histograms_lower_similarity() -> None:
+    """Non-overlapping histograms pull similarity below the text-only baseline."""
+    base = {
+        "clip_id": "clip_1",
+        "start_time": 10.0,
+        "end_time": 15.0,
+        "subject": "green sea turtle",
+        "description": "turtle over reef",
+        "template": "pelagics",
+    }
+    other = dict(base, clip_id="clip_2", start_time=20.0, end_time=25.0)
+
+    text_only = calculate_pairwise_similarity(base, other)
+    disjoint = calculate_pairwise_similarity(
+        dict(base, hsv_histogram=[1.0, 0.0]), dict(other, hsv_histogram=[0.0, 1.0])
+    )
+
+    assert disjoint < text_only
+    assert pytest.approx(disjoint, rel=1e-6) == (1.0 - HSV_SIMILARITY_WEIGHT) * text_only
+
+
+def test_pairwise_similarity_mismatched_histogram_length_ignored() -> None:
+    """Histograms with differing lengths are unusable and fall back to text-only."""
+    base = {"clip_id": "c1", "subject": "turtle", "description": "reef", "template": "t"}
+    other = {"clip_id": "c2", "subject": "turtle", "description": "reef", "template": "t"}
+
+    text_only = calculate_pairwise_similarity(base, other)
+    assert (
+        calculate_pairwise_similarity(
+            dict(base, hsv_histogram=[0.5, 0.5]), dict(other, hsv_histogram=[1.0])
+        )
+        == text_only
+    )
+
+
+def test_selection_trace_records_hsv_similarity_and_telemetry(tmp_path: Path) -> None:
+    """The selection trace should expose HSV similarity and telemetry score per candidate."""
+    detections = [
+        RefinedDetection(
+            clip_id="clip_a",
+            file_name="a.mp4",
+            file_path="/videos/a.mp4",
+            start_time=0.0,
+            end_time=5.0,
+            subject="turtle",
+            quality_score=9,
+            confidence=0.9,
+            description="turtle over reef",
+            hsv_histogram=[0.5, 0.5],
+            telemetry_score=0.72,
+        ),
+        RefinedDetection(
+            clip_id="clip_a",
+            file_name="a.mp4",
+            file_path="/videos/a.mp4",
+            start_time=6.0,
+            end_time=11.0,
+            subject="turtle",
+            quality_score=8,
+            confidence=0.8,
+            description="turtle over reef",
+            hsv_histogram=[0.5, 0.5],
+            telemetry_score=0.41,
+        ),
+        RefinedDetection(
+            clip_id="clip_b",
+            file_name="b.mp4",
+            file_path="/videos/b.mp4",
+            start_time=0.0,
+            end_time=5.0,
+            subject="diver",
+            quality_score=7,
+            confidence=0.7,
+            description="diver swimming",
+        ),
+    ]
+    trace_path = tmp_path / "selection_trace.json"
+    select_diverse_highlights(detections, top_n=2, trace_path=trace_path)
+
+    with open(trace_path, encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    by_clip = {}
+    for candidate in data["candidates"]:
+        by_clip.setdefault(candidate["clip_id"], []).append(candidate)
+
+    assert by_clip["clip_a"][0]["telemetry_score"] == pytest.approx(0.72)
+    assert by_clip["clip_a"][1]["telemetry_score"] == pytest.approx(0.41)
+    # clip_b carries no telemetry or histogram data
+    assert by_clip["clip_b"][0]["telemetry_score"] is None
+    assert by_clip["clip_b"][0]["hsv_similarity"] is None
+
+    # The second clip_a candidate was scored against the first, so it records a
+    # perfect histogram similarity; the first selection has no prior to compare to.
+    selected = [c for c in by_clip["clip_a"] if c["selected"]]
+    if len(selected) == 2:
+        assert selected[0]["hsv_similarity"] is None
+        assert selected[1]["hsv_similarity"] == pytest.approx(1.0)
+
+
+def test_selection_trace_telemetry_defaults_to_none(tmp_path: Path) -> None:
+    """Detections without telemetry leave the trace field empty rather than zero."""
+    detections = [
+        {
+            "clip_id": "clip_a",
+            "file_name": "a.mp4",
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "subject": "turtle",
+            "quality_score": 9,
+            "confidence": 0.9,
+            "description": "turtle over reef",
+        }
+    ]
+    trace_path = tmp_path / "selection_trace.json"
+    select_diverse_highlights(detections, top_n=1, trace_path=trace_path)
+
+    with open(trace_path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    assert data["candidates"][0]["telemetry_score"] is None
+    assert data["candidates"][0]["hsv_similarity"] is None

@@ -254,6 +254,62 @@ def normalize_vlm_frame_response(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def build_contact_sheet_prompt(base_prompt: str, tile_count: int) -> str:
+    """Wrap a single-frame coarse prompt with per-tile contact-sheet instructions."""
+    return (
+        f"{base_prompt}\n\n"
+        f"### Contact sheet\n"
+        f"This image is a {tile_count}-frame contact sheet laid out in reading order "
+        f"(left to right, top to bottom), oldest frame first.\n"
+        f"Analyze every tile independently and never merge content across tiles.\n"
+        f"Return a JSON object with a single key 'tiles' whose value is a list of "
+        f"exactly {tile_count} objects in that same order.\n"
+        f"Each object must contain: index (integer, 0-based), detected (boolean), "
+        f"subject (string), category (string), story_role (string), "
+        f"confidence (float 0.0-1.0), quality_score (integer 0-10), "
+        f"reject_reasons (list of strings), description (string), timestamp (float).\n"
+        f"If a tile is unreadable, return detected=false with a reject_reason."
+    )
+
+
+def normalize_vlm_sheet_response(
+    raw: dict[str, Any] | None, tile_count: int
+) -> list[dict[str, Any]] | None:
+    """Normalize a per-tile contact-sheet response.
+
+    Returns one normalized frame dict per tile, ordered by tile index, or ``None``
+    when the payload cannot be trusted (unknown shape, wrong tile count, duplicated
+    or out-of-range indices). Callers fall back to processing single frames.
+    """
+    if tile_count <= 0 or not isinstance(raw, dict):
+        return None
+
+    entries = raw.get("tiles")
+    if not isinstance(entries, list):
+        if tile_count == 1:
+            return [normalize_vlm_frame_response(raw)]
+        return None
+    if len(entries) != tile_count:
+        return None
+
+    ordered: list[dict[str, Any] | None] = [None] * tile_count
+    for position, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            return None
+        raw_index = entry.get("index", position)
+        try:
+            index = int(raw_index)
+        except ValueError, TypeError:
+            index = position
+        if not 0 <= index < tile_count or ordered[index] is not None:
+            return None
+        ordered[index] = normalize_vlm_frame_response(entry)
+
+    if any(item is None for item in ordered):
+        return None
+    return [item for item in ordered if item is not None]
+
+
 # =============================================================================
 # Domain: Underwater / Dive Footage
 # =============================================================================

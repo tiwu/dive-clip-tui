@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add optional action-camera telemetry parsing at ingest (GoPro GPMF `gpmd`, DJI `djmd`, Insta360), container `creation_time`/bitrate/audio/HiLight metadata, and manual MP4 `hmmt` HiLight tags in `manifest.json` (#62).
+- Add a pre-VLM screening funnel (`utils/prescreen.py`) that scores candidate windows from telemetry plus cheap FFmpeg signals (Laplacian sharpness, luma uniformity, HSV entropy, `astats` audio peaks) and supports `advisory` or `enabled` gate modes, disabled by default via the new `prescreen` config section (#62).
+- Add opt-in 2×2 temporal contact sheets for Pass 1 to reduce VLM calls, with a single-frame fallback when mosaicking fails (#62).
+- Add auditable `prescreen_trace.json` decisions next to `pass1_coarse_trace.json`, and blend optional HSV similarity into MMR selection with telemetry features recorded in `selection_trace.json` (#62).
+
 ## [0.28.0] - 2026-11-03
 
 ### Added

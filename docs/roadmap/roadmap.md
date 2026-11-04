@@ -1,7 +1,7 @@
 # Product Roadmap
 
 **Status:** Active
-**Updated:** 2026-11-01
+**Updated:** 2026-11-04
 
 ## Product direction
 
@@ -27,55 +27,52 @@ aftermovie.
 - Highlight selection applies Maximal Marginal Relevance (MMR) for diversity with
   chronological assembly sort order, contiguous shot merging, and per-stage decision
   traceability artifacts.
+- Scan-time rendering is race-safe: one writer owns each output, and interrupted
+  renders are retried instead of appearing as completed clips.
+- Pass 0 runs on its own, and a human review loop records clip feedback per run.
+  Both reuse the same run-artifact contracts as a full scan.
+- Ingest records optional action-camera telemetry (GoPro GPMF `gpmd`, DJI `djmd`,
+  Insta360) and manual MP4 `hmmt` HiLight tags. A pre-VLM screening funnel can
+  score candidate windows from that telemetry plus cheap FFmpeg signals, write its
+  decisions to `prescreen_trace.json`, and opt into 2×2 temporal contact sheets for
+  Pass 1. Screening is shipped disabled by default; scans behave as before until it
+  is turned on.
 - The existing Textual TUI is an unmaintained prototype. A future TUI starts
   from a clean design after its CLI and data contracts are stable.
 
 ## Prioritized roadmap
 
-### 1. Make scan-time rendering safe
+### 1. Turn on pre-VLM screening and widen telemetry coverage
 
-Background rendering already overlaps with scanning, but the worker can outlive
-its two-second shutdown wait while the final render starts. Ensure a single writer
-owns each output and that incomplete renders cannot appear as completed clips.
-Keep the existing overlap only if it remains correct and resume-safe.
+The screening funnel (telemetry gates, FFmpeg blur/brightness/audio signals, 2×2
+contact sheets, `prescreen_trace.json`) ships disabled. Run it in advisory mode on
+representative dive and motorcycle footage, compare its decisions against the
+review-loop judgments, and only then consider enabling rejection. Extend decoding
+to the telemetry containers ingest already detects, and decide whether HiLight
+tags should seed coarse candidate windows instead of only aligning screening
+windows.
 
-**Done when:** Tests prove scan-time and final rendering cannot race on the same
-output, interrupted renders are safely retried, and each detection produces one
-valid clip after a normal run or resume.
+**Done when:** Advisory `prescreen_trace.json` records show measured VLM call
+savings on representative footage with no loss of reviewed highlights, at least
+one non-GoPro telemetry format is decoded, and the documented default is backed by
+that evidence.
 
-### 2. Build a human-judged evaluation loop
+### 2. Grow the human-judged evaluation set
 
-Let users judge highlight relevance and subject-label correctness separately,
-and identify interesting moments the scan missed. Keep reviewed examples with
-the model identity, prompt/template revision, and a secret-safe configuration
-fingerprint that produced them. Use this evidence to compare prompt and
-classifier changes before adoption; do not silently train or rewrite prompts.
-Add focused behavioral regression tests for each change, including resume and
-output behavior where affected.
-
-Initial user-reviewed cases live in the local-safe
-[evaluation seed set](../evaluation/seed-cases.yaml). Keep run-specific examples,
-expected judgments, and unresolved questions there; keep raw videos and
-machine-specific paths out of the repository. Track implementation work in a
-GitHub issue linked to this roadmap.
+The review loop records per-clip feedback, but the
+[evaluation seed set](../evaluation/seed-cases.yaml) still needs cases covering
+false positives, wrong subject labels, false negatives, and reported confidence.
+Keep reviewed examples with the model identity, prompt/template revision, and a
+secret-safe configuration fingerprint that produced them. Use this evidence to
+compare prompt and classifier changes before adoption; do not silently train or
+rewrite prompts.
 
 **Done when:** A repeatable local evaluation set covers false positives, wrong
 subject labels, false negatives, and reported confidence. Runs record enough
 secret-safe provenance to reproduce comparisons, and focused regression tests
 protect existing behavior.
 
-### 3. Run Pass 0 on its own
-
-Add a quick classify-only workflow for folders with unknown or unclassified
-videos. It labels footage by broad domain without running coarse/fine highlight
-scans. Save results so users can inspect and reuse classifications in a later
-scan. Sample only enough frames to keep this pass fast, and report uncertain
-classifications rather than presenting guesses as facts.
-
-**Done when:** A user can classify a folder without starting highlight detection,
-review the labels and uncertainty, and use the saved results in a later scan.
-
-### 4. Expand domains and specialize generic footage
+### 3. Specialize generic footage with evaluated prompts
 
 Add domains based on real footage and evaluation examples, not an open-ended
 category list. For footage that remains generic, infer likely context and create
@@ -86,16 +83,18 @@ candidates to evaluate, not trusted prompts that change behavior automatically.
 validation clips, and prompts that improve detection without regressing existing
 domains.
 
-### 5. Optimize measured bottlenecks
+### 4. Optimize measured bottlenecks
 
 Profile representative workloads before changing concurrency, frame sampling,
-or memory use. Measure the existing scan/render overlap after its correctness is
-secured; pursue more parallelism only when benchmarks show a safe end-to-end gain.
+or memory use. Measure the now race-safe scan/render overlap; pursue more
+parallelism only when benchmarks show a safe end-to-end gain. Treat screening
+savings from item 1 as part of the same measurement so VLM calls, wall-clock
+time, and quality are compared together.
 
 **Done when:** Benchmarks show a repeatable improvement on representative
 hardware and footage, with output and resume behavior unchanged.
 
-### 6. Improve portrait and social export
+### 5. Improve portrait and social export
 
 Replace padded 9:16 output with useful portrait framing while keeping 16:9 as
 the default. Add subject-aware reframing only after basic vertical export works
@@ -104,7 +103,7 @@ on real dive and motorcycle clips.
 **Done when:** The CLI produces playable 1080×1920 output, preserves landscape
 behavior, and keeps important action visible on representative clips.
 
-### 7. Revisit product name and rebuild the TUI
+### 6. Revisit product name and rebuild the TUI
 
 Once classifier-first workflows and supported domains prove useful, choose a
 name that describes the broader product. Then design a new TUI around the stable

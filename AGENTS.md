@@ -61,10 +61,12 @@ interesting bits → get back a watchable highlight video.
 │   ├── logging_setup.py      # Shared stderr + per-run logfile configuration
 │   ├── models.py             # Pydantic data models (manifest, detections)
 │   ├── ollama_client.py      # Shared Ollama requests and metrics
+│   ├── prescreen.py          # Pre-VLM screening funnel (gates, metrics, trace)
 │   ├── prompt_templates.py   # Domain prompts and subject-routed templates
 │   ├── run_archive.py        # Run directory snapshots and latest symlink
 │   ├── selection.py          # Maximal Marginal Relevance (MMR) highlight selection
 │   ├── stats.py              # Scan throughput and pipeline metrics
+│   ├── telemetry.py          # GoPro GPMF / DJI / Insta360 sensor decoding + scoring
 │   ├── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
 │   └── version.py            # Dynamic package version helper
 ├── tui/                      # Legacy Textual UI prototype; future UI is a rebuild
@@ -154,6 +156,14 @@ When using the GitHub CLI:
   returns pure JSON.
 - **Ollama requests:** use `utils/ollama_client.py` for shared request handling
   and metrics rather than calling the API directly from scripts.
+- **Telemetry:** `utils/telemetry.py` decodes GoPro GPMF (`gpmd`) tracks; DJI
+  (`djmd`) and Insta360 (`insta`) tracks are detected but not decoded. A missing
+  sensor must never act as a penalty — drop the signal and renormalize weights.
+- **Pre-VLM screening:** `utils/prescreen.py` runs before Pass 1 and is off by
+  default (`prescreen.enabled`). Keep image math dependency-free (pure Python over
+  ffmpeg `rgb24` bytes; no NumPy/Pillow). Screening decisions are recorded in
+  `prescreen_trace.json`, one record per candidate window, never per raw sample.
+  `gate_mode: "advisory"` must only annotate; only `"enabled"` may drop windows.
 
 ---
 

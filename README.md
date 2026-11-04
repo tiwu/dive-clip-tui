@@ -148,6 +148,59 @@ Even in the `generic` domain, the model identifies and preserves the concrete su
 
 Custom domains and prompt templates can be configured or extended directly under `prompts:` in `config.yaml`.
 
+### Pre-VLM screening funnel (Stage C/D)
+
+Before a single frame reaches the VLM, an optional cheap screening pass can drop
+or defer candidate windows. It is off by default and configured under
+`prescreen:` in `config.yaml`.
+
+The funnel is the first stage of the scan, ahead of the three VLM passes:
+
+1. **Container & sensor ingestion** — `scripts/00_ingest_media.py` probes every
+   stream in the file, so per-file sensor tracks and container hints are recorded
+   in the manifest (`telemetry_type`, `has_telemetry`, `is_high_fps`,
+   `hilight_tags`, `bitrate_density`). GoPro `gpmf` telemetry is decoded into
+   timestamped signal series; the funnel consumes `SCEN` (scene codes), `GYRO`,
+   `GPS5`/`GPS9`/`GPS2` speed, `CORI`/`IORI` orientation proxies, `YAVG`/`UNIF`
+   camera luma, and `FACE` presence. DJI and Insta360 tracks are detected but not
+   yet decoded (they yield no score rather than a penalty).
+2. **HiLight tags** — GoPro `moov.udta.hmmt` HiLight markers are parsed straight
+   out of the MP4 atom tree into the manifest and used to align the screening
+   windows, so the per-window metrics land on the moments a human already marked.
+   Tags are also echoed into every prescreen record.
+3. **Visual + audio metrics** — one FFmpeg pass samples frames at
+   `prescreen.sample_fps` for mean luma, luma uniformity, Laplacian sharpness, and
+   HSV histograms; a second FFmpeg `astats` pass reads audio peak levels and
+   detects spikes above a rolling median.
+4. **Gate decision** — gates (`yavg_min`, `unif_max`, `gyro_max`, `blur_min`) and a
+   weighted telemetry score decide per window whether to `keep`, `defer`, or
+   `reject`. With `gate_mode: "advisory"` (the default) failures are recorded but
+   nothing is dropped; with `gate_mode: "enabled"` rejected windows never reach
+   the VLM. Missing sensors never reject footage — a gate with no signal reports
+   `signal unavailable` and is skipped.
+
+All image math is pure Python over FFmpeg `rgb24` bytes, so the funnel needs no
+NumPy or Pillow and stays optional: with `prescreen.enabled: false` no extra
+FFmpeg pass runs and behaviour is unchanged.
+
+Opt into 2x2 contact sheets with `prescreen.contact_sheet: true`. Frames are
+composed into a single 2x2 image and one VLM call returns up to four per-tile
+verdicts, cutting Pass 1 calls up to 4x. Partial final batches, failed
+compositions, and unparseable sheet responses fall back to the per-frame path
+automatically, so the feature can only reduce calls, never detection coverage.
+
+#### Inspecting `prescreen_trace.json`
+
+Each scan run writes `<run_dir>/prescreen_trace.json` (mirrored to
+`<output>/prescreen_trace.json`) with one record per candidate window — never one
+per raw sensor sample. Records carry the container signals, telemetry signals,
+audio/visual metrics, the configured thresholds, every gate outcome and reason,
+the score components and renormalized weights, the chosen action, and whether a
+VLM call followed. Use it to answer "why was this window skipped?" without
+re-running the scan; the same telemetry and HSV fields appear in
+`pass1_coarse_trace.json` and `selection_trace.json` when available, and old
+artifacts without them still load unchanged.
+
 ### Running Pass 0 on its own (classify)
 
 To quickly classify an unorganized folder of unknown videos without running highlight detection:
@@ -217,7 +270,8 @@ end-of-run statistics to the configured output location.
 `dive-clip scan` organizes each execution into a self-contained snapshot under
 `<output>/runs/<run_id>/` (with an `<output>/latest` symlink pointing to the most
 recent run). Each run directory contains `pipeline_state.json`, `manifest.json`,
-`detections_refined.json`, `run_stats.json`, `run.log`, and the extracted `highlights/` clips.
+`detections_refined.json`, `run_stats.json`, `prescreen_trace.json`,
+`pass1_coarse_trace.json`, `run.log`, and the extracted `highlights/` clips.
 
 Progress is recorded in `pipeline_state.json` and saved after every clip and scan window.
 Additionally, intra-clip progress is checkpointed periodically (every `checkpoint_interval_frames`,
@@ -326,6 +380,8 @@ utils/
   logging_setup.py         # Shared console and file logging setup
   models.py                # Pydantic manifest and detection models
   ollama_client.py         # Ollama API client and metrics
+  prescreen.py             # Pre-VLM screening funnel: gates, metrics, trace records
+  telemetry.py             # GoPro GPMF / DJI / Insta360 telemetry decoding and scoring
   vlm_client.py            # VLM client protocol, OpenRouter backend, provider factory
   prompt_templates.py      # Domain prompts and subject-routed templates
   run_archive.py           # Self-contained run snapshots and latest symlink

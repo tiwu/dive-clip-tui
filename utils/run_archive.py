@@ -221,6 +221,7 @@ def archive_run_artifacts(
     pass1_coarse_trace_path: Path | str | None = None,
     pass2_fine_trace_path: Path | str | None = None,
     selection_trace_path: Path | str | None = None,
+    prescreen_trace_path: Path | str | None = None,
 ) -> dict[str, Path]:
     """Archive available pipeline artifacts into `run_dir`.
 
@@ -264,6 +265,12 @@ def archive_run_artifacts(
         dest = archive_file(src_sel, target_dir, "selection_trace.json")
         if dest:
             archived["selection_trace"] = dest
+
+    if prescreen_trace_path is not None:
+        src_ps = Path(prescreen_trace_path)
+        dest = archive_file(src_ps, target_dir, "prescreen_trace.json")
+        if dest:
+            archived["prescreen_trace"] = dest
 
     if stats_path is not None:
         dest = archive_file(stats_path, target_dir, "run_stats.json")
