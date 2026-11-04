@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-04
+
 ### Added
 - Add optional action-camera telemetry parsing at ingest (GoPro GPMF `gpmd`, DJI `djmd`, Insta360), container `creation_time`/bitrate/audio/HiLight metadata, and manual MP4 `hmmt` HiLight tags in `manifest.json` (#62).
 - Add a pre-VLM screening funnel (`utils/prescreen.py`) that scores candidate windows from telemetry plus cheap FFmpeg signals (Laplacian sharpness, luma uniformity, HSV entropy, `astats` audio peaks) and supports `advisory` or `enabled` gate modes, disabled by default via the new `prescreen` config section (#62).
