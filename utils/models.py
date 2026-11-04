@@ -43,6 +43,9 @@ class ClipManifest(BaseModel):
     telemetry_type: str = Field(
         default="", description="Sensor track family: gopro, dji, insta360, or empty"
     )
+    telemetry_stream_index: int | None = Field(
+        default=None, description="Container stream index carrying telemetry"
+    )
     is_high_fps: bool = Field(default=False, description="Frame rate indicates slow-motion intent")
     hilight_tags: list[float] = Field(
         default_factory=list, description="GoPro HiLight marker timestamps in seconds"
@@ -412,6 +415,7 @@ class PrescreenRecord(BaseModel):
     unif: float | None = None
     roll_deg: float | None = None
     pitch_deg: float | None = None
+    tilt_deg: float | None = None
     gyro_rms: float | None = None
     gps_speed_ms: float | None = None
     face_detected: bool | None = None

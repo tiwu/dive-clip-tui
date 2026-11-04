@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.logging_setup import configure_logging
 from utils.signals import setup_signal_handlers
-from utils.telemetry import classify_telemetry_type
+from utils.telemetry import classify_telemetry_type, detect_telemetry_stream
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,9 @@ def probe_video(video_path: Path) -> dict:
         creation_time = str(format_tags.get("creation_time", "") or "")
 
         stream_tags = {str(t).lower() for t in (s.get("codec_tag_string") or "" for s in streams)}
-        telemetry_type = classify_telemetry_type(stream_tags)
+        detected_tel = detect_telemetry_stream(video_path, streams=streams)
+        telemetry_type = detected_tel[0] if detected_tel else classify_telemetry_type(stream_tags)
+        telemetry_stream_index = detected_tel[1] if detected_tel else None
         hilight_tags = read_hilight_tags(video_path)
 
         return {
@@ -194,6 +196,7 @@ def probe_video(video_path: Path) -> dict:
             "has_audio": any(s.get("codec_type") == "audio" for s in streams),
             "has_telemetry": telemetry_type != "",
             "telemetry_type": telemetry_type,
+            "telemetry_stream_index": telemetry_stream_index,
             "is_high_fps": fps >= HIGH_FPS_THRESHOLD,
             "creation_time": creation_time,
             "bit_rate": bit_rate,

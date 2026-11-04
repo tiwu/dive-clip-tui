@@ -23,6 +23,7 @@ Stage 2 — Implement and release
 - **Issue/PR Viewing**: Always pass `--json title,body,labels,comments` to `gh issue view` and `gh pr view` to avoid GraphQL `projectCards` deprecation errors.
 - **PR Bodies**: Write PR descriptions containing Markdown, diagrams, or code blocks to a file and pass `--body-file <path>` to `gh pr create` / `gh pr edit` to avoid shell command substitution and redirection syntax errors.
 - **PR Update Fallback**: If `gh pr edit` errors on `projectCards`, use `gh api repos/:owner/:repo/pulls/:number -X PATCH -F body=@<file>`.
+- **Markdown & Math Formatting**: Do not use LaTeX math (`$...$` or `$$...$$`) for multi-character variables or expressions containing underscores (e.g. `\text{var_name}`) in plans, issue bodies, or PR descriptions. GitHub's KaTeX renderer fails on unescaped underscores with `'_' allowed only in math mode`. Use fenced code blocks (`python`) or backtick code spans (`` `var_name` ``) instead.
 
 ### Label Taxonomy
 

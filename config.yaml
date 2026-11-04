@@ -95,10 +95,19 @@ prescreen:
     yavg_min: 15.0                  # Mean luma below this is too dark to be usable
     unif_max: 0.92                  # Luma uniformity above this is flat/fogged (featureless)
     gyro_max: 3.5                   # Gyro RMS above this is too shaky to use
+    tilt_max: 100.0                 # Degrees tilt relative to upright horizontal; rejects dangling/inverted camera
   # Scene-domain prior resolution (Pass 0 classification confidence/coverage).
   domain_prior_thresholds:
     min_confidence: 0.80
     min_coverage: 0.80
+
+aftermovie:
+  top_n_clips: 10                   # Number of top highlights to include in highlight movie
+  fade_duration: 1.0                # Duration in seconds of cross-dissolve fade (dip-to-black)
+  min_transition_gap: 3.0           # Minimum gap (s) between same-source clips before fading out/in
+  bridge_gap_seconds: 1.5           # Max gap (s) between same-source clips to bridge into a single take
+  max_clip_duration: 12.0           # Maximum duration (s) of a bridged clip take
+  music_volume: 0.15                # Background music volume relative to video audio
 
 # Custom domains and prompt templates (optional):
 # prompts:

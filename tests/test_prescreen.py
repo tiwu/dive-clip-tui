@@ -270,7 +270,7 @@ def test_build_gates_records_thresholds_before_filtering() -> None:
     """Every gate keeps its input, threshold, and reason for the audit trail."""
     gates = build_gates(DARK_SIGNALS, PrescreenConfig())
     by_name = {gate.name: gate for gate in gates}
-    assert set(by_name) == {"dark", "featureless", "shake", "blur"}
+    assert set(by_name) == {"dark", "featureless", "shake", "orientation", "blur"}
     assert by_name["dark"].value == 5.0
     assert by_name["dark"].threshold == 15.0
     assert by_name["dark"].triggered is True

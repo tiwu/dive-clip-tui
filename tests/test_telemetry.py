@@ -1,7 +1,9 @@
 """Tests for the action-camera telemetry decoder and advisory scoring helpers."""
 
+import json
 import struct
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -12,6 +14,7 @@ from utils.telemetry import (
     aggregate_window,
     classify_telemetry_type,
     compute_telemetry_score,
+    detect_telemetry_stream,
     evaluate_gates,
     gates_reject,
     gps_speed_samples,
@@ -26,12 +29,13 @@ from utils.telemetry import (
 
 
 def _klv(key: str, type_byte: int, payload: bytes, item_size: int | None = None) -> bytes:
-    """Build a single GPMF KLV record."""
+    """Build a single GPMF KLV record with 32-bit alignment padding."""
     if item_size is None:
         item_size = len(payload)
     repeat = len(payload) // item_size
     header = key.encode("latin-1") + bytes([type_byte, item_size]) + struct.pack(">H", repeat)
-    return header + payload
+    padding = (-len(payload)) % 4
+    return header + payload + (b"\x00" * padding)
 
 
 def _container(key: str, payload: bytes) -> bytes:
@@ -363,3 +367,167 @@ def test_load_telemetry_uses_and_writes_cache(tmp_path: Path, monkeypatch, gpmf_
     assert second is not None
     assert second.series("SCEN").values == ["WATR"] * 2
     assert gpmf_track is not None
+
+
+# --- stream detection, KLV alignment, and orientation gating ---------------
+
+
+def test_detect_telemetry_stream(monkeypatch, tmp_path: Path):
+    """detect_telemetry_stream should find gpmd/djmd/insta across streams."""
+    from utils.telemetry import detect_telemetry_stream
+
+    video = tmp_path / "test.mp4"
+    video.touch()
+
+    # Case 1: GoPro with tmcd at index 2, gpmd at index 3
+    mock_gopro_streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "hevc"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+        {
+            "index": 2,
+            "codec_type": "data",
+            "codec_tag_string": "tmcd",
+            "tags": {"handler_name": "GoPro TCD"},
+        },
+        {
+            "index": 3,
+            "codec_type": "data",
+            "codec_tag_string": "gpmd",
+            "tags": {"handler_name": "GoPro MET"},
+        },
+    ]
+
+    def mock_probe_gopro(*_args, **_kwargs):
+        mock_res = MagicMock()
+        mock_res.returncode = 0
+        mock_res.stdout = json.dumps({"streams": mock_gopro_streams})
+        return mock_res
+
+    monkeypatch.setattr("subprocess.run", mock_probe_gopro)
+    detected = detect_telemetry_stream(video)
+    assert detected == ("gopro", 3)
+
+    # Case 2: DJI with djmd at stream index 2
+    mock_dji_streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+        {
+            "index": 2,
+            "codec_type": "data",
+            "codec_tag_string": "djmd",
+            "tags": {"handler_name": "DJI.Meta"},
+        },
+    ]
+
+    def mock_probe_dji(*_args, **_kwargs):
+        mock_res = MagicMock()
+        mock_res.returncode = 0
+        mock_res.stdout = json.dumps({"streams": mock_dji_streams})
+        return mock_res
+
+    monkeypatch.setattr("subprocess.run", mock_probe_dji)
+    detected = detect_telemetry_stream(video)
+    assert detected == ("dji", 2)
+
+    # Case 3: No telemetry streams
+    mock_no_telem = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+    ]
+
+    def mock_probe_none(*_args, **_kwargs):
+        mock_res = MagicMock()
+        mock_res.returncode = 0
+        mock_res.stdout = json.dumps({"streams": mock_no_telem})
+        return mock_res
+
+    monkeypatch.setattr("subprocess.run", mock_probe_none)
+    assert detect_telemetry_stream(video) is None
+
+
+def test_iter_klv_32bit_alignment():
+    """_iter_klv must step over 32-bit alignment padding for odd-length payloads."""
+    from utils.telemetry import _iter_klv
+
+    # STNM with string 'Gyroscope' (9 bytes) -> 4-byte aligned is 12 bytes (3 padding bytes)
+    stnm_header = b"STNMc\x01\x00\t"  # key=STNM, type='c', size=1, repeat=9
+    stnm_payload = b"Gyroscope\x00\x00\x00"  # 9 bytes text + 3 bytes padding
+    # Followed by SCAL: key=SCAL, type='s', size=2, repeat=1, val=100
+    scal_header = b"SCALs\x02\x00\x01"
+    scal_payload = struct.pack(">h", 100) + b"\x00\x00"  # 2 bytes + 2 bytes padding
+
+    data = stnm_header + stnm_payload + scal_header + scal_payload
+    records = list(_iter_klv(data))
+    assert len(records) == 2
+    assert records[0][0] == "STNM"
+    assert records[0][2] == b"Gyroscope"  # unpadded payload
+    assert records[1][0] == "SCAL"
+    assert records[1][2] == struct.pack(">h", 100)
+
+
+def test_decode_grav_and_tilt():
+    """Gravity vector [X, Y, Z] with SCAL=32767 should compute accurate tilt_deg."""
+    from utils.telemetry import compute_tilt_deg
+
+    # Case 1: Upright level camera (gravity points straight down +Y)
+    assert compute_tilt_deg(gx=0.0, gy=1.0, gz=0.0) == 0.0
+
+    # Case 2: Diver pointing down 36 degrees at reef (from eel clip)
+    tilt = compute_tilt_deg(gx=0.002, gy=0.811, gz=0.585)
+    assert round(tilt, 1) == 35.8
+
+    # Case 3: Inverted/dangling camera (from bad clip: gy = -0.333)
+    bad_tilt = compute_tilt_deg(gx=0.432, gy=-0.333, gz=-0.838)
+    assert round(bad_tilt, 1) == 109.5
+
+
+def test_iter_klv_unpadded_final_element():
+    """_iter_klv must yield a final KLV record even if the trailing padding was truncated."""
+    from utils.telemetry import _iter_klv
+
+    stnm_header = b"STNMc\x01\x00\t"
+    stnm_payload = b"Gyroscope"  # Exactly 9 bytes, no trailing 3 padding bytes
+    data = stnm_header + stnm_payload
+    records = list(_iter_klv(data))
+    assert len(records) == 1
+    assert records[0][0] == "STNM"
+    assert records[0][2] == b"Gyroscope"
+
+
+def test_detect_telemetry_stream_reuses_streams(tmp_path: Path):
+    """detect_telemetry_stream should inspect provided streams without invoking ffprobe."""
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {
+            "index": 3,
+            "codec_type": "data",
+            "codec_tag_string": "gpmd",
+            "tags": {"handler_name": "GoPro MET"},
+        },
+    ]
+    res = detect_telemetry_stream(tmp_path / "dummy.mp4", streams=streams)
+    assert res == (GOPRO, 3)
+
+
+def test_cori_without_grav_leaves_tilt_deg_none(gpmf_track):
+    """When GRAV is absent, tilt_deg must remain None rather than using uncalibrated raw units."""
+    rec = aggregate_window(gpmf_track, 0.0, 1.0)
+    assert rec["roll_deg"] is not None
+    assert rec["tilt_deg"] is None
+    gates = evaluate_gates(rec)
+    orient = next(g for g in gates if g["gate"] == "orientation")
+    assert orient["outcome"] == "skip"
+
+
+def test_orientation_gate():
+    """evaluate_gates should fail when tilt_deg exceeds tilt_max."""
+    # Case 1: Normal tilt (pass)
+    gates_pass = evaluate_gates({"tilt_deg": 35.0}, thresholds={"tilt_max": 100.0})
+    orient_gate = next(g for g in gates_pass if g["gate"] == "orientation")
+    assert orient_gate["outcome"] == "pass"
+
+    # Case 2: Upside down / dangling camera (fail)
+    gates_fail = evaluate_gates({"tilt_deg": 109.5}, thresholds={"tilt_max": 100.0})
+    orient_fail = next(g for g in gates_fail if g["gate"] == "orientation")
+    assert orient_fail["outcome"] == "fail"
+    assert "tilted" in orient_fail["reason"].lower() or "inverted" in orient_fail["reason"].lower()

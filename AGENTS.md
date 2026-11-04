@@ -131,6 +131,7 @@ When using the GitHub CLI:
 - Pass `--json title,body,labels,comments` to `gh issue view` (or `gh pr view`) to avoid the deprecated GraphQL `projectCards` failure.
 - When creating or editing PR descriptions with Markdown, write the body to a file and pass `--body-file` to prevent shell command substitution and redirection syntax errors.
 - If `gh pr edit` fails due to the GraphQL `projectCards` deprecation, update the PR via the GitHub REST API: `gh api repos/:owner/:repo/pulls/:number -X PATCH -F body=@<file>`.
+- Do not use LaTeX math (`$...$` or `$$...$$`) for multi-character identifiers or variables containing underscores (e.g. `\text{var_name}`) in plans, issue bodies, or PR descriptions. GitHub's KaTeX renderer fails on underscores with `'_' allowed only in math mode`. Use fenced code blocks (`python`) or backtick code spans (`` `var_name` ``) instead.
 
 ---
 
@@ -157,8 +158,13 @@ When using the GitHub CLI:
 - **Ollama requests:** use `utils/ollama_client.py` for shared request handling
   and metrics rather than calling the API directly from scripts.
 - **Telemetry:** `utils/telemetry.py` decodes GoPro GPMF (`gpmd`) tracks; DJI
-  (`djmd`) and Insta360 (`insta`) tracks are detected but not decoded. A missing
-  sensor must never act as a penalty — drop the signal and renormalize weights.
+  (`djmd`) and Insta360 (`insta`) tracks are detected but not decoded. Telemetry
+  streams must be dynamically detected across camera models by codec tag / handler
+  name rather than assuming fixed track indices (e.g. never hardcode `0:d:0`, which
+  is often `tmcd` timecode). Payloads in GPMF must be stepped by 32-bit aligned length
+  `((payload_length + 3) & ~3)`. A missing sensor must never act as a penalty — drop
+  the signal and renormalize weights. Telemetry specifications, coordinate axes, and
+  conversion formulas must be permanently cited in `README.md` and module docstrings.
 - **Pre-VLM screening:** `utils/prescreen.py` runs before Pass 1 and is off by
   default (`prescreen.enabled`). Keep image math dependency-free (pure Python over
   ffmpeg `rgb24` bytes; no NumPy/Pillow). Screening decisions are recorded in

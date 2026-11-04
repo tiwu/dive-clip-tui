@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -64,14 +65,17 @@ def render_clip_with_fade(
     end_time: float,
     output_path: Path,
     fade_duration: float = 1.0,
+    fade_in: bool = True,
+    fade_out: bool = True,
     encoder_name: str | None = None,
     encoder_args: list[str] | None = None,
     quality: VideoQuality | None = None,
 ) -> bool:
-    """Render a clip with fade-in at start and fade-out at end.
+    """Render a clip with fade-in at start and/or fade-out at end.
 
     The fade-in/fade-out creates a cross-dissolve-like effect when clips
-    are concatenated.
+    are concatenated. When both fade_in and fade_out are False, the clip
+    is cut straight without re-fading.
     """
     duration = end_time - start_time
     if duration <= 0:
@@ -82,8 +86,10 @@ def render_clip_with_fade(
 
     vf_filters = []
     if fade > 0:
-        vf_filters.append(f"fade=t=in:st=0:d={fade}")
-        vf_filters.append(f"fade=t=out:st={duration - fade}:d={fade}")
+        if fade_in:
+            vf_filters.append(f"fade=t=in:st=0:d={fade}")
+        if fade_out:
+            vf_filters.append(f"fade=t=out:st={duration - fade}:d={fade}")
 
     if encoder_args is None:
         enc_name, enc_args = get_video_encoder(encoder_name or "auto", quality=quality)
@@ -143,6 +149,8 @@ def render_clip_with_fade(
                 end_time,
                 output_path,
                 fade_duration=fade_duration,
+                fade_in=fade_in,
+                fade_out=fade_out,
                 encoder_name=fb_name,
                 encoder_args=fb_args,
                 quality=quality,
@@ -151,6 +159,114 @@ def render_clip_with_fade(
         return False
 
     return True
+
+
+def compute_clip_transitions(
+    clips: list[dict[str, Any]],
+    min_transition_gap: float = 3.0,
+) -> list[dict[str, bool]]:
+    """Compute fade-in and fade-out decisions for each clip in an aftermovie sequence.
+
+    Clips from different source files, or clips separated by more than min_transition_gap,
+    transition via fade (dip to black). Clips continuing from the same source file separated
+    by min_transition_gap or less cut directly without fading to black.
+    """
+    if not clips:
+        return []
+
+    transitions: list[dict[str, bool]] = []
+    n = len(clips)
+    for i, clip in enumerate(clips):
+        curr_source = clip.get("source_file") or clip.get("file_path") or clip.get("clip_id")
+        curr_start = float(clip.get("start_time", 0))
+        curr_end = float(clip.get("end_time", curr_start))
+
+        # First clip in aftermovie always fades in from black
+        if i == 0:
+            fade_in = True
+        else:
+            prev = clips[i - 1]
+            prev_source = prev.get("source_file") or prev.get("file_path") or prev.get("clip_id")
+            prev_end = float(prev.get("end_time", 0))
+            gap = curr_start - prev_end
+            fade_in = (prev_source != curr_source) or (gap > min_transition_gap)
+
+        # Last clip in aftermovie always fades out to black
+        if i == n - 1:
+            fade_out = True
+        else:
+            next_clip = clips[i + 1]
+            next_source = (
+                next_clip.get("source_file")
+                or next_clip.get("file_path")
+                or next_clip.get("clip_id")
+            )
+            next_start = float(next_clip.get("start_time", 0))
+            gap = next_start - curr_end
+            fade_out = (curr_source != next_source) or (gap > min_transition_gap)
+
+        transitions.append({"fade_in": fade_in, "fade_out": fade_out})
+
+    return transitions
+
+
+def bridge_clip_gaps(
+    clips: list[dict[str, Any]],
+    bridge_gap_seconds: float = 1.5,
+    max_clip_duration: float = 12.0,
+) -> list[dict[str, Any]]:
+    """Bridge short temporal gaps between adjacent clips from the same source video.
+
+    If two adjacent detections from the same source video are separated by
+    bridge_gap_seconds or less (or overlap), and their combined span does not exceed
+    max_clip_duration, merge them into a single continuous highlight window.
+    If overlapping windows exceed max_clip_duration, clamp the start of the second
+    window to avoid re-rendering duplicate frames.
+    """
+    if not clips:
+        return []
+
+    bridged: list[dict[str, Any]] = []
+    for clip in clips:
+        clip_copy = dict(clip)
+        if not bridged:
+            bridged.append(clip_copy)
+            continue
+
+        prev = bridged[-1]
+        prev_source = prev.get("source_file") or prev.get("file_path") or prev.get("clip_id")
+        curr_source = (
+            clip_copy.get("source_file") or clip_copy.get("file_path") or clip_copy.get("clip_id")
+        )
+
+        curr_start = float(clip_copy.get("start_time", 0))
+        curr_end = float(clip_copy.get("end_time", curr_start))
+        prev_start = float(prev.get("start_time", 0))
+        prev_end = float(prev.get("end_time", prev_start))
+
+        if prev_source == curr_source:
+            gap = curr_start - prev_end
+            merged_end = max(prev_end, curr_end)
+            merged_duration = merged_end - prev_start
+
+            if gap <= bridge_gap_seconds and merged_duration <= max_clip_duration:
+                prev["end_time"] = merged_end
+                if float(clip_copy.get("quality_score", 0)) > float(prev.get("quality_score", 0)):
+                    prev["quality_score"] = clip_copy["quality_score"]
+                    if "subject" in clip_copy:
+                        prev["subject"] = clip_copy["subject"]
+                continue
+
+            # If not merged but still overlapping, clamp start_time to avoid duplicate rendering
+            if curr_start < prev_end:
+                curr_start = prev_end
+                clip_copy["start_time"] = curr_start
+                if curr_start >= curr_end:
+                    continue
+
+        bridged.append(clip_copy)
+
+    return bridged
 
 
 def aspect_ratio_filter(aspect_ratio: str) -> str | None:
@@ -380,6 +496,18 @@ def main() -> None:
         default=None,
         help="Cross-dissolve fade duration in seconds (default: 1.0, or config)",
     )
+    parser.add_argument(
+        "--min-transition-gap",
+        type=float,
+        default=None,
+        help="Minimum gap between same-source clips before fading out/in (default: 3.0, or config)",
+    )
+    parser.add_argument(
+        "--bridge-gap-seconds",
+        type=float,
+        default=None,
+        help="Maximum gap between same-source clips to bridge into a single take (default: 1.5, or config)",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--log-file",
@@ -424,7 +552,23 @@ def main() -> None:
     fade_duration = (
         args.fade_duration
         if args.fade_duration is not None
-        else float(aftermovie_cfg.get("fade_duration", 1.0))
+        else float(aftermovie_cfg.get("fade_duration") or 1.0)
+    )
+    min_transition_gap = (
+        args.min_transition_gap
+        if args.min_transition_gap is not None
+        else float(aftermovie_cfg.get("min_transition_gap") or 3.0)
+    )
+    bridge_gap_seconds = (
+        args.bridge_gap_seconds
+        if args.bridge_gap_seconds is not None
+        else float(aftermovie_cfg.get("bridge_gap_seconds") or 1.5)
+    )
+    scan_params = (
+        config.get("scan_parameters", {}) if isinstance(config.get("scan_parameters"), dict) else {}
+    )
+    max_clip_duration = float(
+        aftermovie_cfg.get("max_clip_duration") or scan_params.get("max_clip_duration") or 12.0
     )
 
     with open(detections_path, encoding="utf-8") as f:
@@ -456,15 +600,33 @@ def main() -> None:
         trace_path=trace_path,
     )
 
-    logger.info("Creating aftermovie from top %d of %d detections", len(top_dets), len(detections))
+    top_dets = bridge_clip_gaps(
+        top_dets,
+        bridge_gap_seconds=bridge_gap_seconds,
+        max_clip_duration=max_clip_duration,
+    )
+    transitions = compute_clip_transitions(
+        top_dets,
+        min_transition_gap=min_transition_gap,
+    )
 
-    # Render each clip with fade-in/fade-out (cross-dissolve effect)
+    logger.info(
+        "Creating aftermovie from %d highlight clips (from top %d detections)",
+        len(top_dets),
+        min(top_n, len(detections)),
+    )
+
+    # Render each clip with smart transitions (cut within same take, fade across scenes)
     tmp_dir = output_dir / ".aftermovie_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         clip_files: list[Path] = []
         for i, det in enumerate(top_dets):
+            t_flags = transitions[i]
+            fade_in = t_flags["fade_in"]
+            fade_out = t_flags["fade_out"]
+
             raw_clip_id = str(det.get("clip_id", f"clip{i}"))
             clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
             subject = det.get("subject", "unknown")
@@ -488,6 +650,8 @@ def main() -> None:
                     end_time,
                     faded,
                     fade_duration=fade_duration,
+                    fade_in=fade_in,
+                    fade_out=fade_out,
                     quality=video_quality,
                 ):
                     logger.warning("  SKIP: failed to render %s", window_tag)
@@ -511,6 +675,8 @@ def main() -> None:
                     dur,
                     faded,
                     fade_duration=fade_duration,
+                    fade_in=fade_in,
+                    fade_out=fade_out,
                     quality=video_quality,
                 ):
                     logger.warning("  SKIP: failed to apply fade to %s", prerendered.name)

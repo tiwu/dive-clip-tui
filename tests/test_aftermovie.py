@@ -77,6 +77,139 @@ def test_render_clip_with_fade_success(tmp_path: Path) -> None:
     assert any("fade=t=out" in arg for arg in call_args)
 
 
+def test_render_clip_with_fade_independent_flags(tmp_path: Path) -> None:
+    """render_clip_with_fade should respect independent fade_in and fade_out booleans."""
+    source = tmp_path / "source.mp4"
+    source.touch()
+    output = tmp_path / "output.mp4"
+
+    mock_result = MagicMock(returncode=0, stderr="")
+
+    # Case 1: fade_in=False, fade_out=True (e.g. cut in, fade out)
+    with patch.object(aftermovie.subprocess, "run", return_value=mock_result) as mock_run:
+        assert (
+            aftermovie.render_clip_with_fade(
+                source, 10.0, 15.0, output, fade_in=False, fade_out=True
+            )
+            is True
+        )
+    call_args = mock_run.call_args[0][0]
+    vf_arg = next(call_args[i + 1] for i, arg in enumerate(call_args) if arg == "-vf")
+    assert "fade=t=in" not in vf_arg
+    assert "fade=t=out" in vf_arg
+
+    # Case 2: fade_in=True, fade_out=False (e.g. fade in, cut out)
+    with patch.object(aftermovie.subprocess, "run", return_value=mock_result) as mock_run:
+        assert (
+            aftermovie.render_clip_with_fade(
+                source, 10.0, 15.0, output, fade_in=True, fade_out=False
+            )
+            is True
+        )
+    call_args = mock_run.call_args[0][0]
+    vf_arg = next(call_args[i + 1] for i, arg in enumerate(call_args) if arg == "-vf")
+    assert "fade=t=in" in vf_arg
+    assert "fade=t=out" not in vf_arg
+
+    # Case 3: fade_in=False, fade_out=False (straight hard cut)
+    with patch.object(aftermovie.subprocess, "run", return_value=mock_result) as mock_run:
+        assert (
+            aftermovie.render_clip_with_fade(
+                source, 10.0, 15.0, output, fade_in=False, fade_out=False
+            )
+            is True
+        )
+    call_args = mock_run.call_args[0][0]
+    assert "-vf" not in call_args
+
+
+def test_aftermovie_transition_boundary_decisions() -> None:
+    """Transitions between clips should hard-cut within same clip and fade across boundaries."""
+    clips = [
+        {"source_file": "vidA.mp4", "start_time": 5.0, "end_time": 10.0},
+        {"source_file": "vidA.mp4", "start_time": 11.0, "end_time": 15.0},  # gap 1.0s <= 3.0s
+        {"source_file": "vidA.mp4", "start_time": 25.0, "end_time": 30.0},  # gap 10.0s > 3.0s
+        {"source_file": "vidB.mp4", "start_time": 0.0, "end_time": 5.0},  # different file
+    ]
+
+    transitions = aftermovie.compute_clip_transitions(clips, min_transition_gap=3.0)
+    assert len(transitions) == 4
+
+    # Clip 0: first clip opens with fade_in=True; next is same file gap 1.0s -> fade_out=False
+    assert transitions[0] == {"fade_in": True, "fade_out": False}
+    # Clip 1: prev was same file gap 1.0s -> fade_in=False; next is same file gap 10s -> fade_out=True
+    assert transitions[1] == {"fade_in": False, "fade_out": True}
+    # Clip 2: prev was gap 10s -> fade_in=True; next is different file -> fade_out=True
+    assert transitions[2] == {"fade_in": True, "fade_out": True}
+    # Clip 3: prev was different file -> fade_in=True; last clip closes with fade_out=True
+    assert transitions[3] == {"fade_in": True, "fade_out": True}
+
+
+def test_aftermovie_gap_bridging() -> None:
+    """Adjacent clips from the same source with small gaps should bridge into one take."""
+    clips = [
+        {"source_file": "vidA.mp4", "start_time": 5.0, "end_time": 8.0, "subject": "eel"},
+        {"source_file": "vidA.mp4", "start_time": 8.5, "end_time": 12.0, "subject": "coral"},
+        {"source_file": "vidA.mp4", "start_time": 12.5, "end_time": 22.0, "subject": "sponge"},
+        {"source_file": "vidB.mp4", "start_time": 0.0, "end_time": 5.0, "subject": "turtle"},
+    ]
+
+    # bridging gap <= 1.0s with max_duration 10.0s
+    bridged = aftermovie.bridge_clip_gaps(clips, bridge_gap_seconds=1.0, max_clip_duration=10.0)
+
+    # Clips 0 and 1: gap is 0.5s, merged duration is 12.0 - 5.0 = 7.0s <= 10.0s -> merged!
+    # Clip 2: gap to clip 1 is 0.5s, but merging 5.0 to 22.0 is 17.0s > 10.0s -> NOT merged!
+    # Clip 3: different file -> NOT merged!
+    assert len(bridged) == 3
+    assert bridged[0]["start_time"] == 5.0
+    assert bridged[0]["end_time"] == 12.0
+    assert bridged[1]["start_time"] == 12.5
+    assert bridged[1]["end_time"] == 22.0
+    assert bridged[2]["source_file"] == "vidB.mp4"
+
+
+def test_aftermovie_gap_bridging_overlapping() -> None:
+    """Overlapping same-source clips should merge or clamp start to avoid duplicates."""
+    # Case 1: Overlapping clips within max duration -> merged into continuous take
+    clips1 = [
+        {"source_file": "vidA.mp4", "start_time": 5.0, "end_time": 10.0, "quality_score": 7},
+        {
+            "source_file": "vidA.mp4",
+            "start_time": 8.0,
+            "end_time": 14.0,
+            "quality_score": 9,
+            "subject": "turtle",
+        },
+    ]
+    bridged1 = aftermovie.bridge_clip_gaps(clips1, bridge_gap_seconds=1.5, max_clip_duration=12.0)
+    assert len(bridged1) == 1
+    assert bridged1[0]["start_time"] == 5.0
+    assert bridged1[0]["end_time"] == 14.0
+    assert bridged1[0]["subject"] == "turtle"
+
+    # Case 2: Overlapping clips exceeding max duration -> second clip's start clamped to avoid duplicate footage
+    clips2 = [
+        {"source_file": "vidA.mp4", "start_time": 0.0, "end_time": 8.0},
+        {"source_file": "vidA.mp4", "start_time": 6.0, "end_time": 18.0},
+    ]
+    bridged2 = aftermovie.bridge_clip_gaps(clips2, bridge_gap_seconds=1.5, max_clip_duration=10.0)
+    assert len(bridged2) == 2
+    assert bridged2[0]["start_time"] == 0.0
+    assert bridged2[0]["end_time"] == 8.0
+    assert bridged2[1]["start_time"] == 8.0
+    assert bridged2[1]["end_time"] == 18.0
+
+    # Case 3: Fully subsumed clip
+    clips3 = [
+        {"source_file": "vidA.mp4", "start_time": 0.0, "end_time": 10.0},
+        {"source_file": "vidA.mp4", "start_time": 2.0, "end_time": 7.0},
+    ]
+    bridged3 = aftermovie.bridge_clip_gaps(clips3, bridge_gap_seconds=1.5, max_clip_duration=12.0)
+    assert len(bridged3) == 1
+    assert bridged3[0]["start_time"] == 0.0
+    assert bridged3[0]["end_time"] == 10.0
+
+
 def test_render_clip_with_fade_failure(tmp_path: Path) -> None:
     """render_clip_with_fade should return False when ffmpeg fails."""
     source = tmp_path / "source.mp4"
