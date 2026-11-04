@@ -176,3 +176,66 @@ def test_generate_includes_system_prompt_when_provided(tmp_path: Path) -> None:
     client.generate(str(image_path), "Prompt", "phase1", system_prompt="   ")
     payload_blank = mock_session.post.call_args.kwargs["json"]
     assert "system" not in payload_blank
+
+
+def _generate_with(tmp_path: Path, body: dict, **client_kwargs):
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"data")
+    session = MagicMock()
+    resp = MagicMock()
+    resp.json.return_value = body
+    session.post.return_value = resp
+    client = ollama_client.OllamaClient(
+        "http://localhost:11434", "model", session=session, **client_kwargs
+    )
+    result = client.generate(str(image_path), "Prompt", "phase1")
+    return result, session.post.call_args.kwargs["json"], client
+
+
+def test_generate_falls_back_to_thinking_when_response_empty(tmp_path: Path) -> None:
+    result, _, client = _generate_with(
+        tmp_path, {"response": "", "thinking": '{\n "domain": "underwater"\n}'}
+    )
+    assert result == {"domain": "underwater"}
+    assert client.metrics.by_phase["phase1"].successes == 1
+
+
+def test_generate_falls_back_to_thinking_when_response_invalid(tmp_path: Path) -> None:
+    result, _, _ = _generate_with(tmp_path, {"response": "  ", "thinking": '{"a": 1}'})
+    assert result == {"a": 1}
+    result, _, _ = _generate_with(tmp_path, {"response": "nope", "thinking": '{"a": 2}'})
+    assert result == {"a": 2}
+
+
+def test_generate_extracts_fenced_json_from_thinking(tmp_path: Path) -> None:
+    body = {"response": "", "thinking": 'Let me think.\n```json\n{"a": 3}\n```'}
+    result, _, _ = _generate_with(tmp_path, body)
+    assert result == {"a": 3}
+
+
+def test_generate_invalid_everywhere_returns_none(tmp_path: Path) -> None:
+    result, _, client = _generate_with(tmp_path, {"response": "", "thinking": "hmm"})
+    assert result is None
+    assert client.metrics.by_phase["phase1"].failures == 1
+
+
+def test_generate_sends_think_false(tmp_path: Path) -> None:
+    _, payload, _ = _generate_with(tmp_path, {"response": "{}"})
+    assert payload["think"] is False
+
+
+def test_generate_sends_num_ctx_option_when_set(tmp_path: Path) -> None:
+    _, payload, _ = _generate_with(tmp_path, {"response": "{}"}, num_ctx=32768)
+    assert payload["options"] == {"num_ctx": 32768}
+
+
+def test_generate_omits_options_without_num_ctx(tmp_path: Path) -> None:
+    _, payload, _ = _generate_with(tmp_path, {"response": "{}"})
+    assert "options" not in payload
+
+
+def test_num_ctx_must_be_positive() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="num_ctx"):
+        ollama_client.OllamaClient("http://localhost:11434", "model", num_ctx=0)

@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
-import json
 import logging
 import os
-import re
 import threading
 import time
 from collections import deque
@@ -15,7 +12,21 @@ from typing import Any, Protocol
 
 import requests
 
-from utils.ollama_client import OllamaClient, OllamaMetrics, resolve_host
+from utils.ollama_client import OllamaClient, resolve_host
+from utils.vlm_common import (
+    BaseVLMClient,
+    OllamaMetrics,
+    encode_image_b64,
+    extract_json_object,
+)
+
+__all__ = [
+    "OpenRouterClient",
+    "RateLimiter",
+    "VLMClient",
+    "create_vlm_client",
+    "extract_json_object",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -72,22 +83,7 @@ class RateLimiter:
             self._calls.append(now)
 
 
-def extract_json_object(text: str) -> dict[str, Any] | None:
-    """Parse ``text`` as a JSON object, falling back to its first ``{...}`` block."""
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError, TypeError:
-        match = re.search(r"\{.*\}", text or "", re.DOTALL)
-        if not match:
-            return None
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-class OpenRouterClient:
+class OpenRouterClient(BaseVLMClient):
     """Send image prompts to OpenRouter's OpenAI-compatible chat completions API."""
 
     def __init__(
@@ -102,23 +98,11 @@ class OpenRouterClient:
         sleep=time.sleep,
         clock=time.monotonic,
     ) -> None:
+        super().__init__(model, timeout, metrics, session)
         self.api_key = api_key
-        self.model = model
-        self.timeout = timeout
         self.max_retries = max_retries
-        self.metrics = metrics if metrics is not None else OllamaMetrics()
-        self.session = session if session is not None else requests.Session()
         self._sleep = sleep
         self._limiter = RateLimiter(requests_per_minute, clock=clock, sleep=sleep)
-
-    def close(self) -> None:
-        self.session.close()
-
-    def __enter__(self) -> OpenRouterClient:
-        return self
-
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        self.close()
 
     def _build_payload(
         self, image_b64: str, prompt: str, system_prompt: str | None
@@ -176,8 +160,7 @@ class OpenRouterClient:
     ) -> dict[str, Any] | None:
         started = time.perf_counter()
         try:
-            with open(image_path, "rb") as image_file:
-                image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
+            image_b64 = encode_image_b64(image_path)
         except OSError as exc:
             logger.warning("Cannot read image %s: %s", image_path, exc)
             self.metrics.record(phase, time.perf_counter() - started, False)
@@ -218,11 +201,12 @@ def create_vlm_client(config: dict[str, Any]) -> VLMClient:
     provider = str(vlm_cfg.get("provider", "ollama")).strip().lower()
 
     if provider == "ollama":
-        ollama_cfg = config.get("ollama", {})
+        ollama_cfg = config.get("ollama") or {}
         return OllamaClient(
             resolve_host(ollama_cfg.get("host")),
             ollama_cfg.get("model", "qwen2.5-vl:7b"),
             ollama_cfg.get("timeout_seconds", 90),
+            num_ctx=ollama_cfg.get("num_ctx"),
         )
 
     if provider == "openrouter":

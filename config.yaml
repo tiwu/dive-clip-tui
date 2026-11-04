@@ -14,6 +14,9 @@ ollama:
   host: "http://localhost:11434"
   model: "qwen2.5vl:3b"
   timeout_seconds: 120
+  # Context window (tokens) sent as options.num_ctx on every request. Omit/null to use the
+  # model's own default (e.g. its Modelfile). Lower it to fit a model in memory.
+  # num_ctx: 32768
 
 # VLM backend for the scan pipeline (Pass 0, 1 and 2).
 # "ollama" (default) uses the `ollama` section above. "openrouter" uploads sampled frames
