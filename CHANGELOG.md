@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-11-04
+
 ### Added
 - Add `ollama.num_ctx` to `config.yaml`, sent as `options.num_ctx` so model context size can be tuned without separate Modelfiles (#73).
 
