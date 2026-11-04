@@ -737,13 +737,15 @@ def screen_clip(
     duration: float | None = None,
     bitrate_density: float | None = None,
     is_high_fps: bool = False,
+    has_audio: bool = True,
 ) -> PrescreenResult:
     """Screen one clip and return per-window records plus the intervals to skip.
 
     A single FFmpeg pass samples the frames used for both the visual metrics and
     the hue histograms, and a second pass reads audio peak levels. Frames whose
     timestamp falls inside a window are the only ones that contribute to it, so
-    the metrics stay aligned with the frames the VLM would have seen.
+    the metrics stay aligned with the frames the VLM would have seen. The audio
+    pass is skipped when the clip is known to have no audio track.
     """
     cfg = config or PrescreenConfig()
     clip_duration = duration if duration is not None else (probe_duration(video_path) or 0.0)
@@ -766,7 +768,7 @@ def screen_clip(
         keyframes_only=cfg.keyframes_only,
     )
     timestamps = [round(index / cfg.sample_fps, 3) for index in range(len(frames))]
-    audio_peaks = extract_audio_peak_levels(video_path) if cfg.audio_enabled else []
+    audio_peaks = extract_audio_peak_levels(video_path) if (cfg.audio_enabled and has_audio) else []
     result.audio_peak_count = len(audio_peaks)
 
     overall_visual = visual_metrics(frames, timestamps, size=cfg.sample_size)

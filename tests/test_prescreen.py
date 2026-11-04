@@ -605,6 +605,34 @@ def test_screen_clip_skips_audio_when_disabled() -> None:
     assert result.audio_peak_count == 0
 
 
+def test_screen_clip_skips_audio_when_clip_has_no_audio_track() -> None:
+    """A clip known to carry no audio track avoids the astats pass entirely."""
+    frames_mock, audio_mock = _patch_sampling([make_checker()], [])
+    config = PrescreenConfig(enabled=True, sample_size=SIZE, sample_fps=1.0)
+    with (
+        patch("utils.prescreen.extract_raw_frames", frames_mock),
+        patch("utils.prescreen.extract_audio_peak_levels", audio_mock),
+    ):
+        result = screen_clip(
+            "clip.mp4", clip_id="c5b", duration=5.0, config=config, has_audio=False
+        )
+    audio_mock.assert_not_called()
+    assert result.audio_peak_count == 0
+
+
+def test_screen_clip_runs_audio_pass_when_clip_has_audio() -> None:
+    """``has_audio`` defaults to true so existing callers keep probing audio."""
+    frames_mock, audio_mock = _patch_sampling([make_checker()], [(0.0, -12.0)])
+    config = PrescreenConfig(enabled=True, sample_size=SIZE, sample_fps=1.0)
+    with (
+        patch("utils.prescreen.extract_raw_frames", frames_mock),
+        patch("utils.prescreen.extract_audio_peak_levels", audio_mock),
+    ):
+        result = screen_clip("clip.mp4", clip_id="c5c", duration=5.0, config=config, has_audio=True)
+    audio_mock.assert_called_once()
+    assert result.audio_peak_count == 1
+
+
 def test_screen_clip_survives_unsampleable_video() -> None:
     """A clip FFmpeg cannot decode still yields a record with null metrics."""
     frames_mock, audio_mock = _patch_sampling([], [])

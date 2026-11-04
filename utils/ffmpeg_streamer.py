@@ -603,7 +603,7 @@ def extract_audio_peak_levels(
         str(video_path),
         "-vn",
         "-af",
-        "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.Peak_level",
+        "astats=metadata=1:reset=1,ametadata=print:file=-:key=lavfi.astats.Overall.Peak_level",
         "-f",
         "null",
         "-",

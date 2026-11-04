@@ -585,6 +585,9 @@ def test_extract_audio_peak_levels_returns_parsed_peaks() -> None:
     cmd = mock_run.call_args.args[0]
     assert "-vn" in cmd
     assert any("astats=metadata=1:reset=1" in part for part in cmd)
+    # ``ametadata=print`` needs ``file=-`` or it writes nothing to stdout,
+    # which silently yields an empty peak list.
+    assert any("ametadata=print:file=-" in part for part in cmd)
 
 
 def test_extract_audio_peak_levels_handles_failure() -> None:

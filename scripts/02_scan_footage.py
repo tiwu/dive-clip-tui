@@ -941,6 +941,7 @@ def _prescreen_clip(
         duration=duration or None,
         bitrate_density=clip.get("bitrate_density"),
         is_high_fps=bool(clip.get("is_high_fps", False)),
+        has_audio=bool(clip.get("has_audio", True)),
     )
     logger.info(
         "[Prescreen] %s: %d window(s), %d rejected, %d deferred",
