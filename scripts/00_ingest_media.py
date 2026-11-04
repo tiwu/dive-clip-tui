@@ -180,7 +180,7 @@ def probe_video(video_path: Path) -> dict:
         creation_time = str(format_tags.get("creation_time", "") or "")
 
         stream_tags = {str(t).lower() for t in (s.get("codec_tag_string") or "" for s in streams)}
-        detected_tel = detect_telemetry_stream(video_path)
+        detected_tel = detect_telemetry_stream(video_path, streams=streams)
         telemetry_type = detected_tel[0] if detected_tel else classify_telemetry_type(stream_tags)
         telemetry_stream_index = detected_tel[1] if detected_tel else None
         hilight_tags = read_hilight_tags(video_path)

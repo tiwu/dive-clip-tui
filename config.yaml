@@ -71,7 +71,7 @@ selection:
 # any VLM call and can reject or defer candidate windows so the model only sees
 # footage worth describing. Disabled by default: nothing here runs until enabled.
 prescreen:
-  enabled: true                    # Turn the funnel on (FFmpeg sampling + telemetry)
+  enabled: false                    # Turn the funnel on (FFmpeg sampling + telemetry)
   # "advisory" records gate failures but never drops a window. "enabled" rejects the
   # windows that fail a gate, which is the behaviour that actually saves VLM calls.
   gate_mode: "advisory"
@@ -83,7 +83,7 @@ prescreen:
   audio_spike_floor_db: -35.0       # Absolute floor so steady quiet audio never reads as a spike
   audio_window: 5                   # Rolling median window (in peak samples)
   blur_min: 12.0                    # Median Laplacian variance below this reads as soft/blurred
-  contact_sheet: true              # Opt-in 2x2 contact sheets: up to 4x fewer VLM calls per clip
+  contact_sheet: false              # Opt-in 2x2 contact sheets: up to 4x fewer VLM calls per clip
   # Telemetry score weights. Missing sensors are dropped and the rest renormalized.
   weights:
     lean_speed: 0.35                # Lean angle + speed magnitude

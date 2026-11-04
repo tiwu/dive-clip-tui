@@ -14,6 +14,7 @@ from utils.telemetry import (
     aggregate_window,
     classify_telemetry_type,
     compute_telemetry_score,
+    detect_telemetry_stream,
     evaluate_gates,
     gates_reject,
     gps_speed_samples,
@@ -478,6 +479,44 @@ def test_decode_grav_and_tilt():
     # Case 3: Inverted/dangling camera (from bad clip: gy = -0.333)
     bad_tilt = compute_tilt_deg(gx=0.432, gy=-0.333, gz=-0.838)
     assert round(bad_tilt, 1) == 109.5
+
+
+def test_iter_klv_unpadded_final_element():
+    """_iter_klv must yield a final KLV record even if the trailing padding was truncated."""
+    from utils.telemetry import _iter_klv
+
+    stnm_header = b"STNMc\x01\x00\t"
+    stnm_payload = b"Gyroscope"  # Exactly 9 bytes, no trailing 3 padding bytes
+    data = stnm_header + stnm_payload
+    records = list(_iter_klv(data))
+    assert len(records) == 1
+    assert records[0][0] == "STNM"
+    assert records[0][2] == b"Gyroscope"
+
+
+def test_detect_telemetry_stream_reuses_streams(tmp_path: Path):
+    """detect_telemetry_stream should inspect provided streams without invoking ffprobe."""
+    streams = [
+        {"index": 0, "codec_type": "video", "codec_name": "h264"},
+        {
+            "index": 3,
+            "codec_type": "data",
+            "codec_tag_string": "gpmd",
+            "tags": {"handler_name": "GoPro MET"},
+        },
+    ]
+    res = detect_telemetry_stream(tmp_path / "dummy.mp4", streams=streams)
+    assert res == (GOPRO, 3)
+
+
+def test_cori_without_grav_leaves_tilt_deg_none(gpmf_track):
+    """When GRAV is absent, tilt_deg must remain None rather than using uncalibrated raw units."""
+    rec = aggregate_window(gpmf_track, 0.0, 1.0)
+    assert rec["roll_deg"] is not None
+    assert rec["tilt_deg"] is None
+    gates = evaluate_gates(rec)
+    orient = next(g for g in gates if g["gate"] == "orientation")
+    assert orient["outcome"] == "skip"
 
 
 def test_orientation_gate():

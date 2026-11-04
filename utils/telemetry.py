@@ -203,9 +203,11 @@ def _iter_klv(
         payload_end = payload_start + payload_length
         padded_length = (payload_length + 3) & ~3
         next_position = payload_start + padded_length
-        if payload_length == 0 or payload_end > limit or next_position > limit:
+        if payload_length == 0 or payload_end > limit:
             return
         yield key, type_byte, data[payload_start:payload_end]
+        if next_position >= limit:
+            break
         position = next_position
 
 
@@ -390,40 +392,47 @@ def telemetry_unsupported_reason(kind: str) -> str:
     return "no supported telemetry stream detected"
 
 
-def detect_telemetry_stream(video_path: Path) -> tuple[str, int] | None:
+def detect_telemetry_stream(
+    video_path: Path, streams: list[dict[str, Any]] | None = None
+) -> tuple[str, int] | None:
     """Detect which stream index in ``video_path`` carries action-camera telemetry.
 
-    Inspects container streams using ffprobe. Matches known codec tags
-    ('gpmd' for GoPro, 'djmd' for DJI, 'insta' for Insta360) and stream
-    handler names ('GoPro MET', 'DJI.Meta').
+    Inspects container streams using ffprobe (or reuses pre-probed ``streams``).
+    Matches known codec tags ('gpmd' for GoPro, 'djmd' for DJI, 'insta' for Insta360)
+    and stream handler names ('GoPro MET', 'DJI.Meta').
 
     Returns ``(camera_family, stream_index)`` (e.g. ``('gopro', 3)``) or
     ``None`` when no telemetry stream is present.
     """
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_streams",
-        "-of",
-        "json",
-        str(video_path),
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.debug("ffprobe stream detection failed for %s: %s", video_path, exc)
-        return None
+    stream_list: list[dict[str, Any]] = []
+    if streams is not None:
+        stream_list = streams
+    else:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_streams",
+            "-of",
+            "json",
+            str(video_path),
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("ffprobe stream detection failed for %s: %s", video_path, exc)
+            return None
 
-    if result.returncode != 0 or not result.stdout:
-        return None
+        if result.returncode != 0 or not result.stdout:
+            return None
 
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError, ValueError:
-        return None
+        try:
+            data = json.loads(result.stdout)
+            stream_list = data.get("streams", []) if isinstance(data, dict) else []
+        except OSError, ValueError:
+            return None
 
-    for s in data.get("streams", []):
+    for s in stream_list:
         try:
             idx = int(s.get("index", 0))
         except ValueError, TypeError:
@@ -445,7 +454,13 @@ def detect_telemetry_stream(video_path: Path) -> tuple[str, int] | None:
 def extract_telemetry_bytes(
     video_path: Path, stream_index: int | None = None, timeout: int = 120
 ) -> bytes | None:
-    """Extract a raw ``data`` stream (e.g. ``gpmd``) from a clip using ffmpeg."""
+    """Extract a raw telemetry stream (e.g. ``gpmd``) from a clip using ffmpeg.
+
+    Note that ``stream_index`` must be the absolute container stream index
+    (e.g. ``3`` as reported by ``ffprobe stream.index`` or :func:`detect_telemetry_stream`),
+    not the data-stream ordinal (e.g. ``0:d:0``). When ``stream_index`` is omitted,
+    the telemetry stream is detected automatically.
+    """
     target_index = stream_index
     if target_index is None:
         detected = detect_telemetry_stream(video_path)
@@ -587,13 +602,6 @@ def aggregate_window(track: TelemetryTrack | None, start: float, end: float) -> 
             gy = sum(s[1] for s in grav_samples) / len(grav_samples)
             gz = sum(s[2] for s in grav_samples) / len(grav_samples)
             record["tilt_deg"] = round(compute_tilt_deg(gx, gy, gz), 1)
-
-    if record["tilt_deg"] is None and (
-        record["pitch_deg"] is not None or record["roll_deg"] is not None
-    ):
-        p = abs(record["pitch_deg"] or 0.0)
-        r = abs(record["roll_deg"] or 0.0)
-        record["tilt_deg"] = round(math.sqrt(p * p + r * r), 1)
 
     gyro = track.series("GYRO")
     if gyro is not None:

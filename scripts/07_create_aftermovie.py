@@ -218,8 +218,10 @@ def bridge_clip_gaps(
     """Bridge short temporal gaps between adjacent clips from the same source video.
 
     If two adjacent detections from the same source video are separated by
-    bridge_gap_seconds or less, and their combined span does not exceed
+    bridge_gap_seconds or less (or overlap), and their combined span does not exceed
     max_clip_duration, merge them into a single continuous highlight window.
+    If overlapping windows exceed max_clip_duration, clamp the start of the second
+    window to avoid re-rendering duplicate frames.
     """
     if not clips:
         return []
@@ -242,21 +244,27 @@ def bridge_clip_gaps(
         prev_start = float(prev.get("start_time", 0))
         prev_end = float(prev.get("end_time", prev_start))
 
-        gap = curr_start - prev_end
-        merged_duration = curr_end - prev_start
+        if prev_source == curr_source:
+            gap = curr_start - prev_end
+            merged_end = max(prev_end, curr_end)
+            merged_duration = merged_end - prev_start
 
-        if (
-            prev_source == curr_source
-            and 0 <= gap <= bridge_gap_seconds
-            and merged_duration <= max_clip_duration
-        ):
-            prev["end_time"] = curr_end
-            if float(clip_copy.get("quality_score", 0)) > float(prev.get("quality_score", 0)):
-                prev["quality_score"] = clip_copy["quality_score"]
-                if "subject" in clip_copy:
-                    prev["subject"] = clip_copy["subject"]
-        else:
-            bridged.append(clip_copy)
+            if gap <= bridge_gap_seconds and merged_duration <= max_clip_duration:
+                prev["end_time"] = merged_end
+                if float(clip_copy.get("quality_score", 0)) > float(prev.get("quality_score", 0)):
+                    prev["quality_score"] = clip_copy["quality_score"]
+                    if "subject" in clip_copy:
+                        prev["subject"] = clip_copy["subject"]
+                continue
+
+            # If not merged but still overlapping, clamp start_time to avoid duplicate rendering
+            if curr_start < prev_end:
+                curr_start = prev_end
+                clip_copy["start_time"] = curr_start
+                if curr_start >= curr_end:
+                    continue
+
+        bridged.append(clip_copy)
 
     return bridged
 
@@ -544,23 +552,23 @@ def main() -> None:
     fade_duration = (
         args.fade_duration
         if args.fade_duration is not None
-        else float(aftermovie_cfg.get("fade_duration", 1.0))
+        else float(aftermovie_cfg.get("fade_duration") or 1.0)
     )
     min_transition_gap = (
         args.min_transition_gap
         if args.min_transition_gap is not None
-        else float(aftermovie_cfg.get("min_transition_gap", 3.0))
+        else float(aftermovie_cfg.get("min_transition_gap") or 3.0)
     )
     bridge_gap_seconds = (
         args.bridge_gap_seconds
         if args.bridge_gap_seconds is not None
-        else float(aftermovie_cfg.get("bridge_gap_seconds", 1.5))
+        else float(aftermovie_cfg.get("bridge_gap_seconds") or 1.5)
     )
     scan_params = (
         config.get("scan_parameters", {}) if isinstance(config.get("scan_parameters"), dict) else {}
     )
     max_clip_duration = float(
-        aftermovie_cfg.get("max_clip_duration", scan_params.get("max_clip_duration", 12.0))
+        aftermovie_cfg.get("max_clip_duration") or scan_params.get("max_clip_duration") or 12.0
     )
 
     with open(detections_path, encoding="utf-8") as f:

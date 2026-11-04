@@ -168,6 +168,48 @@ def test_aftermovie_gap_bridging() -> None:
     assert bridged[2]["source_file"] == "vidB.mp4"
 
 
+def test_aftermovie_gap_bridging_overlapping() -> None:
+    """Overlapping same-source clips should merge or clamp start to avoid duplicates."""
+    # Case 1: Overlapping clips within max duration -> merged into continuous take
+    clips1 = [
+        {"source_file": "vidA.mp4", "start_time": 5.0, "end_time": 10.0, "quality_score": 7},
+        {
+            "source_file": "vidA.mp4",
+            "start_time": 8.0,
+            "end_time": 14.0,
+            "quality_score": 9,
+            "subject": "turtle",
+        },
+    ]
+    bridged1 = aftermovie.bridge_clip_gaps(clips1, bridge_gap_seconds=1.5, max_clip_duration=12.0)
+    assert len(bridged1) == 1
+    assert bridged1[0]["start_time"] == 5.0
+    assert bridged1[0]["end_time"] == 14.0
+    assert bridged1[0]["subject"] == "turtle"
+
+    # Case 2: Overlapping clips exceeding max duration -> second clip's start clamped to avoid duplicate footage
+    clips2 = [
+        {"source_file": "vidA.mp4", "start_time": 0.0, "end_time": 8.0},
+        {"source_file": "vidA.mp4", "start_time": 6.0, "end_time": 18.0},
+    ]
+    bridged2 = aftermovie.bridge_clip_gaps(clips2, bridge_gap_seconds=1.5, max_clip_duration=10.0)
+    assert len(bridged2) == 2
+    assert bridged2[0]["start_time"] == 0.0
+    assert bridged2[0]["end_time"] == 8.0
+    assert bridged2[1]["start_time"] == 8.0
+    assert bridged2[1]["end_time"] == 18.0
+
+    # Case 3: Fully subsumed clip
+    clips3 = [
+        {"source_file": "vidA.mp4", "start_time": 0.0, "end_time": 10.0},
+        {"source_file": "vidA.mp4", "start_time": 2.0, "end_time": 7.0},
+    ]
+    bridged3 = aftermovie.bridge_clip_gaps(clips3, bridge_gap_seconds=1.5, max_clip_duration=12.0)
+    assert len(bridged3) == 1
+    assert bridged3[0]["start_time"] == 0.0
+    assert bridged3[0]["end_time"] == 10.0
+
+
 def test_render_clip_with_fade_failure(tmp_path: Path) -> None:
     """render_clip_with_fade should return False when ffmpeg fails."""
     source = tmp_path / "source.mp4"
