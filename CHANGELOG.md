@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-11-04
+
 ### Added
 - Add camera-agnostic telemetry stream detection (`detect_telemetry_stream`) in `utils/telemetry.py` matching codec tags (`gpmd`, `djmd`, `insta`) and handler names, mapping container tracks dynamically instead of hardcoding stream indices (#71).
 - Add `orientation` gate and `tilt_max` threshold (default 100°) based on decoded GoPro `GRAV` gravity vector (with `CORI` fallback) to flag and reject inverted or dangling cameras (#71).
