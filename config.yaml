@@ -71,7 +71,7 @@ selection:
 # any VLM call and can reject or defer candidate windows so the model only sees
 # footage worth describing. Disabled by default: nothing here runs until enabled.
 prescreen:
-  enabled: false                    # Turn the funnel on (FFmpeg sampling + telemetry)
+  enabled: true                    # Turn the funnel on (FFmpeg sampling + telemetry)
   # "advisory" records gate failures but never drops a window. "enabled" rejects the
   # windows that fail a gate, which is the behaviour that actually saves VLM calls.
   gate_mode: "advisory"
@@ -83,7 +83,7 @@ prescreen:
   audio_spike_floor_db: -35.0       # Absolute floor so steady quiet audio never reads as a spike
   audio_window: 5                   # Rolling median window (in peak samples)
   blur_min: 12.0                    # Median Laplacian variance below this reads as soft/blurred
-  contact_sheet: false              # Opt-in 2x2 contact sheets: up to 4x fewer VLM calls per clip
+  contact_sheet: true              # Opt-in 2x2 contact sheets: up to 4x fewer VLM calls per clip
   # Telemetry score weights. Missing sensors are dropped and the rest renormalized.
   weights:
     lean_speed: 0.35                # Lean angle + speed magnitude
@@ -95,10 +95,19 @@ prescreen:
     yavg_min: 15.0                  # Mean luma below this is too dark to be usable
     unif_max: 0.92                  # Luma uniformity above this is flat/fogged (featureless)
     gyro_max: 3.5                   # Gyro RMS above this is too shaky to use
+    tilt_max: 100.0                 # Degrees tilt relative to upright horizontal; rejects dangling/inverted camera
   # Scene-domain prior resolution (Pass 0 classification confidence/coverage).
   domain_prior_thresholds:
     min_confidence: 0.80
     min_coverage: 0.80
+
+aftermovie:
+  top_n_clips: 10                   # Number of top highlights to include in highlight movie
+  fade_duration: 1.0                # Duration in seconds of cross-dissolve fade (dip-to-black)
+  min_transition_gap: 3.0           # Minimum gap (s) between same-source clips before fading out/in
+  bridge_gap_seconds: 1.5           # Max gap (s) between same-source clips to bridge into a single take
+  max_clip_duration: 12.0           # Maximum duration (s) of a bridged clip take
+  music_volume: 0.15                # Background music volume relative to video audio
 
 # Custom domains and prompt templates (optional):
 # prompts:

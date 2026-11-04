@@ -6,6 +6,17 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add camera-agnostic telemetry stream detection (`detect_telemetry_stream`) in `utils/telemetry.py` matching codec tags (`gpmd`, `djmd`, `insta`) and handler names, mapping container tracks dynamically instead of hardcoding stream indices (#71).
+- Add `orientation` gate and `tilt_max` threshold (default 100°) based on decoded GoPro `GRAV` gravity vector (with `CORI` fallback) to flag and reject inverted or dangling cameras (#71).
+- Add smart aftermovie transitions (`compute_clip_transitions`) and gap bridging (`bridge_clip_gaps`) in `scripts/07_create_aftermovie.py` to cut smoothly within continuous takes from the same source clip and dip-to-black only across scene boundaries or larger time gaps (#71).
+- Document GoPro GPMF 32-bit KLV alignment, sensor FourCCs, and camera coordinate axes in `README.md` and module docstrings (#71).
+
+### Fixed
+- Fix GPMF KLV parser desynchronization on odd-length string payloads (e.g. `STNM: "Gyroscope"`) by enforcing 32-bit alignment padding in `_iter_klv` (#71).
+- Fix GoPro int16 signed short type decoding by mapping `'s'` and `'S'` in `GPMF_TYPES` (#71).
+- Fix repeated dip-to-black fade in/fade out between consecutive highlight windows from the same video file (#71).
+
 ## [0.30.0] - 2026-11-04
 
 ### Changed

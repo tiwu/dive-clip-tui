@@ -4,27 +4,30 @@ The module decodes GoPro GPMF (``gpmd``) telemetry into per-signal time series a
 exposes small, dependency-free helpers used by the screening funnel:
 
 * :func:`classify_telemetry_type` — detect the camera family from container stream tags.
+* :func:`detect_telemetry_stream` — detect which stream index carries telemetry.
 * :func:`load_telemetry` — decode a clip's telemetry track (fail-soft, never raises).
 * :func:`aggregate_window` — collapse 200 Hz samples to one record per candidate window.
 * :func:`compute_telemetry_score` — normalized 0.0-1.0 kinematic/interest score.
 * :func:`evaluate_gates` — advisory (or explicitly enabled) rejection gates.
 * :func:`telemetry_domain_prior` — ``SCEN`` based Pass 0 domain fast-path prior.
 
-Design notes
-------------
-Telemetry is strictly optional. Any decode failure returns ``None`` (or an empty
-result) with a documented reason so the existing visual pipeline keeps running.
-Missing sensors are reported as ``None`` — never as ``0.0`` — so that absent data
-is not silently treated as a negative signal.
-
-Decoding scope is intentionally narrow: only validated GoPro GPMF signals are
-decoded. DJI ``djmd`` (protobuf) and Insta360 trailer telemetry are recognised but
-reported as unsupported so the funnel records why a clip had no sensor evidence.
+Specifications & Formats Reference
+----------------------------------
+* **GoPro GPMF Parser**: https://github.com/gopro/gpmf-parser
+* **GPMF 32-bit KLV Alignment**: All data within GPMF is 32-bit aligned. Payloads that
+  do not naturally end on a 32-bit boundary are padded with zeros to maintain alignment.
+  Parsers step forward by the 32-bit padded length: ``((payload_length + 3) & ~3)``.
+* **GoPro Body Coordinates**: +X right, +Y bottom, +Z optical axis (lens forward).
+  When upright and level, gravity vector points down +Y (gy = 1.0, tilt = 0°).
+  Inversion / dangling occurs when gy < 0 (tilt > 90°).
+* **Research & Deep Dive**: ``docs/research/highlight-detection-and-telemetry.md``
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import struct
 import subprocess
 from collections.abc import Iterable, Iterator
@@ -53,6 +56,8 @@ GPMF_TYPES: dict[str, tuple[str, int]] = {
     "B": ("B", 1),
     "h": ("h", 2),
     "H": ("H", 2),
+    "s": ("h", 2),
+    "S": ("H", 2),
     "i": ("i", 4),
     "I": ("I", 4),
     "l": ("i", 4),
@@ -83,6 +88,7 @@ DEFAULT_GATE_THRESHOLDS: dict[str, float] = {
     "yavg_min": 15.0,
     "unif_max": 0.92,
     "gyro_max": 3.5,
+    "tilt_max": 100.0,
 }
 
 DEFAULT_TELEMETRY_WEIGHTS: dict[str, float] = {
@@ -195,10 +201,26 @@ def _iter_klv(
         payload_length = item_size * item_repeat
         payload_start = position + 8
         payload_end = payload_start + payload_length
-        if payload_length == 0 or payload_end > limit:
+        padded_length = (payload_length + 3) & ~3
+        next_position = payload_start + padded_length
+        if payload_length == 0 or payload_end > limit or next_position > limit:
             return
         yield key, type_byte, data[payload_start:payload_end]
-        position = payload_end
+        position = next_position
+
+
+def compute_tilt_deg(gx: float, gy: float, gz: float) -> float:
+    """Compute tilt angle in degrees relative to upright horizontal.
+
+    In the GoPro body-fixed frame (+X right, +Y bottom, +Z optical axis):
+    - When upright and level: gravity points straight down +Y (gy = 1.0, tilt = 0.0 deg).
+    - When tilted down at reef: gy > 0 (tilt < 90.0 deg).
+    - When inverted / dangling: gy < 0 (tilt > 90.0 deg).
+    """
+    mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+    norm_y = (gy / mag) if mag > 1e-6 else gy
+    clamped_y = max(-1.0, min(1.0, norm_y))
+    return float(math.acos(clamped_y) * (180.0 / math.pi))
 
 
 def _decode_leaf_values(key: str, type_byte: int, payload: bytes) -> list[Any]:
@@ -235,7 +257,7 @@ def _gps_speed_ms(sample: tuple[int, ...]) -> float | None:
 GPS_COMPONENTS: dict[str, int] = {"GPS5": 5, "GPS9": 9, "GPS2": 2}
 
 # Vector leaves keep their axes together so per-component access stays possible.
-VECTOR_COMPONENTS: dict[str, int] = {"CORI": 3, "IORI": 3}
+VECTOR_COMPONENTS: dict[str, int] = {"CORI": 3, "IORI": 3, "GRAV": 3}
 
 SAMPLE_COMPONENTS: dict[str, int] = {**GPS_COMPONENTS, **VECTOR_COMPONENTS}
 
@@ -325,6 +347,8 @@ def _normalize_signal_value(key: str, value: Any) -> Any:
         return value.strip().upper()[:4] or None
     if key == "FACE" and isinstance(value, int | float):
         return int(value)
+    if key == "GRAV" and isinstance(value, tuple) and len(value) == 3:
+        return tuple(round(float(c) / 32767.0, 4) for c in value)
     return value
 
 
@@ -366,10 +390,70 @@ def telemetry_unsupported_reason(kind: str) -> str:
     return "no supported telemetry stream detected"
 
 
+def detect_telemetry_stream(video_path: Path) -> tuple[str, int] | None:
+    """Detect which stream index in ``video_path`` carries action-camera telemetry.
+
+    Inspects container streams using ffprobe. Matches known codec tags
+    ('gpmd' for GoPro, 'djmd' for DJI, 'insta' for Insta360) and stream
+    handler names ('GoPro MET', 'DJI.Meta').
+
+    Returns ``(camera_family, stream_index)`` (e.g. ``('gopro', 3)``) or
+    ``None`` when no telemetry stream is present.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_streams",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("ffprobe stream detection failed for %s: %s", video_path, exc)
+        return None
+
+    if result.returncode != 0 or not result.stdout:
+        return None
+
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError, ValueError:
+        return None
+
+    for s in data.get("streams", []):
+        try:
+            idx = int(s.get("index", 0))
+        except ValueError, TypeError:
+            continue
+        tag = str(s.get("codec_tag_string") or "").strip().lower()
+        tags_dict = s.get("tags") if isinstance(s.get("tags"), dict) else {}
+        handler = str(tags_dict.get("handler_name") or "").strip().lower()
+
+        if tag == "gpmd" or "gopro met" in handler:
+            return (GOPRO, idx)
+        if tag == "djmd" or "dji.meta" in handler:
+            return (DJI, idx)
+        if tag == "insta" or "insta360" in handler:
+            return (INSTA360, idx)
+
+    return None
+
+
 def extract_telemetry_bytes(
-    video_path: Path, stream_index: int = 0, timeout: int = 120
+    video_path: Path, stream_index: int | None = None, timeout: int = 120
 ) -> bytes | None:
     """Extract a raw ``data`` stream (e.g. ``gpmd``) from a clip using ffmpeg."""
+    target_index = stream_index
+    if target_index is None:
+        detected = detect_telemetry_stream(video_path)
+        if detected is None:
+            logger.debug("No telemetry stream detected for %s", video_path)
+            return None
+        target_index = detected[1]
+
     cmd = [
         "ffmpeg",
         "-y",
@@ -378,7 +462,7 @@ def extract_telemetry_bytes(
         "-i",
         str(video_path),
         "-map",
-        f"0:d:{stream_index}",
+        f"0:{target_index}",
         "-c",
         "copy",
         "-f",
@@ -405,11 +489,21 @@ def load_telemetry(
     telemetry_type: str = "",
     duration: float = 0.0,
     cache_path: Path | None = None,
+    stream_index: int | None = None,
 ) -> TelemetryTrack | None:
     """Decode a clip's telemetry track, failing soft on every unsupported case."""
     kind = telemetry_type or ""
-    if not kind:
-        return None
+    target_stream = stream_index
+    if not kind or target_stream is None:
+        detected = detect_telemetry_stream(video_path)
+        if detected is not None:
+            if not kind:
+                kind = detected[0]
+            if target_stream is None:
+                target_stream = detected[1]
+        elif not kind:
+            return None
+
     if kind in {DJI, INSTA360}:
         return _unsupported_track(kind, telemetry_unsupported_reason(kind))
 
@@ -421,7 +515,7 @@ def load_telemetry(
             logger.debug("Could not read cached telemetry %s: %s", cache_path, exc)
             payload = None
     if payload is None:
-        payload = extract_telemetry_bytes(video_path)
+        payload = extract_telemetry_bytes(video_path, stream_index=target_stream)
         if payload is not None and cache_path is not None:
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -444,6 +538,7 @@ def aggregate_window(track: TelemetryTrack | None, start: float, end: float) -> 
         "unif": None,
         "roll_deg": None,
         "pitch_deg": None,
+        "tilt_deg": None,
         "gyro_rms": None,
         "gps_speed_ms": None,
         "face_detected": None,
@@ -481,6 +576,24 @@ def aggregate_window(track: TelemetryTrack | None, start: float, end: float) -> 
         record["pitch_deg"] = _round_or_none(iori.component_mean(1, start, end))
     if record["pitch_deg"] is None and cori is not None:
         record["pitch_deg"] = _round_or_none(cori.component_mean(1, start, end))
+
+    grav = track.series("GRAV")
+    if grav is not None:
+        grav_samples = [
+            s for s in grav.samples_between(start, end) if isinstance(s, tuple) and len(s) == 3
+        ]
+        if grav_samples:
+            gx = sum(s[0] for s in grav_samples) / len(grav_samples)
+            gy = sum(s[1] for s in grav_samples) / len(grav_samples)
+            gz = sum(s[2] for s in grav_samples) / len(grav_samples)
+            record["tilt_deg"] = round(compute_tilt_deg(gx, gy, gz), 1)
+
+    if record["tilt_deg"] is None and (
+        record["pitch_deg"] is not None or record["roll_deg"] is not None
+    ):
+        p = abs(record["pitch_deg"] or 0.0)
+        r = abs(record["roll_deg"] or 0.0)
+        record["tilt_deg"] = round(math.sqrt(p * p + r * r), 1)
 
     gyro = track.series("GYRO")
     if gyro is not None:
@@ -623,6 +736,16 @@ def evaluate_gates(
             "above",
             mode,
             "gyro rate RMS above stability floor",
+        )
+    )
+    gates.append(
+        _gate_result(
+            "orientation",
+            signals.get("tilt_deg"),
+            effective["tilt_max"],
+            "above",
+            mode,
+            "camera tilted or inverted past stability threshold",
         )
     )
     return gates

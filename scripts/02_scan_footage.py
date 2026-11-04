@@ -918,6 +918,7 @@ def _prescreen_clip(
     file_name = clip.get("file_name", "")
     duration = parse_duration(clip.get("duration", ""))
     telemetry_type = str(clip.get("telemetry_type", "") or "")
+    stream_index = clip.get("telemetry_stream_index")
     cache_path = (
         telemetry_cache_dir / f"{clip_id}.telemetry.bin"
         if telemetry_cache_dir is not None
@@ -928,6 +929,7 @@ def _prescreen_clip(
         telemetry_type=telemetry_type,
         duration=duration,
         cache_path=cache_path,
+        stream_index=stream_index,
     )
     result = screen_clip(
         file_path,

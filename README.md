@@ -317,6 +317,7 @@ want the best moments even if they cluster in one file.
 | `gate_thresholds.yavg_min` | `15.0` | Mean luma below this is too dark to use |
 | `gate_thresholds.unif_max` | `0.92` | Luma uniformity above this is flat or fogged (1.0 is featureless) |
 | `gate_thresholds.gyro_max` | `3.5` | Gyro RMS above this is too shaky |
+| `gate_thresholds.tilt_max` | `100.0` | Max tilt angle (degrees) relative to upright horizontal before orientation gate rejects |
 | `domain_prior_thresholds.min_confidence` | `0.80` | Minimum Pass 0 confidence to trust a domain prior |
 | `domain_prior_thresholds.min_coverage` | `0.80` | Minimum Pass 0 coverage to trust a domain prior |
 
@@ -338,6 +339,9 @@ Start at `gate_mode: "advisory"`, read `prescreen_trace.json`, then switch to
 | `top_n_clips` | `10` | Default clip count |
 | `music_volume` | `0.15` | Default music mix level |
 | `fade_duration` | `1.0` | Default fade/transition length |
+| `min_transition_gap` | `3.0` | Minimum gap in seconds between same-source clips before fading out/in (dip-to-black) |
+| `bridge_gap_seconds` | `1.5` | Max gap in seconds between same-source clips to bridge into a single take |
+| `max_clip_duration` | `12.0` | Max merged duration in seconds for bridged clip takes |
 
 **`prompts`** *(optional)* — custom domains and prompt templates, with a commented
 example at the bottom of [`config.yaml`](config.yaml).
@@ -427,12 +431,15 @@ whether to `keep`, `defer`, or `reject` it. Configured under `prescreen:`; off b
 default.
 
 1. **Ingestion** — `00_ingest_media.py` probes every stream and records sensor tracks
-   and container hints in the manifest (`telemetry_type`, `has_telemetry`,
-   `is_high_fps`, `hilight_tags`, `bitrate_density`). GoPro `gpmf` telemetry is
-   decoded into timestamped series; the funnel consumes `SCEN`, `GYRO`,
-   `GPS5`/`GPS9`/`GPS2` speed, `CORI`/`IORI` orientation proxies, `YAVG`/`UNIF` luma,
-   and `FACE` presence. DJI and Insta360 tracks are detected but not yet decoded, so
-   they yield no score rather than a penalty.
+   and container hints in the manifest (`telemetry_type`, `telemetry_stream_index`,
+   `has_telemetry`, `is_high_fps`, `hilight_tags`, `bitrate_density`). Telemetry
+   streams are detected dynamically across container tracks by matching codec tag
+   (`gpmd`, `djmd`, `insta`) or handler name (`GoPro MET`, `DJI.Meta`) rather than
+   assuming fixed track numbers. GoPro `gpmf` telemetry is decoded into timestamped
+   series; the funnel consumes `SCEN`, `GYRO`, `GPS5`/`GPS9`/`GPS2` speed, `GRAV`
+   gravity vector, `CORI`/`IORI` orientation proxies, `YAVG`/`UNIF` luma, and `FACE`
+   presence. DJI and Insta360 tracks are detected but not yet decoded, so they yield
+   no score rather than a penalty.
 2. **HiLight tags** — GoPro `moov.udta.hmmt` markers are parsed out of the atom tree
    and used to align screening windows, so per-window metrics land on moments a human
    already marked. They do not create windows of their own; they are echoed into
@@ -440,10 +447,23 @@ default.
 3. **Metrics** — one FFmpeg pass samples frames at `prescreen.sample_fps` for mean
    luma, luma uniformity, Laplacian sharpness, and HSV histograms; a second `astats`
    pass reads audio peaks and detects spikes above a rolling median.
-4. **Gates** — `yavg_min`, `unif_max`, `gyro_max`, and `blur_min` plus a weighted
+4. **Gates** — `yavg_min`, `unif_max`, `gyro_max`, `tilt_max`, and `blur_min` plus a weighted
    telemetry score decide each window. Missing sensors never reject footage: a gate
    with no signal reports `signal unavailable` and is skipped, and weights renormalize
    over whichever signals exist.
+
+#### Telemetry Specifications & Coordinates Reference
+* **GoPro GPMF Format**: Based on the [GoPro GPMF parser specification](https://github.com/gopro/gpmf-parser).
+  Every KLV payload is 32-bit aligned (`((payload_length + 3) & ~3)`).
+* **GoPro Coordinate System**: Camera body axes are defined as:
+  * `+X`: Camera right
+  * `+Y`: Camera bottom
+  * `+Z`: Optical axis (lens forward)
+* **Orientation and Gravity Decoding**:
+  When upright and horizontal, the gravity vector `GRAV` points down `+Y` (`gy = 1.0`, `tilt = 0°`).
+  Tilt angle relative to upright horizontal is calculated as `arccos(clamp(gy, -1.0, 1.0)) * (180.0 / pi)`.
+  When a camera dangles inverted from diving gear or a lanyard, `gy < 0` (`tilt > 90°`), triggering the `orientation` gate (`tilt_max: 100.0`).
+* **Research & Implementation Notes**: See `docs/research/highlight-detection-and-telemetry.md`.
 
 All image math is pure Python over FFmpeg `rgb24` bytes, so the funnel needs no NumPy
 or Pillow and stays optional.
