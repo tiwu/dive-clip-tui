@@ -22,7 +22,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.checkpoint import PipelineState
 from utils.config import ConfigError, load_config
-from utils.encoder import get_fallback_encoder, get_video_encoder
+from utils.encoder import (
+    VideoQuality,
+    get_fallback_encoder,
+    get_video_encoder,
+    resolve_video_quality,
+)
 from utils.logging_setup import configure_logging
 from utils.signals import setup_signal_handlers
 
@@ -75,6 +80,7 @@ def render_clip(
     log_to_console: bool = True,
     encoder_name: str | None = None,
     encoder_args: list[str] | None = None,
+    quality: VideoQuality | None = None,
 ) -> bool:
     """Extract a time window from a video file as an MP4 clip.
 
@@ -97,7 +103,7 @@ def render_clip(
     temp_path.unlink(missing_ok=True)
 
     if encoder_args is None:
-        enc_name, enc_args = get_video_encoder(encoder_name or "auto")
+        enc_name, enc_args = get_video_encoder(encoder_name or "auto", quality=quality)
     else:
         enc_name = encoder_name or "custom"
         enc_args = encoder_args
@@ -143,7 +149,7 @@ def render_clip(
 
     if result.returncode != 0:
         temp_path.unlink(missing_ok=True)
-        fallback = get_fallback_encoder(enc_name)
+        fallback = get_fallback_encoder(enc_name, quality=quality)
         if fallback:
             fb_name, fb_args = fallback
             logger.warning(
@@ -162,6 +168,7 @@ def render_clip(
                 log_to_console=log_to_console,
                 encoder_name=fb_name,
                 encoder_args=fb_args,
+                quality=quality,
             )
         logger.warning(
             "FFmpeg failed for %s: %s",
@@ -194,6 +201,7 @@ def render_detections(
     validate_existing: bool = True,
     rendered_cache: set[str] | None = None,
     encoder_name: str | None = None,
+    quality: VideoQuality | None = None,
 ) -> tuple[int, int]:
     """Render detection windows into standalone MP4 clips.
 
@@ -227,10 +235,10 @@ def render_detections(
         start_time = float(det.get("start_time", 0))
         end_time = float(det.get("end_time", start_time + 5))
         subject = slugify(det.get("subject", "unknown"))
-        quality = det.get("quality_score", 0)
+        quality_score = det.get("quality_score", 0)
         clip_id = slugify(str(det.get("clip_id", f"clip{i}")))
 
-        output_name = f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_{subject}_q{quality}.mp4"
+        output_name = f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_{subject}_q{quality_score}.mp4"
         output_path = highlights_dir / output_name
 
         if rendered_cache is not None and output_name in rendered_cache:
@@ -288,6 +296,8 @@ def render_detections(
             kwargs["log_to_console"] = False
         if encoder_name is not None:
             kwargs["encoder_name"] = encoder_name
+        if quality is not None:
+            kwargs["quality"] = quality
         ok = render_clip(source_path, start_time, end_time, output_path, **kwargs)
 
         if ok:
@@ -375,13 +385,17 @@ def main() -> None:
 
     logger.info("Rendering %d detection clips to %s", len(detections), highlights_dir)
 
+    quality = resolve_video_quality(config)
+
     state: PipelineState | None = None
     if args.state_path is not None:
         state = PipelineState(args.state_path)
         state.mark_step_started("render")
 
     try:
-        rendered, failed = render_detections(detections, highlights_dir, state=state)
+        rendered, failed = render_detections(
+            detections, highlights_dir, state=state, quality=quality
+        )
     except KeyboardInterrupt:
         logger.warning("\nRender interrupted by user (Ctrl+C).")
         if state is not None:

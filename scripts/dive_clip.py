@@ -33,6 +33,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils.checkpoint import PipelineState  # noqa: E402
 from utils.config import ConfigError, load_config, load_general_config  # noqa: E402
+from utils.encoder import resolve_video_quality  # noqa: E402
 from utils.logging_setup import configure_logging, get_console  # noqa: E402
 from utils.models import (  # noqa: E402
     ClassificationOutput,
@@ -49,6 +50,7 @@ from utils.run_archive import (  # noqa: E402
     get_run_dir,
     resolve_assembly_artifacts,
     resolve_run_dir,
+    update_artifact_symlink,
     update_latest_symlink,
 )
 from utils.signals import setup_signal_handlers  # noqa: E402
@@ -116,6 +118,7 @@ def _run_background_render_worker(
     detections_path: Path,
     highlights_dir: Path,
     stop_event: threading.Event,
+    quality: Any = None,
 ) -> None:
     """Periodically inspect detections_refined.json and render newly detected clips."""
     try:
@@ -150,6 +153,7 @@ def _run_background_render_worker(
                         log_to_console=False,
                         stop_event=stop_event,
                         rendered_cache=rendered_cache,
+                        quality=quality,
                     )
             except Exception as exc:
                 logger.debug("Background render check: %s", exc)
@@ -362,9 +366,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not state.is_step_done("scan") or not detections_path.exists():
         state.mark_step_started("scan")
         stop_render_event = threading.Event()
+        try:
+            render_quality = resolve_video_quality(load_config(config, default_to_empty=True))
+        except ConfigError:
+            render_quality = None
         render_thread = threading.Thread(
             target=_run_background_render_worker,
-            args=(detections_path, highlights_dir, stop_render_event),
+            args=(detections_path, highlights_dir, stop_render_event, render_quality),
             daemon=True,
         )
         render_thread.start()
@@ -429,13 +437,16 @@ def cmd_scan(args: argparse.Namespace) -> int:
         assemble_mode = getattr(args, "assemble_mode", None) or "aftermovie"
         top_n = _resolve_top_n(args, config)
         if assemble_mode == "simple":
-            assembled_video_path = output_folder / "highlight_reel.mp4"
+            assembled_name = "highlight_reel.mp4"
             assemble_script = SCRIPTS_DIR / "06_assemble_video.py"
             step_4_desc = f"Step 4/{total_steps}: Assemble highlight video"
         else:
-            assembled_video_path = output_folder / "aftermovie.mp4"
+            assembled_name = "aftermovie.mp4"
             assemble_script = SCRIPTS_DIR / "07_create_aftermovie.py"
             step_4_desc = f"Step 4/{total_steps}: Assemble aftermovie"
+        # The assembled video belongs inside the run directory so each run is
+        # self-contained; a convenience symlink from the output folder points at it.
+        assembled_video_path = run_dir / assembled_name
 
         assemble_cmd = [
             sys.executable,
@@ -474,6 +485,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             state.mark_step_done("assemble")
         else:
             logger.info("%s — SKIPPED (already done)", step_4_desc)
+        update_artifact_symlink(output_folder, run_dir, assembled_name)
 
     pipeline_elapsed = time.perf_counter() - pipeline_start_time
 
@@ -569,7 +581,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
         detections_path=detections_path,
         log_file=log_path,
         stats_path=stats_path,
-        aftermovie_path=assembled_video_path,
     )
     update_latest_symlink(output_folder, run_dir)
 
@@ -601,11 +612,22 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refresh_artifact_symlink(output_dir: Path, run_dir: Path, output_path: Path) -> None:
+    """Point `<output_dir>/<name>` at the run artifact written by `output_path`.
+
+    Only applies when the render target already lives inside the run directory;
+    an explicit `--output` path chosen elsewhere is left untouched.
+    """
+    if output_path.resolve() != (run_dir / output_path.name).resolve():
+        return
+    update_artifact_symlink(output_dir, run_dir, output_path.name)
+
+
 def resolve_assembly_inputs(
     args: argparse.Namespace,
     default_filename: str,
-) -> tuple[Path, Path, Path, Path | None] | None:
-    """Resolve detections path, clips dir, output path, and latest run dir for assembly."""
+) -> tuple[Path, Path, Path, Path | None, Path] | None:
+    """Resolve detections path, clips dir, output path, latest run dir, and output dir."""
     try:
         general = load_general_config(args.config)
     except ConfigError as exc:
@@ -620,7 +642,7 @@ def resolve_assembly_inputs(
             output_dir = output_path
             output_path = output_dir / default_filename
     else:
-        output_path = output_dir / default_filename
+        output_path = None
 
     detections_path, clips_dir, latest_run = resolve_assembly_artifacts(
         output_dir,
@@ -628,7 +650,13 @@ def resolve_assembly_inputs(
         clips_dir=getattr(args, "clips_dir", None),
     )
 
-    return detections_path, clips_dir, output_path, latest_run
+    if output_path is None:
+        # Keep each run self-contained: default the artifact into the run
+        # directory when one is resolvable, otherwise fall back to output_dir.
+        base_dir = latest_run if latest_run is not None else output_dir
+        output_path = base_dir / default_filename
+
+    return detections_path, clips_dir, output_path, latest_run, output_dir
 
 
 def _resolve_aftermovie_setting(
@@ -672,7 +700,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     resolved = resolve_assembly_inputs(args, "highlight_reel.mp4")
     if resolved is None:
         return 1
-    detections_path, clips_dir, output_path, latest_run = resolved
+    detections_path, clips_dir, output_path, latest_run, output_dir = resolved
 
     top_n = _resolve_top_n(args, args.config)
     cmd = [
@@ -697,7 +725,10 @@ def cmd_assemble(args: argparse.Namespace) -> int:
 
     rc = run(cmd, "Assemble highlight video")
     if rc == 0 and latest_run is not None:
+        # archive_run_artifacts skips the copy when the artifact already lives in
+        # the run directory; it only pulls top-level outputs inwards.
         archive_run_artifacts(latest_run, aftermovie_path=output_path)
+        _refresh_artifact_symlink(output_dir, latest_run, output_path)
     return rc
 
 
@@ -706,7 +737,7 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
     resolved = resolve_assembly_inputs(args, "aftermovie.mp4")
     if resolved is None:
         return 1
-    detections_path, clips_dir, output_path, latest_run = resolved
+    detections_path, clips_dir, output_path, latest_run, output_dir = resolved
 
     top_n = _resolve_top_n(args, args.config)
     music_volume = _resolve_aftermovie_setting(
@@ -744,6 +775,7 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
     rc = run(cmd, "Create aftermovie")
     if rc == 0 and latest_run is not None:
         archive_run_artifacts(latest_run, aftermovie_path=output_path)
+        _refresh_artifact_symlink(output_dir, latest_run, output_path)
     return rc
 
 

@@ -392,3 +392,242 @@ def test_aftermovie_main_forwards_selection_config(tmp_path: Path) -> None:
 
     assert called_kwargs.get("lambda_quality") == 0.72
     assert called_kwargs.get("max_per_clip") == 3
+
+
+def _shared_clip_id_detections(tmp_path: Path) -> dict:
+    """Two highlight windows cut from the same source file (same clip_id)."""
+    source = tmp_path / "source1.mp4"
+    source.touch()
+    return {
+        "detections": [
+            {
+                "clip_id": "clip_152836c2cf4cd5ff",
+                "file_name": "dive1.mp4",
+                "file_path": str(source),
+                "start_time": 10.0,
+                "end_time": 15.0,
+                "subject": "turtle",
+                "quality_score": 9,
+                "confidence": 0.9,
+            },
+            {
+                "clip_id": "clip_152836c2cf4cd5ff",
+                "file_name": "dive1.mp4",
+                "file_path": str(source),
+                "start_time": 30.0,
+                "end_time": 34.0,
+                "subject": "turtle",
+                "quality_score": 8,
+                "confidence": 0.8,
+            },
+        ]
+    }
+
+
+def _run_aftermovie_main(tmp_path: Path, detections: dict) -> tuple[list[Path], list[Path]]:
+    """Run aftermovie main and capture rendered targets plus concatenated clip list."""
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(json.dumps(detections))
+
+    highlights_dir = tmp_path / "outputs" / "highlights"
+    highlights_dir.mkdir(parents=True, exist_ok=True)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
+
+    rendered: list[Path] = []
+    concatenated: list[Path] = []
+
+    def mock_render(source, start, end, output, *args, **kwargs):
+        rendered.append(Path(output))
+        Path(output).touch()
+        return True
+
+    def mock_concat(clips, out, *args, **kwargs):
+        concatenated.extend(Path(c) for c in clips)
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).touch()
+        return True
+
+    original_argv = sys_module.argv
+    original_exit = sys_module.exit
+    original_cwd = Path.cwd()
+
+    try:
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "aftermovie.mp4"),
+            "--config",
+            str(config_path),
+            "--top-n",
+            "2",
+        ]
+        sys_module.exit = lambda code=0: None
+        os.chdir(tmp_path)
+
+        mock_subproc = MagicMock(returncode=0, stdout="5.0\n", stderr="")
+
+        with (
+            patch.object(aftermovie.subprocess, "run", return_value=mock_subproc),
+            patch.object(aftermovie, "render_clip_with_fade", side_effect=mock_render),
+            patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
+        ):
+            aftermovie.main()
+    finally:
+        sys_module.argv = original_argv
+        sys_module.exit = original_exit
+        os.chdir(original_cwd)
+
+    return rendered, concatenated
+
+
+def test_aftermovie_shared_clip_id_renders_distinct_temp_files(tmp_path: Path) -> None:
+    """Detections sharing a clip_id must not overwrite each other's intermediate files."""
+    rendered, concatenated = _run_aftermovie_main(tmp_path, _shared_clip_id_detections(tmp_path))
+
+    assert len(rendered) == 2
+    assert len(set(rendered)) == 2
+    assert len(concatenated) == 2
+    assert len(set(concatenated)) == 2
+
+
+def test_aftermovie_cuts_fades_directly_from_source(tmp_path: Path) -> None:
+    """Each highlight window should be cut and faded from the original source in one pass."""
+    detections = _shared_clip_id_detections(tmp_path)
+
+    highlights_dir = tmp_path / "outputs" / "highlights"
+    highlights_dir.mkdir(parents=True, exist_ok=True)
+    (highlights_dir / "clip_152836c2cf4cd5ff_10.0s-15.0s_turtle_q9.mp4").write_text("pre-rendered")
+
+    calls: list[tuple[Path, float, float]] = []
+
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(json.dumps(detections))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
+
+    def mock_render(source, start, end, output, *args, **kwargs):
+        calls.append((Path(source), float(start), float(end)))
+        Path(output).touch()
+        return True
+
+    def mock_concat(clips, out, *args, **kwargs):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).touch()
+        return True
+
+    original_argv = sys_module.argv
+    original_exit = sys_module.exit
+    original_cwd = Path.cwd()
+
+    try:
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "aftermovie.mp4"),
+            "--config",
+            str(config_path),
+            "--top-n",
+            "2",
+        ]
+        sys_module.exit = lambda code=0: None
+        os.chdir(tmp_path)
+
+        mock_subproc = MagicMock(returncode=0, stdout="5.0\n", stderr="")
+
+        with (
+            patch.object(aftermovie.subprocess, "run", return_value=mock_subproc),
+            patch.object(aftermovie, "render_clip_with_fade", side_effect=mock_render),
+            patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
+        ):
+            aftermovie.main()
+    finally:
+        sys_module.argv = original_argv
+        sys_module.exit = original_exit
+        os.chdir(original_cwd)
+
+    source_path = Path(detections["detections"][0]["file_path"])
+    assert len(calls) == 2
+    assert all(src == source_path for src, _, _ in calls)
+    assert calls[0][1:] == (10.0, 15.0)
+    assert calls[1][1:] == (30.0, 34.0)
+
+
+def test_aftermovie_falls_back_to_prerendered_clip_when_source_missing(tmp_path: Path) -> None:
+    """Missing source footage should fall back to the pre-rendered clip in clips_dir."""
+    missing_source = tmp_path / "gone.mp4"
+    detections = {
+        "detections": [
+            {
+                "clip_id": "clip001",
+                "file_name": "gone.mp4",
+                "file_path": str(missing_source),
+                "start_time": 10.0,
+                "end_time": 15.0,
+                "subject": "turtle",
+                "quality_score": 9,
+                "confidence": 0.9,
+            }
+        ]
+    }
+
+    highlights_dir = tmp_path / "outputs" / "highlights"
+    highlights_dir.mkdir(parents=True)
+    (highlights_dir / "clip001_10.0s-15.0s_turtle_q9.mp4").write_text("pre-rendered")
+
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(json.dumps(detections))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('general:\n  output_dir: "./outputs"\n')
+
+    sources: list[Path] = []
+
+    def mock_render(source, start, end, output, *args, **kwargs):
+        sources.append(Path(source))
+        Path(output).touch()
+        return True
+
+    def mock_concat(clips, out, *args, **kwargs):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).touch()
+        return True
+
+    original_argv = sys_module.argv
+    original_exit = sys_module.exit
+    original_cwd = Path.cwd()
+
+    try:
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "aftermovie.mp4"),
+            "--config",
+            str(config_path),
+            "--top-n",
+            "1",
+        ]
+        sys_module.exit = lambda code=0: None
+        os.chdir(tmp_path)
+
+        mock_subproc = MagicMock(returncode=0, stdout="5.0\n", stderr="")
+
+        with (
+            patch.object(aftermovie.subprocess, "run", return_value=mock_subproc),
+            patch.object(aftermovie, "render_clip_with_fade", side_effect=mock_render),
+            patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
+        ):
+            aftermovie.main()
+    finally:
+        sys_module.argv = original_argv
+        sys_module.exit = original_exit
+        os.chdir(original_cwd)
+
+    assert len(sources) == 1
+    assert sources[0].name == "clip001_10.0s-15.0s_turtle_q9.mp4"

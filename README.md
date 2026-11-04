@@ -1,57 +1,366 @@
 # 🌊 Dive Clip TUI
 
-Local-first video curation for dive and motorcycle footage. Point the pipeline
-at a folder of videos, use Ollama and FFmpeg to find interesting moments, and
-render the detections as standalone MP4 clips. DaVinci Resolve is optional:
-the existing EDL/CSV marker workflow is still available for editors who want it.
+Local-first video curation for dive and motorcycle footage. Point it at a folder
+of videos, let Ollama and FFmpeg find the interesting moments, and get back
+standalone MP4 clips or a watchable highlight reel.
 
-The project is CLI-first. The existing Textual terminal UI (TUI) is an
-unmaintained prototype; future UI work will start from scratch. The core scan
-flow does not require cloud uploads, a subscription, API keys, or DaVinci Resolve.
+The core flow needs no cloud, no subscription, no API keys, and no DaVinci
+Resolve. The bundled Textual TUI is an unmaintained prototype; future UI work
+starts from scratch.
+
+## Contents
+
+- [Requirements](#requirements) - [Installation](#installation) - [Quick start](#quick-start)
+- [Commands](#commands): [scan](#dive-clip-scan) - [classify](#dive-clip-classify) - [assemble / aftermovie](#dive-clip-assemble-and-dive-clip-aftermovie) - [review](#dive-clip-review) - [shared options](#options-shared-by-every-command)
+- [Configuration](#configuration): [precedence](#what-wins) - [reference](#configuration-reference) - [VLM providers](#choosing-a-vlm-provider) - [domains](#domains-and-prompt-templates)
+- [How the pipeline works](#how-the-pipeline-works)
+- [Outputs, run archives, and resuming](#outputs-run-archives-and-resuming)
+- [Tuning and troubleshooting](#tuning-and-troubleshooting)
+- [Optional: DaVinci Resolve markers](#optional-davinci-resolve-markers)
+- [Legacy terminal UI](#legacy-terminal-ui) - [Repository structure](#repository-structure) - [Contributing](#contributing-changes-and-releases)
 
 ## Requirements
 
 - Python 3.14+
-- [FFmpeg](https://ffmpeg.org/) and `ffprobe`
-- [Ollama](https://ollama.com/) with `qwen2.5-vl:7b` available locally
-- Enough memory and GPU resources for the selected vision model; a CUDA GPU
-  with 12 GB VRAM is recommended for the configured model. NVIDIA GPUs with NVENC
-  support are automatically leveraged for hardware-accelerated video rendering.
-- DaVinci Resolve only if you want to use the optional Resolve export/import flow
+- [FFmpeg](https://ffmpeg.org/) and `ffprobe` on `PATH`
+- [Ollama](https://ollama.com/) with a vision model pulled locally —
+  `ollama pull qwen2.5vl:3b` matches the default config. Swap the model via
+  `ollama.model`, or use a cloud VLM instead (see
+  [Choosing a VLM provider](#choosing-a-vlm-provider)).
+- Enough memory and GPU for the chosen model; a CUDA GPU with 12 GB VRAM is
+  recommended. NVIDIA NVENC is used automatically for rendering.
+- DaVinci Resolve only for the optional [marker export](#optional-davinci-resolve-markers).
+
+NumPy and Pillow are not required — the screening funnel's image math is pure Python.
 
 ## Installation
 
-Install dependencies with [uv](https://docs.astral.sh/uv/):
-
 ```bash
 uv sync
-ollama pull qwen2.5-vl:7b
+ollama pull qwen2.5vl:3b
 ```
 
-Alternatively, install with pip:
+Or with pip (requires Python 3.14+):
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3.14 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Review `config.yaml` before scanning. In particular, set `general.output_dir`
-and the Ollama model/host. Optionally set `general.input_dir` to the footage
-folder so `dive-clip scan` can run without `--input`.
+Then review [`config.yaml`](config.yaml). At minimum set `general.output_dir` and
+your Ollama model or host; every option is documented under
+[Configuration](#configuration).
 
-### Using a cloud VLM (OpenRouter)
+Copy [`.env.example`](.env.example) to `.env` only if you plan to use a cloud VLM.
+`.env` is git-ignored and read from the config file's folder or the working
+directory; variables already set in your shell win over it.
 
-Ollama is the default. To run the scan on an OpenRouter vision model instead, set the
-API key and select the provider in `config.yaml`:
+## Quick start
+
+```bash
+# Scan a folder and render the detected highlights as clips
+uv run dive-clip scan --input ./footage --output ./highlights
+
+# Same, plus a single highlight video with music under it
+uv run dive-clip scan --input ./footage --output ./highlights \
+  --assemble --music ./track.mp3
+
+# Play the clips back and record which ones were good
+uv run dive-clip review
+```
+
+> [!CAUTION]
+> Keep the input and output folders separate and non-nested. Ingestion walks the
+> input folder recursively, so an output folder placed inside it (such as
+> `./footage/highlights`) gets picked up as more footage on the next run and
+> silently inflates the manifest. Use siblings, for example `./footage` and
+> `./highlights`, not `./footage` and `./footage/highlights`.
+
+## Commands
+
+| Command | What it does | Uses the VLM |
+| --- | --- | --- |
+| [`scan`](#dive-clip-scan) | Ingest → screen → coarse/fine scan → render clips (→ optional assemble) | yes |
+| [`classify`](#dive-clip-classify) | Pass 0 only: label domains and usability, no highlight detection | yes |
+| [`assemble`](#dive-clip-assemble-and-dive-clip-aftermovie) / [`aftermovie`](#dive-clip-assemble-and-dive-clip-aftermovie) | Cut existing clips into one video, plain or with music and fades | no |
+| [`review`](#dive-clip-review) | Play clips back and record keep/reject feedback | no |
+
+`assemble` and `aftermovie` only read existing run artifacts, so re-cutting with a
+different `--top-n` costs nothing in scanning.
+
+### `dive-clip scan`
+
+```bash
+uv run dive-clip scan --input ./footage --output ./highlights
+```
+
+Runs the full pipeline. Each step records its progress in the run directory, so an
+interrupted run resumes rather than restarting.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--input PATH` | `general.input_dir` | Footage folder, walked recursively |
+| `--output PATH` | `general.output_dir` | Output folder for runs, clips, and logs |
+| `--resume [RUN_ID_OR_PATH]` | latest run | Resume a run; bare flag resumes the newest |
+| `--reset` | off | Clear saved pipeline state and start fresh |
+| `--assemble` | off | Add an assembly step after rendering |
+| `--assemble-mode {aftermovie,simple}` | `aftermovie` | `aftermovie` = music/fades (`07`), `simple` = plain concat (`06`) |
+| `--music PATH` | none | Music bed; ignored by `--assemble-mode simple` |
+| `--top-n N` | `aftermovie.top_n_clips`, else `10` | Clips to include when assembling |
+| `--classifications PATH` | none | Reuse confident domain labels from a previous `classify` run |
+| `--config`, `--debug`, `--log-file` | — | [Shared options](#options-shared-by-every-command) |
+
+`Ctrl-C` (or `SIGINT`/`SIGTERM`) is clean: completed detections are kept,
+checkpoint progress is flushed, and temporary frames are removed.
+
+### `dive-clip classify`
+
+Pass 0 only — label a disorganized folder without looking for highlights:
+
+```bash
+uv run dive-clip classify --input ./footage --output ./outputs
+```
+
+Each clip gets a domain (`underwater`, `motorcycle`, `generic`, or a custom one), a
+mean confidence, a usability verdict, and uncertainty flags (frames disagree,
+confidence below 0.6, or unusable VLM replies). Sampling is targeted seeking, not
+full decode: `classify_frames_count` frames minimum plus one per
+`classify_interval_seconds`, capped at `classify_frames_max`.
+
+Results land in `<output>/runs/run-<timestamp>/classifications.json`, are mirrored
+to `<output>/classifications.json`, and are written atomically after each clip, so
+`--resume` works mid-run. Feed them into a later scan with
+`dive-clip scan --classifications <path>`: confident labels are reused by
+`clip_id`, uncertain ones are re-evaluated.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--input PATH` | `general.input_dir` | Footage folder |
+| `--output PATH` | `<general.output_dir>/classifications.json` | Classification output path |
+| `--resume` | off | Continue an interrupted classification run |
+| `--specialize-generic` | off | Synthesize a reviewable prompt candidate for `generic` clips |
+| `--candidate-output PATH` | `<output_dir>/prompt_candidates.json` | Candidate path; requires `--specialize-generic` |
+| `--config`, `--debug`, `--log-file` | — | [Shared options](#options-shared-by-every-command) |
+
+Candidates are never picked up automatically — copy them into `config.yaml`
+yourself once you are happy with them.
+
+### `dive-clip assemble` and `dive-clip aftermovie`
+
+Both cut existing clips into one video; `aftermovie` adds music, fades, and
+transitions.
+
+```bash
+uv run dive-clip assemble   --output ./outputs --top-n 8
+uv run dive-clip aftermovie --output ./outputs --music ./track.mp3
+```
+
+| Option | `assemble` | `aftermovie` |
+| --- | --- | --- |
+| `--input PATH` | `<output>/latest/detections_refined.json` | same |
+| `--clips-dir PATH` | `<output>/latest/highlights` (or `<output>/highlights`) | same |
+| `--output PATH` | `<output>/highlight_reel.mp4` | `<output>/aftermovie.mp4` |
+| `--top-n N` | `10` or config | same |
+| `--music PATH` | — | music bed |
+| `--music-volume F` | — | `0.15`, or `aftermovie.music_volume` |
+| `--fade-duration S` | — | `1.0`, or `aftermovie.fade_duration` |
+| `--config`, `--debug`, `--log-file` | [shared](#options-shared-by-every-command) | [shared](#options-shared-by-every-command) |
+
+### `dive-clip review`
+
+```bash
+uv run dive-clip review                                  # latest run
+uv run dive-clip review --run run-20261031-120000        # a specific run
+uv run dive-clip review --all                            # re-review everything
+```
+
+Each clip opens in the platform player while the terminal prompts: `[k]eep`,
+`[r]eject`, `[w]rong subject` (prompts for the correction), `[s]kip`, `[b]ack`,
+`[q]uit`. Feedback is saved atomically to `<run_dir>/feedback.json` after every
+answer, and the closing summary lists decision counts plus every subject
+correction — useful evidence for prompt refinement.
+
+### Options shared by every command
+
+- `--config PATH` — config file to load (default `config.yaml`).
+- `--debug` — per-frame verdicts, Ollama request timing and token counts, full
+  FFmpeg command lines.
+- `--log-file PATH` — transcript location; defaults to a timestamped file in the
+  run directory. Older logs are never deleted.
+- `-h` / `--help` — the authoritative, always-current option list.
+  `dive-clip --version` prints the package version.
+
+## Configuration
+
+### What wins
+
+Commands load a single configuration file. When a setting is specified across
+multiple layers, the following precedence applies:
+
+| Setting | Highest | Then | Then |
+| --- | --- | --- | --- |
+| Footage folder | `--input` | `general.input_dir` | — |
+| Output folder | `--output` | `general.output_dir` | — |
+| Ollama server | `OLLAMA_HOST` | `ollama.host` | `http://localhost:11434` |
+| API keys | shell environment | `.env` file | — |
+| Clip count | `--top-n` | `aftermovie.top_n_clips` | `10` |
+| Music level | `--music-volume` | `aftermovie.music_volume` | `0.15` |
+| Fade length | `--fade-duration` | `aftermovie.fade_duration` | `1.0` |
+| Everything else | the config file | built-in default | — |
+
+A missing `http://` scheme on the Ollama host is added for you. The resolved output
+folder is handed to every pipeline step, so flags and config cannot drift apart
+mid-run.
+
+> [!NOTE]
+> `load_config()` only checks that the file parses as YAML with a mapping at the top
+> level. Unknown keys are silently ignored, missing keys fall back to per-consumer
+> defaults, and the tables below are maintained by hand rather than generated — a
+> typo fails quietly. Keep `config.yaml` in version control and review diffs.
+
+### Configuration reference
+
+[`config.yaml`](config.yaml) is the canonical, fully commented example. Sections
+marked *optional* are absent from the tracked file and only take effect once you
+add them.
+
+**`general`**
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `project_name` | `"Madagascar_Dives_2026"` | Label recorded in the Resolve manifest; the folder CLI uses the folder name |
+| `input_dir` | none | Footage folder used when `--input` is omitted |
+| `output_dir` | `./outputs` | Output folder used when `--output` is omitted |
+
+**`ollama`**
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `host` | `http://localhost:11434` | Ollama server; `OLLAMA_HOST` overrides it |
+| `model` | `qwen2.5vl:3b` | Vision model for Pass 0/1/2 |
+| `timeout_seconds` | `120` | Per-request timeout |
+
+**`vlm`**
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `provider` | `ollama` | `ollama` or `openrouter` |
+| `openrouter.model` | `nvidia/nemotron-3.5-super-vl:free` | Cloud vision model |
+| `openrouter.timeout_seconds` | `120` | Per-request timeout |
+| `openrouter.requests_per_minute` | `20` | Client-side rate limit |
+| `openrouter.max_retries` | `3` | Retries on HTTP 429/5xx with exponential backoff |
+
+Any other `provider` value fails at startup with the list of supported backends.
+
+**`scan_parameters`**
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `domain` | `"auto"` | `auto` lets Pass 0 classify each clip; or force `underwater`, `motorcycle`, `generic` |
+| `classify_clips` | `"auto"` | `auto` = run Pass 0 unless the domain is pinned or tags exist; `always`; `off` |
+| `classify_frames_count` | `3` | Minimum Pass 0 sample frames per clip |
+| `classify_interval_seconds` | `300` | One extra Pass 0 frame per this many seconds |
+| `classify_frames_max` | `8` | Maximum Pass 0 sample frames per clip |
+| `prefetch_coarse` | `true` | Extract clip N+1's coarse frames while clip N runs inference |
+| `video_encoder` | `"auto"` | `auto` probes `h264_nvenc` then falls back to `libx264`; or force either |
+| `video_quality.cq` | `19` | NVENC constant-quality level applied to every encode (lower = better/bigger) |
+| `video_quality.crf` | `19` | `libx264` CRF level applied to every encode (lower = better/bigger) |
+| `coarse_fps` | `0.25` | Pass 1 sample rate (one frame every 4 s) |
+| `coarse_scale` | `"426:-2"` | Downscale for cheap Pass 1 screening |
+| `fine_fps` | `1.0` | Pass 2 sample rate inside candidate windows |
+| `fine_scale` | `"1280:-2"` | Pass 2 resolution (`"iw/2:-2"` for half, `"null"` for none) |
+| `coarse_confidence_threshold` | `0.80` | Minimum confidence to open a fine-scan window |
+| `coarse_quality_threshold` | `4` | Minimum 1–10 score to keep a coarse frame (rejects dangling/upside-down) |
+| `fine_padding_seconds` | `2` | Extra context around a detected action |
+| `fine_pre_roll_seconds` | `1.5` | Lead-in before a fine highlight |
+| `fine_post_roll_seconds` | `2.0` | Tail after a fine highlight |
+| `merge_gap_seconds` | `1.5` | Merge same-subject detections across gaps this small |
+| `max_clip_duration` | `12.0` | Cap on a merged window, in seconds |
+| `quality_threshold` | `8` | Minimum 1–10 score for a detection to be kept |
+| `checkpoint_interval_frames` | `20` | Intra-clip resume checkpoint cadence |
+| `use_ramdisk` | `true` | Use `/dev/shm` for frames when available |
+
+`use_ramdisk` falls back to normal temporary storage on systems without `/dev/shm`
+(such as macOS) or when set to `false`.
+
+**`selection`** — which detections become clips.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `lambda_quality` | `0.65` | MMR trade-off: `0.0` pure diversity, `1.0` pure quality |
+| `per_clip_soft_limit` | `1` | Soft quota per source clip before an exponential penalty applies |
+
+Lower `lambda_quality` for more variety across a long trip; raise it when you only
+want the best moments even if they cluster in one file.
+
+**`prescreen`** — the pre-VLM screening funnel, described in
+[How the pipeline works](#pre-vlm-screening-funnel). It ships **disabled**: with
+`enabled: false` no extra FFmpeg pass runs and behaviour is unchanged.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `false` | Turn the funnel on at all |
+| `gate_mode` | `"advisory"` | `advisory` records gate failures but drops nothing; `enabled` rejects failing windows |
+| `sample_fps` | `0.5` | Frames per second sampled for visual metrics |
+| `sample_size` | `64` | Downscale samples to 64×64 for cheap luma/Laplacian math |
+| `keyframes_only` | `true` | Prefer keyframes, fall back to a full seek pass |
+| `audio_enabled` | `true` | Run the FFmpeg `astats` pass for peak levels |
+| `audio_spike_db` | `10.0` | dB above the rolling median that counts as a spike |
+| `audio_spike_floor_db` | `-35.0` | Absolute floor so steady quiet audio never reads as a spike |
+| `audio_window` | `5` | Rolling median window, in peak samples |
+| `blur_min` | `12.0` | Median Laplacian variance below this reads as soft or blurred |
+| `contact_sheet` | `false` | Opt-in 2×2 contact sheets: up to 4× fewer Pass 1 calls |
+| `weights.lean_speed` | `0.35` | Lean angle + speed magnitude |
+| `weights.gyro_stability` | `0.25` | Inverse of gyro RMS — steadier footage scores higher |
+| `weights.face` | `0.20` | Detected subject/face presence |
+| `weights.hue_change` | `0.20` | Colour churn across the window |
+| `gate_thresholds.yavg_min` | `15.0` | Mean luma below this is too dark to use |
+| `gate_thresholds.unif_max` | `0.92` | Luma uniformity above this is flat or fogged (1.0 is featureless) |
+| `gate_thresholds.gyro_max` | `3.5` | Gyro RMS above this is too shaky |
+| `domain_prior_thresholds.min_confidence` | `0.80` | Minimum Pass 0 confidence to trust a domain prior |
+| `domain_prior_thresholds.min_coverage` | `0.80` | Minimum Pass 0 coverage to trust a domain prior |
+
+Start at `gate_mode: "advisory"`, read `prescreen_trace.json`, then switch to
+`"enabled"` once you are satisfied the gates reject what you expect.
+
+**`cloud_storyline`** *(optional)* — used only by `scripts/04_plan_storyline.py`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `provider` | `"claude"` | `claude` or `gemini` |
+| `model` | `claude-3-5-sonnet-latest` | Model for story planning |
+| `target_edit_duration_minutes` | `4` | Target length of the planned edit |
+
+**`aftermovie`** *(optional)* — consulted only when the matching flag is absent.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `top_n_clips` | `10` | Default clip count |
+| `music_volume` | `0.15` | Default music mix level |
+| `fade_duration` | `1.0` | Default fade/transition length |
+
+**`prompts`** *(optional)* — custom domains and prompt templates, with a commented
+example at the bottom of [`config.yaml`](config.yaml).
+
+### Choosing a VLM provider
+
+**Local Ollama (default).** Uses the local instance specified in `ollama.model`
+without sending frames off-machine.
+
+**Remote Ollama.** `OLLAMA_HOST` overrides `ollama.host` without editing the
+tracked config:
+
+```bash
+export OLLAMA_HOST=plotter.local:11434
+uv run dive-clip scan --input ./footage --output ./highlights
+```
+
+**Cloud VLM (OpenRouter).** Set the key, then switch the provider:
 
 ```bash
 cp .env.example .env   # then set OPENROUTER_API_KEY in .env (git-ignored)
 # or: export OPENROUTER_API_KEY=sk-or-...
 ```
-
-`.env` is read from the config file's folder or the working directory; variables already
-set in your shell win over it.
 
 ```yaml
 vlm:
@@ -60,173 +369,175 @@ vlm:
     model: "nvidia/nemotron-3.5-super-vl:free"
 ```
 
-Requests are rate limited (`requests_per_minute`) and retried with backoff on HTTP
-429/5xx. Replies that are not pure JSON are recovered when they contain a JSON object.
-Free-tier models have their own quotas; managing them is up to you.
+Replies that are not pure JSON are recovered when they contain a JSON object. Free-tier
+models have their own quotas; managing them is up to you.
 
 > [!WARNING]
 > **Privacy:** with `provider: "openrouter"`, sampled video frames are uploaded to
 > OpenRouter and the model provider behind it. Nothing leaves your machine with the
-> default `ollama` provider. The scan logs a warning at startup when a cloud provider is
-> active.
+> default `ollama` provider. The scan logs a warning at startup when a cloud provider
+> is active.
 
-### Using a remote Ollama
+### Domains and prompt templates
 
-`OLLAMA_HOST` overrides `ollama.host` from the config file, so a remote server can
-be selected per run without editing the tracked config:
+Four domains ship by default: `underwater`, `motorcycle`, `generic`, and `auto`
+(meaning "let Pass 0 decide"). Each has its own screening prompt in
+`utils/prompt_templates.py`, and each candidate window is routed to a specialized
+rubric — `pelagics`, `macro`, `diver`, `moto_riding`, `moto_scenic`, `moto_group`,
+or `generic_highlight`.
 
-```bash
-export OLLAMA_HOST=plotter.local:11434
-uv run dive-clip scan --input ./footage --output ./highlights
-```
+Even in the `generic` domain the model keeps the concrete subject and action
+(`"downhill mountain bike jump"`, `"scenic mountain pass"`, `"dog catching
+frisbee"`), which makes it easy to discover what your footage contains and then add
+a template for it. Declare new domains and templates under `prompts:` in
+`config.yaml`.
 
-Precedence is `OLLAMA_HOST`, then `ollama.host` in the config file, then
-`http://localhost:11434`. A missing `http://` scheme is added automatically, so the
-scheme-less form the Ollama CLI accepts works here too.
+## How the pipeline works
 
-## Quick start: scan a footage folder
+`dive-clip scan` runs three steps, plus a fourth with `--assemble`:
 
-The single-command CLI chains folder ingestion, AI scanning, and clip rendering:
+| Step | Script | What happens |
+| --- | --- | --- |
+| 1. Ingest | `00_ingest_media.py` | `ffprobe` every video into `manifest.json` |
+| 2. Scan | `02_scan_footage.py` | Optional pre-VLM funnel, then Pass 0, 1, and 2 |
+| 3. Render | `05_render_clips.py` | Cut each detection window into an MP4 |
+| 4. Assemble | `06_`/`07_` | Only with `--assemble` |
 
-```bash
-uv run dive-clip scan --input ./footage --output ./highlights
-```
+### The three scan passes
 
-The scanner reads and writes its manifest and detections under the resolved
-output folder. `--output` takes precedence over `general.output_dir`, and the
-resolved folder is passed to every pipeline step, so the two can no longer drift
-apart. Likewise `--input` takes precedence over `general.input_dir`:
+1. **Pass 0 — classification and usability.** Targeted seeking (<0.5 s per clip)
+   instead of full decode. Assigns a domain and rejects unusable footage — camera in
+   a bag or pocket, covered lens, dangling on gear — so the rest of the scan skips it.
+2. **Pass 1 — coarse scan.** Samples at `coarse_fps` with a domain-specific prompt
+   that filters false positives while tagging subject and category. Coarse frames for
+   the next clip are prefetched in `/dev/shm` so the GPU stays busy.
+3. **Pass 2 — fine scan.** Each candidate window is routed to a specialized rubric
+   for precise quality scoring and deduplication.
 
-```bash
-# Footage and output folders both come from config.yaml
-uv run dive-clip scan
+Both passes end with a summary line at info level, so a normal run still reports how
+selective the coarse pass was and how many detections survived deduplication.
+Detections that clear `quality_threshold` become candidates; Maximal Marginal
+Relevance then picks the final set using `selection.lambda_quality`, so a long trip
+yields variety instead of ten near-identical shots.
 
-# Flags still override the config values
-uv run dive-clip scan --input ./footage --output ./highlights
-```
+### Pre-VLM screening funnel
 
-A custom config can be selected with `--config`.
+An optional cheap pass ahead of every VLM call that decides per candidate window
+whether to `keep`, `defer`, or `reject` it. Configured under `prescreen:`; off by
+default.
 
-> [!CAUTION]
-> Keep the input and output folders separate and non-nested. Ingestion walks the
-> input folder recursively, so an output folder placed inside it (such as
-> `./footage/highlights`) gets picked up as more footage on the next run and
-> silently inflates the manifest. Use sibling folders, for example `./footage`
-> and `./highlights`, not `./footage` and `./footage/highlights`.
+1. **Ingestion** — `00_ingest_media.py` probes every stream and records sensor tracks
+   and container hints in the manifest (`telemetry_type`, `has_telemetry`,
+   `is_high_fps`, `hilight_tags`, `bitrate_density`). GoPro `gpmf` telemetry is
+   decoded into timestamped series; the funnel consumes `SCEN`, `GYRO`,
+   `GPS5`/`GPS9`/`GPS2` speed, `CORI`/`IORI` orientation proxies, `YAVG`/`UNIF` luma,
+   and `FACE` presence. DJI and Insta360 tracks are detected but not yet decoded, so
+   they yield no score rather than a penalty.
+2. **HiLight tags** — GoPro `moov.udta.hmmt` markers are parsed out of the atom tree
+   and used to align screening windows, so per-window metrics land on moments a human
+   already marked. They do not create windows of their own; they are echoed into
+   every prescreen record.
+3. **Metrics** — one FFmpeg pass samples frames at `prescreen.sample_fps` for mean
+   luma, luma uniformity, Laplacian sharpness, and HSV histograms; a second `astats`
+   pass reads audio peaks and detects spikes above a rolling median.
+4. **Gates** — `yavg_min`, `unif_max`, `gyro_max`, and `blur_min` plus a weighted
+   telemetry score decide each window. Missing sensors never reject footage: a gate
+   with no signal reports `signal unavailable` and is skipped, and weights renormalize
+   over whichever signals exist.
 
-The command supports checkpointing and can resume completed steps:
+All image math is pure Python over FFmpeg `rgb24` bytes, so the funnel needs no NumPy
+or Pillow and stays optional.
 
-```bash
-uv run dive-clip scan --input ./footage --output ./highlights --resume
-```
+Opt into 2×2 contact sheets with `contact_sheet: true`: frames are composed into one
+2×2 image and a single VLM call returns up to four per-tile verdicts, cutting Pass 1
+calls up to 4×. Partial final batches, failed compositions, and unparseable sheet
+responses fall back to the per-frame path automatically, so the feature can only
+reduce calls, never detection coverage.
 
-Interrupting a scan with `Ctrl-C` (or `SIGINT`/`SIGTERM`) cleanly terminates processing: completed clip detections are preserved in `detections_refined.json`, checkpoint progress is flushed, and temporary working frames are deleted.
+### Performance features
 
-To start over and clear the saved pipeline state:
+- **Hardware encoding** — rendering probes `h264_nvenc` (`video_encoder: "auto"`) and
+  falls back to thread-capped `libx264`. Both paths use constant-quality rate control
+  (`video_quality.cq`/`.crf`, default 19) so 4K sources are not starved of bitrate.
+- **Fast input seeking** — `-ss`/`-to` precede `-i`, decoding only the target segment.
+- **Pipelined prefetch** — clip N+1's coarse frames extract while clip N runs
+  inference, bounded to one clip in memory.
+- **RAM disk** — frames go to `/dev/shm` when available, avoiding SSD write wear.
+- **Connection pooling** — one persistent `requests.Session()` per Ollama client.
 
-```bash
-uv run dive-clip scan --input ./footage --output ./highlights --reset
-```
+## Outputs, run archives, and resuming
 
-For verbose logging during long-running AI scanning and rendering, use `--debug`:
+### Run directory
 
-```bash
-uv run dive-clip scan --input ./footage --output ./highlights --debug
-```
+Pipeline runs produce a self-contained snapshot under `<output>/runs/<run_id>/`, with
+`<output>/latest` symlinked to the newest:
 
-This enables timestamped debug logs showing per-frame Ollama request timing,
-token counts, and full FFmpeg commands.
+| Artifact | Contents |
+| --- | --- |
+| `manifest.json` | Ingested clip metadata (container, duration, frame rate, telemetry hints) |
+| `pipeline_state.json` | Which steps finished, timings, current activity |
+| `detections_refined.json` | Final detections |
+| `classifications.json` | Pass 0 labels, when classification ran |
+| `prescreen_trace.json` | Per-window funnel decisions |
+| `pass1_coarse_trace.json` / `pass2_fine_trace.json` | Per-frame and per-window verdicts |
+| `selection_trace.json` | Which detections became clips, and why |
+| `run_stats.json` | Throughput, phase breakdown, highlight counts |
+| `run.log` | Transcript of the run |
+| `highlights/` | Rendered MP4 clips |
+| `feedback.json` | Review judgments, once you have run `review` |
 
-### 3-stage scanning & domain awareness
+Traces are mirrored next to the other outputs too. A scan ends by printing a Rich
+summary table and saving the same numbers to `run_stats.json`: total duration,
+throughput in FPS, Pass 0 domain counts, Pass 1 frames scanned, Pass 2 windows, and
+highlight counts.
 
-The scanner uses a 3-stage coarse-to-fine architecture:
-1. **Pass 0 (Video Classification & Usability)**: Uses fast targeted input seeking (<0.5s) to sample isolated frames across video duration (scaled dynamically: min 3, max 8, 1 frame per 5 min) without decoding full files. Classifies the clip domain (`underwater`, `motorcycle`, `generic`, or custom domains) and screens for unusable footage (camera inside a bag/pocket, covered lens, dangling on gear). Unusable or non-target clips exit immediately with terminal alerts, avoiding wasted coarse frame decoding and VLM calls.
-2. **Pass 1 (Domain Coarse Scan)**: Screens frames at low FPS (default: 0.25–0.5 FPS) using a domain-specific screening prompt that filters out false positives while tagging detected subjects and categories. Coarse frame extraction for upcoming clips is prefetched in the background in `/dev/shm` to keep the GPU saturated.
-3. **Pass 2 (Subject-Routed Fine Scan)**: Dynamically routes each highlight candidate window to a specialized rubric (such as `pelagics`, `macro`, `diver`, `moto_riding`, `moto_scenic`, `moto_group`, or `generic_highlight`) for precise quality scoring and deduplication.
+### Pipeline state file
 
-Even in the `generic` domain, the model identifies and preserves the concrete subject and action (e.g. `"downhill mountain bike jump"`, `"scenic mountain pass"`, `"dog catching frisbee"`) alongside detailed descriptions, making it easy to discover what subjects exist in your footage and add custom templates for them.
+Progress is saved after every clip and scan window. Intra-clip progress is
+checkpointed every `checkpoint_interval_frames` into `scan_checkpoint.json` inside
+each clip's temporary work directory, so an interrupted run over long files does not
+re-evaluate frames it already scanned.
 
-Custom domains and prompt templates can be configured or extended directly under `prompts:` in `config.yaml`.
+The state file keeps full run context (`run_id`, `input_dir`, `output_dir`,
+`config_path`) and timing:
 
-### Pre-VLM screening funnel (Stage C/D)
+| Field | Meaning |
+| --- | --- |
+| `updated_at` | Timestamp of the most recent save |
+| `activity`, `activity_at` | What the pipeline was doing, e.g. `scan: clip001.mp4 window 2/5 @30s` |
+| `<step>_done` | Whether `ingest`, `scan`, or `render` finished |
+| `<step>_started_at` / `<step>_finished_at` | Step start and end timestamps (UTC, ISO 8601) |
+| `<step>_duration_seconds` | Wall-clock duration of the completed step |
+| `<step>_progress` | Per-step list of completed clip names |
 
-Before a single frame reaches the VLM, an optional cheap screening pass can drop
-or defer candidate windows. It is off by default and configured under
-`prescreen:` in `config.yaml`.
+Saves merge with what is on disk, so the orchestrator and the scan and render workers
+can share one state path without clobbering each other.
 
-The funnel is the first stage of the scan, ahead of the three VLM passes:
-
-1. **Container & sensor ingestion** — `scripts/00_ingest_media.py` probes every
-   stream in the file, so per-file sensor tracks and container hints are recorded
-   in the manifest (`telemetry_type`, `has_telemetry`, `is_high_fps`,
-   `hilight_tags`, `bitrate_density`). GoPro `gpmf` telemetry is decoded into
-   timestamped signal series; the funnel consumes `SCEN` (scene codes), `GYRO`,
-   `GPS5`/`GPS9`/`GPS2` speed, `CORI`/`IORI` orientation proxies, `YAVG`/`UNIF`
-   camera luma, and `FACE` presence. DJI and Insta360 tracks are detected but not
-   yet decoded (they yield no score rather than a penalty).
-2. **HiLight tags** — GoPro `moov.udta.hmmt` HiLight markers are parsed straight
-   out of the MP4 atom tree into the manifest and used to align the screening
-   windows, so the per-window metrics land on the moments a human already marked.
-   Tags are also echoed into every prescreen record.
-3. **Visual + audio metrics** — one FFmpeg pass samples frames at
-   `prescreen.sample_fps` for mean luma, luma uniformity, Laplacian sharpness, and
-   HSV histograms; a second FFmpeg `astats` pass reads audio peak levels and
-   detects spikes above a rolling median.
-4. **Gate decision** — gates (`yavg_min`, `unif_max`, `gyro_max`, `blur_min`) and a
-   weighted telemetry score decide per window whether to `keep`, `defer`, or
-   `reject`. With `gate_mode: "advisory"` (the default) failures are recorded but
-   nothing is dropped; with `gate_mode: "enabled"` rejected windows never reach
-   the VLM. Missing sensors never reject footage — a gate with no signal reports
-   `signal unavailable` and is skipped.
-
-All image math is pure Python over FFmpeg `rgb24` bytes, so the funnel needs no
-NumPy or Pillow and stays optional: with `prescreen.enabled: false` no extra
-FFmpeg pass runs and behaviour is unchanged.
-
-Opt into 2x2 contact sheets with `prescreen.contact_sheet: true`. Frames are
-composed into a single 2x2 image and one VLM call returns up to four per-tile
-verdicts, cutting Pass 1 calls up to 4x. Partial final batches, failed
-compositions, and unparseable sheet responses fall back to the per-frame path
-automatically, so the feature can only reduce calls, never detection coverage.
-
-#### Inspecting `prescreen_trace.json`
-
-Each scan run writes `<run_dir>/prescreen_trace.json` (mirrored to
-`<output>/prescreen_trace.json`) with one record per candidate window — never one
-per raw sensor sample. Records carry the container signals, telemetry signals,
-audio/visual metrics, the configured thresholds, every gate outcome and reason,
-the score components and renormalized weights, the chosen action, and whether a
-VLM call followed. Use it to answer "why was this window skipped?" without
-re-running the scan; the same telemetry and HSV fields appear in
-`pass1_coarse_trace.json` and `selection_trace.json` when available, and old
-artifacts without them still load unchanged.
-
-### Running Pass 0 on its own (classify)
-
-To quickly classify an unorganized folder of unknown videos without running highlight detection:
-
-```bash
-uv run dive-clip classify --input ./footage --output ./outputs
-```
-
-Pass 0 samples targeted representative frames dynamically based on clip duration (configured via `scan_parameters.classify_frames_count`, default 3, plus 1 per 5 min up to `classify_frames_max`, default 8) to identify the domain and verify usability without scanning the entire video. Results display each clip's domain, mean confidence, usability status, and uncertainty flags (flagged when frames disagree, when confidence is below 0.6, or when VLM responses are unusable).
-
-Outputs are organized into standard timestamped runs (`<output>/runs/run-<timestamp>/classifications.json`) with an updated `<output>/latest` symlink and mirrored to `<output>/classifications.json`. Results are persisted incrementally and atomically after each clip completes, and interrupted runs can be resumed at any time with `--resume`.
-
-To synthesize a reviewable prompt candidate for `generic` clips, add `--specialize-generic` (optionally `--candidate-output <path.json>`; defaults to `prompt_candidates.json` next to the output). Candidates are never used by `dive-clip scan` until you copy them into your config yourself.
-
-#### Reusing classifications in later scans
-
-To reuse confident domain labels and avoid reclassifying clips in a full scan:
+### Resuming, resetting, logs
 
 ```bash
-uv run dive-clip scan --input ./footage --output ./highlights --classifications ./outputs/classifications.json
+uv run dive-clip scan --output ./highlights --resume                  # newest run
+uv run dive-clip scan --output ./highlights --resume run-20261031-120000
+uv run dive-clip scan --output ./highlights --reset                   # start over
 ```
 
-Confident labels are reused by matching `clip_id`. Any uncertain labels are skipped and re-evaluated by Pass 0 during the scan. Without `--classifications`, `dive-clip scan` runs normal Pass 0 domain classification as usual.
+Transcripts default to `<output>/runs/run-<timestamp>/run.log`, timestamped per run
+and never deleted, so long unattended batches stay inspectable; ingest, scan, and
+render all append to the same file. Override per run with `--log-file`, which the
+individual step scripts also accept.
 
-In debug mode the scanner also logs a verdict for every frame it analyzes, which
-is the main tool for tuning the confidence thresholds:
+## Tuning and troubleshooting
+
+Most tuning comes down to four knobs:
+
+| Symptom | Knob |
+| --- | --- |
+| Coarse pass too eager or too shy | `coarse_confidence_threshold`, `coarse_quality_threshold`, `coarse_fps` |
+| Windows too short or too long | `fine_pre_roll_seconds`, `fine_post_roll_seconds`, `merge_gap_seconds`, `max_clip_duration` |
+| Output repetitive or all from one file | `selection.lambda_quality`, `selection.per_clip_soft_limit` |
+| Domain misdetected on many clips | pin `scan_parameters.domain`, or add a domain under `prompts:` |
+
+`--debug` prints every frame verdict, which is the main tool for setting thresholds:
 
 ```text
 [Pass 0] Extracting frames @ 0.5 FPS: clip001.mp4
@@ -243,117 +554,41 @@ is the main tool for tuning the confidence thresholds:
 [Pass 2] Window 1 of 1: 20.0s-32.0s (12.0s) @ 1.0 FPS [template: pelagics, domain: underwater]
 ```
 
-Each pass ends with a summary line at info level, so a normal run (without
-`--debug`) still reports how selective the coarse pass was and how many
-detections survived deduplication. Use those numbers to adjust
-`coarse_confidence_threshold`, `coarse_fps`, and `fine_fps`.
+With the funnel enabled, `prescreen_trace.json` answers "why was this window
+skipped?" without re-running anything. It holds one record per candidate window —
+never per raw sensor sample — carrying container signals, telemetry signals,
+audio/visual metrics, the configured thresholds, every gate outcome and reason,
+score components with renormalized weights, the chosen action, and whether a VLM call
+followed.
 
-Every run also writes a transcript of its terminal output to
-`<output>/logs/run-<YYYYmmdd-HHMMSS>.log`. The file is timestamped per run and
-older runs are never deleted, so long unattended batches stay inspectable.
-Ingest, scan, and render all append to the same file. To pick the location
-yourself:
+To judge whether a classification run is trustworthy, read the uncertainty flags:
+disagreeing frames, mean confidence below 0.6, or unusable VLM replies. Uncertain
+labels are always re-evaluated rather than reused.
 
-```bash
-uv run dive-clip scan --input ./footage --output ./highlights --log-file ./my-run.log
-```
+## Optional: DaVinci Resolve markers
 
-The individual step scripts accept `--log-file` too, so a hand-run
-`scripts/02_scan_footage.py` can log somewhere other than the default output
-folder.
+For projects that use Resolve metadata or want timeline markers:
 
-The pipeline writes a JSON manifest, refined detections, rendered MP4 clips, and
-end-of-run statistics to the configured output location.
+1. In Resolve, open **Workspace → Console**, choose **Py3**, and run
+   `exec(open("scripts/01_extract_manifest.py").read())`.
+2. Scan the exported manifest: `uv run scripts/02_scan_footage.py --config config.yaml`.
+3. Generate EDL and CSV markers: `uv run scripts/03_generate_edl.py --config config.yaml`.
+4. Import `outputs/markers_import.edl` via **Timelines → Import → Timeline Markers
+   from EDL...**.
 
-### Pipeline state file & run archives
-
-`dive-clip scan` organizes each execution into a self-contained snapshot under
-`<output>/runs/<run_id>/` (with an `<output>/latest` symlink pointing to the most
-recent run). Each run directory contains `pipeline_state.json`, `manifest.json`,
-`detections_refined.json`, `run_stats.json`, `prescreen_trace.json`,
-`pass1_coarse_trace.json`, `run.log`, and the extracted `highlights/` clips.
-
-Progress is recorded in `pipeline_state.json` and saved after every clip and scan window.
-Additionally, intra-clip progress is checkpointed periodically (every `checkpoint_interval_frames`,
-default: 20) in `scan_checkpoint.json` inside each clip's temporary work directory, so an interrupted
-run on long video files resumes without re-evaluating previously scanned frames.
-
-The state file preserves full run context (`run_id`, `input_dir`, `output_dir`, `config_path`) and timing:
-
-| Field | Meaning |
-| --- | --- |
-| `updated_at` | Timestamp of the most recent save |
-| `activity`, `activity_at` | What the pipeline was doing at that save, e.g. `scan: clip001.mp4 window 2/5 @30s` |
-| `<step>_done` | Whether `ingest`, `scan`, or `render` finished |
-| `<step>_started_at` / `<step>_finished_at` | Step start and end timestamps (UTC, ISO 8601) |
-| `<step>_duration_seconds` | Wall-clock duration of the completed step |
-| `<step>_progress` | Per-step list of completed clip names |
-
-At the end of scanning, a Rich summary table is displayed in the terminal and saved to `run_stats.json`, detailing total run duration, throughput (FPS), phase breakdown (Pass 0 domain counts, Pass 1 frames scanned, Pass 2 windows), and highlight counts.
-
-To resume an interrupted or completed run:
-- `dive-clip scan --output ./outputs --resume`: Resumes the most recent run automatically, restoring footage path and settings.
-- `dive-clip scan --output ./outputs --resume run-20261031-120000`: Resumes or inspects a specific run folder.
-
-Saves merge with the existing file on disk, so the orchestrator and the scan and
-render workers can share one state path without overwriting each other's work.
-
-### Reviewing and recording clip feedback
-
-To review rendered highlight clips from a scan, open each in your default media player, and record judgments in the terminal:
-
-```bash
-uv run dive-clip review
-```
-
-Options:
-- `--run <RUN_ID_OR_PATH>`: Review a specific run ID or folder (defaults to the latest run)
-- `--all`: Re-review all clips in the run, including those with existing saved feedback
-
-For each clip, your platform's video player launches automatically while the terminal prompts for:
-- `[k]eep`: Highlight is accurate and worth keeping
-- `[r]eject`: False detection or unwanted highlight
-- `[w]rong subject`: Accurate highlight window but detected subject was wrong (prompts for corrected subject)
-- `[s]kip`: Skip this clip without recording feedback
-- `[b]ack`: Step back to the previous clip
-- `[q]uit`: Exit review and display feedback summary
-
-Feedback is saved atomically after each response to `<run_dir>/feedback.json`. When review ends, a summary table displays decision counts alongside all subject corrections and notes, providing concrete evidence for manual prompt refinement.
+You can also generate the EDL/CSV from a folder-ingested manifest; Resolve is never
+required for the local scan and render flow. The export supports frame-rate-aware
+timecodes, including 29.97 drop-frame and non-drop-frame.
 
 ## Legacy terminal UI
 
-The old Textual prototype remains available but is not maintained. It cannot
-complete the review-to-render workflow. Use the CLI for pipeline work; see the
-[product roadmap](docs/roadmap/roadmap.md) for future UI direction.
-
-To launch the legacy interface:
+The old Textual prototype is unmaintained and cannot complete the
+review-to-render workflow. Use the CLI for pipeline work; see the
+[product roadmap](docs/roadmap/roadmap.md) for where the UI is heading.
 
 ```bash
 uv run dive-clip-tui
 ```
-
-## Optional: DaVinci Resolve markers
-
-The original Resolve workflow remains available for projects that use Resolve
-metadata or want timeline markers:
-
-1. In Resolve, open **Workspace → Console**, choose **Py3**, and run:
-   ```python
-   exec(open("scripts/01_extract_manifest.py").read())
-   ```
-2. Scan the exported manifest:
-   ```bash
-   uv run scripts/02_scan_footage.py --config config.yaml
-   ```
-3. Generate EDL and CSV marker files:
-   ```bash
-   uv run scripts/03_generate_edl.py --config config.yaml
-   ```
-4. Import `outputs/markers_import.edl` into the desired Resolve timeline using
-   **Timelines → Import → Timeline Markers from EDL...**.
-
-You can also create the EDL/CSV files from a folder-ingested manifest; Resolve is
-not required to run the local scan and render flow.
 
 ## Repository structure
 
@@ -374,75 +609,40 @@ tui/
   screens/                 # Browse, review, and pipeline screens
 utils/
   checkpoint.py            # Pipeline checkpoint and intra-clip resume state
-  config.py                # Configuration loading and validation
+  config.py                # Configuration loading
   encoder.py               # Hardware encoder detection (NVENC) and CPU fallback
+  env.py                   # Minimal .env loader for secrets like OPENROUTER_API_KEY
   ffmpeg_streamer.py       # Frame sampling and temporary storage (/dev/shm)
   logging_setup.py         # Shared console and file logging setup
   models.py                # Pydantic manifest and detection models
   ollama_client.py         # Ollama API client and metrics
   prescreen.py             # Pre-VLM screening funnel: gates, metrics, trace records
-  telemetry.py             # GoPro GPMF / DJI / Insta360 telemetry decoding and scoring
-  vlm_client.py            # VLM client protocol, OpenRouter backend, provider factory
   prompt_templates.py      # Domain prompts and subject-routed templates
   run_archive.py           # Self-contained run snapshots and latest symlink
-  selection.py             # Maximal Marginal Relevance (MMR) highlight selection and diversity
+  selection.py             # Maximal Marginal Relevance (MMR) highlight selection
+  signals.py               # Graceful Ctrl-C / SIGTERM shutdown handling
   stats.py                 # Scan throughput, phase metrics, and summary tables
+  telemetry.py             # GoPro GPMF / DJI / Insta360 telemetry decoding and scoring
   timecode_math.py         # Frame-rate and SMPTE timecode helpers
   version.py               # Dynamic package version helper
+  vlm_client.py            # VLM client protocol, OpenRouter backend, provider factory
+tests/                     # Pytest suite
 outputs/                   # Generated manifests, detections, and exports
 ```
-
-## Pipeline notes
-
-- Folder ingestion uses `ffprobe` to record video duration, frame rate,
-  resolution, and codec in `manifest.json` (with backward compatibility for `manifest_raw.json`).
-- The scanner uses Ollama's JSON response mode and writes
-  `detections_refined.json`. It prints request counts, failures, elapsed time,
-  and available Ollama token/timing metrics after the scan. Use `--debug` for
-  per-frame verdicts, per-request timing, and token counts during the run.
-- `dive-clip scan` stores progress and full run context in `pipeline_state.json` inside each run directory, updated
-  after every clip and scan window with `updated_at`, `activity`, and per-step
-  timing; use `--resume [run_id_or_path]` to resume previous runs or `--reset` to clear that state.
-- Frame sampling creates isolated private temporary directories under `/dev/shm`
-  when available and enabled via `scan_parameters.use_ramdisk: true` (default).
-  Writing temporary JPEG frames to shared memory maximizes extraction and reading
-  throughput while eliminating heavy SSD write cycles when processing large batches.
-  The pipeline automatically falls back to standard temporary storage on systems without
-  `/dev/shm` (e.g. macOS) or when `use_ramdisk` is set to `false`.
-- **Hardware-accelerated encoding**: Highlight clip rendering (`05_render_clips.py`)
-  and aftermovie creation (`07_create_aftermovie.py`) probe and use `h264_nvenc` GPU
-  encoding by default (`video_encoder: "auto"`), reducing CPU load and rendering
-  times by over 90%. If hardware encoding is unavailable or encounters errors, the
-  pipeline automatically falls back to thread-capped CPU `libx264`.
-- **Fast input seeking**: Clip extraction places `-ss` and `-to` before `-i`, enabling
-  instant keyframe seeking and decoding only the target highlight segment rather than
-  decoding the full container from 0.0s.
-- **Pipelined frame prefetching**: During multi-clip scans, coarse frame extraction
-  for Video $N+1$ runs in the background in `/dev/shm` while Video $N$ executes VLM
-  inference on GPU, overlapping decoding and inference with a strict 1-clip memory
-  bound (`buffer_size=1`).
-- **HTTP connection pooling**: `OllamaClient` maintains a persistent `requests.Session()`
-  connection pool across all frame evaluations to eliminate TCP handshake latency and
-  socket churn.
-- The optional Resolve marker export supports frame-rate-aware timecodes,
-  including 29.97 drop-frame and non-drop-frame formats.
-
-For current project priorities, see
-[`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).
 
 ## Contributing changes and releases
 
 Changes follow the two-stage GitHub issue and plan workflow in
 [`docs/plans/README.md`](docs/plans/README.md): first review and approve the issue
 plan, then implement it in a linked pull request. Each releasable PR must add a
-user-facing entry under `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md). Select
-one `semver:major`, `semver:minor`, or `semver:patch` label to set the bump; an
-unlabeled PR defaults to minor. Use `semver:none` for changes that should not
-trigger a release.
+user-facing entry under `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md). Select one
+`semver:major`, `semver:minor`, or `semver:patch` label to set the bump; an unlabeled
+PR defaults to minor. Use `semver:none` for changes that should not trigger a release.
 
 Pull requests run the test suite, Ruff lint and formatting checks on changed Python
-files, and changelog validation. When PRs merge to `main`, the release workflow
-groups unreleased changes, updates the package and lockfile versions, archives the
-changelog entries, and creates a `vX.Y.Z` tag and GitHub Release. Repository
-settings must allow Actions to write contents and let `github-actions[bot]` update
-`main`.
+files, and changelog validation. When PRs merge to `main`, the release workflow groups
+unreleased changes, updates the package and lockfile versions, archives the changelog
+entries, and creates a `vX.Y.Z` tag and GitHub Release. Repository settings must allow
+Actions to write contents and let `github-actions[bot]` update `main`.
+
+For current project priorities, see [`docs/roadmap/roadmap.md`](docs/roadmap/roadmap.md).

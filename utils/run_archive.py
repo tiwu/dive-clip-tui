@@ -102,6 +102,61 @@ def update_latest_symlink(output_dir: Path | str, run_dir: Path | str) -> Path:
     return latest_link
 
 
+def update_artifact_symlink(
+    output_dir: Path | str,
+    run_dir: Path | str,
+    artifact_name: str,
+) -> Path | None:
+    """Point `<output_dir>/<artifact_name>` at the newest run's artifact.
+
+    Keeps the pipeline contract that a final video is easy to find at the top level
+    while the file itself only lives inside its run directory.
+    """
+    out_path = Path(output_dir)
+    artifact = Path(run_dir) / artifact_name
+    if not artifact.exists():
+        return None
+
+    link_path = out_path / artifact_name
+    target_path = artifact.resolve()
+
+    try:
+        rel_target = target_path.relative_to(out_path.resolve())
+    except ValueError:
+        rel_target = target_path
+
+    if link_path.is_symlink() or link_path.exists():
+        try:
+            link_path.unlink()
+        except OSError as exc:
+            logger.debug("Could not remove existing artifact link %s: %s", link_path, exc)
+
+    try:
+        link_path.symlink_to(rel_target)
+        logger.debug("Updated artifact symlink: %s -> %s", link_path, rel_target)
+    except OSError as exc:
+        fallback_txt = link_path.with_suffix(".txt")
+        try:
+            fallback_txt.write_text(f"{rel_target}\n", encoding="utf-8")
+            logger.debug(
+                "Filesystem does not support symlinks (%s); wrote fallback %s: %s",
+                exc,
+                fallback_txt.name,
+                rel_target,
+            )
+        except OSError as write_exc:
+            logger.warning(
+                "Could not create artifact symlink or fallback %s at %s: %s (symlink error: %s)",
+                fallback_txt.name,
+                fallback_txt,
+                write_exc,
+                exc,
+            )
+        return None
+
+    return link_path
+
+
 def default_run_log_path(output_dir: Path | str, run_id: str | None = None) -> Path:
     """Return the standard log path inside the run directory."""
     return get_run_dir(output_dir, run_id=run_id) / "run.log"

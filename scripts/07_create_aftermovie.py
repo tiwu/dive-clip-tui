@@ -20,7 +20,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
-from utils.encoder import get_fallback_encoder, get_video_encoder
+from utils.encoder import (
+    VideoQuality,
+    get_fallback_encoder,
+    get_video_encoder,
+    resolve_video_quality,
+)
 from utils.ffmpeg_streamer import concat_clips
 from utils.logging_setup import configure_logging
 from utils.run_archive import resolve_and_validate_assembly_artifacts
@@ -28,6 +33,29 @@ from utils.selection import select_diverse_highlights
 from utils.signals import setup_signal_handlers
 
 logger = logging.getLogger(__name__)
+
+
+def _probe_duration(video_path: Path, default: float = 5.0) -> float:
+    """Return a video's duration in seconds, falling back to ``default``."""
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return float(probe.stdout.strip())
+    except subprocess.TimeoutExpired, ValueError, FileNotFoundError, OSError:
+        return default
 
 
 def render_clip_with_fade(
@@ -38,6 +66,7 @@ def render_clip_with_fade(
     fade_duration: float = 1.0,
     encoder_name: str | None = None,
     encoder_args: list[str] | None = None,
+    quality: VideoQuality | None = None,
 ) -> bool:
     """Render a clip with fade-in at start and fade-out at end.
 
@@ -57,7 +86,7 @@ def render_clip_with_fade(
         vf_filters.append(f"fade=t=out:st={duration - fade}:d={fade}")
 
     if encoder_args is None:
-        enc_name, enc_args = get_video_encoder(encoder_name or "auto")
+        enc_name, enc_args = get_video_encoder(encoder_name or "auto", quality=quality)
     else:
         enc_name = encoder_name or "custom"
         enc_args = encoder_args
@@ -98,7 +127,7 @@ def render_clip_with_fade(
         return False
 
     if result.returncode != 0:
-        fallback = get_fallback_encoder(enc_name)
+        fallback = get_fallback_encoder(enc_name, quality=quality)
         if fallback:
             fb_name, fb_args = fallback
             logger.warning(
@@ -116,6 +145,7 @@ def render_clip_with_fade(
                 fade_duration=fade_duration,
                 encoder_name=fb_name,
                 encoder_args=fb_args,
+                quality=quality,
             )
         logger.warning("FFmpeg failed for %s: %s", output_path.name, result.stderr.strip()[:200])
         return False
@@ -147,6 +177,7 @@ def convert_aspect_ratio(
     output_path: Path,
     aspect_ratio: str,
     encoder_name: str | None = None,
+    quality: VideoQuality | None = None,
 ) -> bool:
     """Convert a video to the target aspect ratio using scale+pad."""
     vf = aspect_ratio_filter(aspect_ratio)
@@ -156,7 +187,7 @@ def convert_aspect_ratio(
         return True
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    enc_name, enc_args = get_video_encoder(encoder_name or "auto")
+    enc_name, enc_args = get_video_encoder(encoder_name or "auto", quality=quality)
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -185,7 +216,7 @@ def convert_aspect_ratio(
         return False
 
     if result.returncode != 0:
-        fallback = get_fallback_encoder(enc_name)
+        fallback = get_fallback_encoder(enc_name, quality=quality)
         if fallback:
             fb_name, fb_args = fallback
             logger.warning(
@@ -314,8 +345,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--output",
-        default="outputs/aftermovie.mp4",
-        help="Output aftermovie file (default: outputs/aftermovie.mp4)",
+        default=None,
+        help=(
+            "Output aftermovie file "
+            "(default: <latest run>/aftermovie.mp4, else outputs/aftermovie.mp4)"
+        ),
     )
     parser.add_argument(
         "--top-n",
@@ -365,6 +399,7 @@ def main() -> None:
 
     general = config.get("general", {})
     output_dir = Path(general.get("output_dir", "./outputs"))
+    video_quality = resolve_video_quality(config)
 
     # Resolve detections input path and clips directory
     try:
@@ -433,58 +468,61 @@ def main() -> None:
             raw_clip_id = str(det.get("clip_id", f"clip{i}"))
             clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
             subject = det.get("subject", "unknown")
-            quality = det.get("quality_score", 0)
+            quality_score = det.get("quality_score", 0)
 
             start_time = float(det.get("start_time", 0))
             end_time = float(det.get("end_time", start_time + 5))
 
-            # Look for pre-rendered clip (timestamped first, then any clip_id match)
-            matching = list(clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_*.mp4"))
-            if not matching:
-                matching = list(clips_dir.glob(f"{clip_id}_*.mp4"))
-            if matching:
-                source = matching[0]
+            # A single source file can yield several highlight windows, so the
+            # temp names must include the window index and its time range.
+            window_tag = f"{clip_id}_{i:03d}_{start_time:.1f}s-{end_time:.1f}s"
+            faded = tmp_dir / f"{window_tag}_faded.mp4"
+
+            source_path = Path(det.get("file_path", ""))
+            if source_path.is_file():
+                # Preferred path: cut and fade straight from the original footage in
+                # a single encode, so no generation is lost to re-encoding.
+                if not render_clip_with_fade(
+                    source_path,
+                    start_time,
+                    end_time,
+                    faded,
+                    fade_duration=fade_duration,
+                    quality=video_quality,
+                ):
+                    logger.warning("  SKIP: failed to render %s", window_tag)
+                    continue
             else:
-                # Render from source video
-                source_path = Path(det.get("file_path", ""))
-                source = tmp_dir / f"{clip_id}_rendered.mp4"
-                if not source_path.exists():
+                # Fallback: reuse a pre-rendered clip when the source is unavailable.
+                matching = list(
+                    clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_*.mp4")
+                )
+                if not matching:
+                    matching = list(clips_dir.glob(f"{clip_id}_*.mp4"))
+                if not matching:
                     logger.warning("  SKIP: source not found for %s", clip_id)
                     continue
+
+                prerendered = matching[0]
+                dur = _probe_duration(prerendered)
                 if not render_clip_with_fade(
-                    source_path, start_time, end_time, source, fade_duration=fade_duration
+                    prerendered,
+                    0,
+                    dur,
+                    faded,
+                    fade_duration=fade_duration,
+                    quality=video_quality,
                 ):
+                    logger.warning("  SKIP: failed to apply fade to %s", prerendered.name)
                     continue
-
-            # Apply fade-in/fade-out for cross-dissolve effect
-            faded = tmp_dir / f"{clip_id}_faded.mp4"
-            try:
-                duration_probe = subprocess.run(
-                    [
-                        "ffprobe",
-                        "-v",
-                        "error",
-                        "-show_entries",
-                        "format=duration",
-                        "-of",
-                        "default=noprint_wrappers=1",
-                        str(source),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                dur = float(duration_probe.stdout.strip())
-            except subprocess.TimeoutExpired, ValueError, FileNotFoundError, OSError:
-                dur = 5.0
-
-            if not render_clip_with_fade(source, 0, dur, faded, fade_duration=fade_duration):
-                logger.warning("  SKIP: failed to apply fade to %s", source.name)
-                continue
 
             clip_files.append(faded)
             logger.info(
-                "  [%d/%d] %s (quality %s/10)", len(clip_files), len(top_dets), subject, quality
+                "  [%d/%d] %s (quality %s/10)",
+                len(clip_files),
+                len(top_dets),
+                subject,
+                quality_score,
             )
 
         if not clip_files:
@@ -501,13 +539,23 @@ def main() -> None:
 
         # Add background music with ducking
         music_path = Path(args.music) if args.music else None
-        output_path = Path(args.output)
+        if args.output:
+            output_path = Path(args.output)
+        elif latest_run is not None:
+            output_path = latest_run / "aftermovie.mp4"
+        else:
+            output_path = output_dir / "aftermovie.mp4"
 
         # Apply aspect ratio conversion if needed
         aspect_converted = tmp_dir / "aspect_converted.mp4"
         if args.aspect_ratio != "16:9":
             logger.info("Converting to aspect ratio %s...", args.aspect_ratio)
-            if not convert_aspect_ratio(assembled, aspect_converted, args.aspect_ratio):
+            if not convert_aspect_ratio(
+                assembled,
+                aspect_converted,
+                args.aspect_ratio,
+                quality=video_quality,
+            ):
                 logger.warning("Aspect ratio conversion failed, using original.")
                 aspect_converted = assembled
         else:
