@@ -115,9 +115,10 @@ def call_ollama(
     client: VLMClient | None = None,
     phase: str = "unspecified",
     system_prompt: str | None = None,
+    num_ctx: int | None = None,
 ) -> dict[str, Any] | None:
     """Compatibility wrapper around the shared Ollama client."""
-    request_client = client or OllamaClient(host, model, timeout)
+    request_client = client or OllamaClient(host, model, timeout, num_ctx=num_ctx)
     return request_client.generate(image_path, prompt, phase, system_prompt=system_prompt)
 
 

@@ -104,6 +104,19 @@ def test_extract_json_object(text, expected):
     assert extract_json_object(text) == expected
 
 
+def test_extract_json_object_tries_candidates_in_order():
+    assert extract_json_object("", '{"a": 1}') == {"a": 1}
+    assert extract_json_object("bad", None, 'x {"a": 2} y') == {"a": 2}
+    assert extract_json_object('{"a": 3}', '{"a": 4}') == {"a": 3}
+    assert extract_json_object("", None) is None
+
+
+def test_factory_forwards_num_ctx():
+    client = create_vlm_client({"ollama": {"model": "m", "num_ctx": 16384}})
+    assert client.num_ctx == 16384
+    assert create_vlm_client({}).num_ctx is None
+
+
 # --- OpenRouterClient ------------------------------------------------------------
 
 

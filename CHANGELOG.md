@@ -6,6 +6,15 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add `ollama.num_ctx` to `config.yaml`, sent as `options.num_ctx` so model context size can be tuned without separate Modelfiles (#73).
+
+### Changed
+- Share JSON extraction, image encoding, metrics and session lifecycle between the Ollama and OpenRouter clients in the new `utils/vlm_common.py`; Ollama requests now send `think: false` (#73).
+
+### Fixed
+- Parse Ollama replies from thinking models whose JSON lands in the `thinking` field with an empty `response`, and tolerate fenced or prose-wrapped JSON (#73).
+
 ## [0.31.0] - 2026-11-04
 
 ### Added

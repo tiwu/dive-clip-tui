@@ -239,6 +239,7 @@ add them.
 | `host` | `http://localhost:11434` | Ollama server; `OLLAMA_HOST` overrides it |
 | `model` | `qwen2.5vl:3b` | Vision model for Pass 0/1/2 |
 | `timeout_seconds` | `120` | Per-request timeout |
+| `num_ctx` | unset | Optional context window in tokens, sent as `options.num_ctx` (lower it to fit a model in memory; unset keeps the model's default) |
 
 **`vlm`**
 
@@ -635,7 +636,8 @@ utils/
   ffmpeg_streamer.py       # Frame sampling and temporary storage (/dev/shm)
   logging_setup.py         # Shared console and file logging setup
   models.py                # Pydantic manifest and detection models
-  ollama_client.py         # Ollama API client and metrics
+  ollama_client.py         # Ollama API client and host resolution
+  vlm_common.py            # Shared VLM client base, JSON extraction and metrics
   prescreen.py             # Pre-VLM screening funnel: gates, metrics, trace records
   prompt_templates.py      # Domain prompts and subject-routed templates
   run_archive.py           # Self-contained run snapshots and latest symlink
