@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-04
+
 ### Changed
 - Aftermovie assembly now cuts and applies transitions directly from the source footage in a single pass (falling back to pre-rendered clips only when the source is unavailable), avoiding multi-generation re-encoding loss (#69).
 - Raise the default `scan_parameters.fine_scale` to `1280:-2` so the fine VLM pass can resolve macro marine life more reliably (#69).
