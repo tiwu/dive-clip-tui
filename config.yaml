@@ -64,6 +64,39 @@ selection:
   lambda_quality: 0.65              # MMR trade-off: 0.0 = pure diversity, 1.0 = pure quality
   per_clip_soft_limit: 1            # Soft quota per source clip before applying exponential penalty
 
+# Pre-VLM screening funnel (Stage C/D). A cheap FFmpeg + telemetry pass runs before
+# any VLM call and can reject or defer candidate windows so the model only sees
+# footage worth describing. Disabled by default: nothing here runs until enabled.
+prescreen:
+  enabled: false                    # Turn the funnel on (FFmpeg sampling + telemetry)
+  # "advisory" records gate failures but never drops a window. "enabled" rejects the
+  # windows that fail a gate, which is the behaviour that actually saves VLM calls.
+  gate_mode: "advisory"
+  sample_fps: 0.5                   # Frames per second sampled for visual/HSV metrics
+  sample_size: 64                   # Downscale samples to 64x64 for cheap luma/Laplacian math
+  keyframes_only: true              # Prefer keyframes; falls back to a full seek pass if none
+  audio_enabled: true               # Run the FFmpeg astats pass for peak levels
+  audio_spike_db: 10.0              # dB above the rolling median that counts as a spike
+  audio_spike_floor_db: -35.0       # Absolute floor so steady quiet audio never reads as a spike
+  audio_window: 5                   # Rolling median window (in peak samples)
+  blur_min: 12.0                    # Median Laplacian variance below this reads as soft/blurred
+  contact_sheet: false              # Opt-in 2x2 contact sheets: up to 4x fewer VLM calls per clip
+  # Telemetry score weights. Missing sensors are dropped and the rest renormalized.
+  weights:
+    lean_speed: 0.35                # Lean angle + speed magnitude
+    gyro_stability: 0.25            # Inverse of gyro RMS (steadier footage scores higher)
+    face: 0.20                      # Detected subject/face presence
+    hue_change: 0.20                # Colour/hue churn across the window
+  # Gate thresholds. Gate failures reject when gate_mode is "enabled".
+  gate_thresholds:
+    yavg_min: 15.0                  # Mean luma below this is too dark to be usable
+    unif_max: 0.92                  # Luma uniformity above this is flat/fogged (featureless)
+    gyro_max: 3.5                   # Gyro RMS above this is too shaky to use
+  # Scene-domain prior resolution (Pass 0 classification confidence/coverage).
+  domain_prior_thresholds:
+    min_confidence: 0.80
+    min_coverage: 0.80
+
 # Custom domains and prompt templates (optional):
 # prompts:
 #   domains:

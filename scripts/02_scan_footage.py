@@ -47,6 +47,7 @@ from utils.config import ConfigError, load_config
 from utils.ffmpeg_streamer import (
     calculate_sample_timestamps,
     cleanup_work_dir,
+    compose_frame_mosaic,
     extract_frames,
     extract_targeted_frames,
     get_work_dir,
@@ -67,16 +68,21 @@ from utils.models import (
     Pass1TraceOutput,
     Pass2ClipTrace,
     Pass2TraceOutput,
+    PrescreenRecord,
+    PrescreenTraceOutput,
     RefinedDetection,
 )
 from utils.ollama_client import OllamaClient, resolve_host
+from utils.prescreen import PrescreenConfig, PrescreenResult, screen_clip
 from utils.prompt_templates import (
     BUILTIN_DOMAINS,
     VIDEO_CLASSIFICATION_SYSTEM_PROMPT,
     build_classification_prompt,
+    build_contact_sheet_prompt,
     get_template_for_keywords,
     load_custom_templates,
     normalize_vlm_frame_response,
+    normalize_vlm_sheet_response,
     resolve_domain_from_keywords,
     resolve_template_for_subject,
 )
@@ -93,6 +99,7 @@ from utils.stats import (
     parse_duration,
     save_stats_json,
 )
+from utils.telemetry import TelemetryTrack, load_telemetry
 from utils.vlm_client import VLMClient, create_vlm_client
 
 logger = logging.getLogger(__name__)
@@ -874,6 +881,137 @@ def create_scan_progress(console: Console | None = None) -> Progress:
     )
 
 
+def _prescreen_trace_fields(result: PrescreenResult | None, timestamp: float) -> dict[str, Any]:
+    """Project the screening record covering ``timestamp`` onto trace fields."""
+    if result is None:
+        return {}
+    action, record = result.action_at(timestamp)
+    fields: dict[str, Any] = {"prescreen_action": action}
+    if record is None:
+        return fields
+    fields.update(
+        telemetry_score=record.telemetry_score,
+        hsv_entropy=record.hsv_entropy,
+        laplacian_sharpness=record.laplacian_sharpness,
+        audio_peak_db=record.audio_peak_db,
+        audio_spike_triggered=record.audio_spike_triggered,
+    )
+    return fields
+
+
+def _prescreen_clip(
+    clip: dict,
+    file_path: str,
+    prescreen_config: PrescreenConfig,
+    *,
+    telemetry_cache_dir: Path | None = None,
+) -> tuple[PrescreenResult | None, TelemetryTrack | None]:
+    """Run the pre-VLM screening funnel for one clip.
+
+    Returns ``None`` for the result when screening is disabled so callers can skip
+    the trace plumbing entirely.
+    """
+    if not prescreen_config.enabled:
+        return None, None
+
+    clip_id = get_clip_id(clip)
+    file_name = clip.get("file_name", "")
+    duration = parse_duration(clip.get("duration", ""))
+    telemetry_type = str(clip.get("telemetry_type", "") or "")
+    cache_path = (
+        telemetry_cache_dir / f"{clip_id}.telemetry.bin"
+        if telemetry_cache_dir is not None
+        else None
+    )
+    track = load_telemetry(
+        Path(file_path),
+        telemetry_type=telemetry_type,
+        duration=duration,
+        cache_path=cache_path,
+    )
+    result = screen_clip(
+        file_path,
+        clip_id=clip_id,
+        source_file=file_name,
+        sort_key=make_sort_key(file_name, 0.0, duration, clip_id),
+        config=prescreen_config,
+        track=track,
+        telemetry_type=telemetry_type,
+        hilight_tags=clip.get("hilight_tags") or [],
+        duration=duration or None,
+        bitrate_density=clip.get("bitrate_density"),
+        is_high_fps=bool(clip.get("is_high_fps", False)),
+        has_audio=bool(clip.get("has_audio", True)),
+    )
+    logger.info(
+        "[Prescreen] %s: %d window(s), %d rejected, %d deferred",
+        clip.get("file_name", clip_id),
+        len(result.records),
+        len(result.rejected_intervals),
+        len(result.deferred_intervals),
+    )
+    return result, track
+
+
+def _analyze_contact_sheets(
+    frames: list[dict],
+    *,
+    sheet_dir: Path,
+    prompt: str,
+    system_prompt: str,
+    ollama_host: str,
+    ollama_model: str,
+    timeout: float,
+    client: OllamaClient | None,
+    tile: int = 2,
+) -> tuple[dict[float, dict[str, Any]], dict[float, dict[str, Any]]]:
+    """Batch frames into contact sheets and collect per-tile VLM results.
+
+    Returns ``(results, meta)`` keyed by rounded frame timestamp. Frames in a
+    partial final batch and sheets whose VLM output is unusable are left out so
+    the caller falls back to analyzing those frames individually.
+    """
+    slots = tile * tile
+    sheet_prompt = build_contact_sheet_prompt(prompt, slots)
+    results: dict[float, dict[str, Any]] = {}
+    meta: dict[float, dict[str, Any]] = {}
+    sheet_dir.mkdir(parents=True, exist_ok=True)
+
+    for batch_start in range(0, len(frames) - slots + 1, slots):
+        batch = frames[batch_start : batch_start + slots]
+        sheet_path = compose_frame_mosaic(
+            [str(frame["frame_path"]) for frame in batch],
+            sheet_dir / f"sheet_{batch_start // slots:04d}.jpg",
+            tile=tile,
+        )
+        if sheet_path is None:
+            continue
+        raw = call_ollama(
+            ollama_host,
+            ollama_model,
+            sheet_path,
+            sheet_prompt,
+            timeout,
+            client=client,
+            phase="coarse",
+            system_prompt=system_prompt,
+        )
+        tile_results = normalize_vlm_sheet_response(raw, slots)
+        if tile_results is None:
+            logger.debug("[Pass 1] Contact sheet unusable, re-scanning tiles individually")
+            continue
+        for index, (frame, tile_result) in enumerate(zip(batch, tile_results, strict=False)):
+            key = round(float(frame["timestamp"]), 3)
+            results[key] = tile_result
+            meta[key] = {
+                "contact_sheet_path": sheet_path,
+                "tile_index": index,
+                "tile_timestamp": key,
+                "tile_count": slots,
+            }
+    return results, meta
+
+
 def process_clip(
     clip: dict,
     config: dict,
@@ -891,6 +1029,7 @@ def process_clip(
     pass0_collector: list[ClipClassification] | None = None,
     pass1_collector: list[Pass1ClipTrace] | None = None,
     pass2_collector: list[Pass2ClipTrace] | None = None,
+    prescreen_collector: list[PrescreenRecord] | None = None,
     on_trace_flush: Callable[[str], None] | None = None,
 ) -> list[RefinedDetection]:
     """Process a single clip through 3-stage domain-aware scanning.
@@ -1213,6 +1352,20 @@ def process_clip(
 
     pass1_frame_traces: list[CoarseFrameTrace] = []
 
+    prescreen_config = PrescreenConfig.from_config(config)
+    prescreen_result: PrescreenResult | None = None
+    if prescreen_config.enabled:
+        prescreen_result, _track = _prescreen_clip(
+            clip,
+            file_path,
+            prescreen_config,
+            telemetry_cache_dir=work_dir / "telemetry",
+        )
+        if prescreen_result is not None and prescreen_collector is not None:
+            prescreen_collector.extend(prescreen_result.records)
+            if on_trace_flush is not None:
+                on_trace_flush("prescreen")
+
     if skip_coarse_inference and checkpoint is not None:
         pass1_frame_traces.extend(
             CoarseFrameTrace(
@@ -1243,6 +1396,27 @@ def process_clip(
                 total=len(coarse_frames),
                 status="(0 hits)",
             )
+
+        sheet_results: dict[float, dict[str, Any]] = {}
+        sheet_meta: dict[float, dict[str, Any]] = {}
+        if prescreen_config.contact_sheet and len(coarse_frames) > 1:
+            sheet_results, sheet_meta = _analyze_contact_sheets(
+                coarse_frames,
+                sheet_dir=clip_work_dir / "sheets",
+                prompt=coarse_prompt,
+                system_prompt=coarse_system_prompt,
+                ollama_host=ollama_host,
+                ollama_model=ollama_model,
+                timeout=ollama_timeout,
+                client=client,
+            )
+            if sheet_results:
+                logger.info(
+                    "[Pass 1] Contact sheets covered %d/%d frames for %s",
+                    len(sheet_results),
+                    len(coarse_frames),
+                    clip["file_name"],
+                )
 
         try:
             for frame_index, frame in enumerate(coarse_frames, start=1):
@@ -1292,31 +1466,12 @@ def process_clip(
                         progress.update(task_id, status=f"({len(candidate_windows)} hits)")
                     continue
 
-                if phase1_stats is not None:
-                    phase1_stats.frames_analyzed += 1
-                logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
-
-                start_time = time.perf_counter()
-                raw_result = call_ollama(
-                    ollama_host,
-                    ollama_model,
-                    frame["frame_path"],
-                    coarse_prompt,
-                    ollama_timeout,
-                    client=client,
-                    phase="coarse",
-                    system_prompt=coarse_system_prompt,
-                )
-                elapsed = time.perf_counter() - start_time
-                coarse_elapsed_total += elapsed
-
-                if raw_result is None:
-                    coarse_failures += 1
+                prescreen_fields = _prescreen_trace_fields(prescreen_result, ts)
+                if prescreen_fields.get("prescreen_action") == "reject":
                     logger.debug(
-                        "[Pass 1] Frame %d @ %.1fs: no result (%.1fs)",
+                        "[Pass 1] Frame %d @ %.1fs rejected by pre-screen, skipping VLM",
                         frame_index,
-                        frame["timestamp"],
-                        elapsed,
+                        ts,
                     )
                     pass1_frame_traces.append(
                         CoarseFrameTrace(
@@ -1330,16 +1485,76 @@ def process_clip(
                             detected=False,
                             confidence=0.0,
                             quality_score=0,
-                            reject_reasons=["ollama call failed"],
+                            reject_reasons=["prescreen_reject"],
                             passed_gate=False,
-                            decision_reason="ollama_call_failed",
+                            decision_reason="prescreen_rejected",
+                            **prescreen_fields,
                         )
                     )
                     if progress is not None and task_id is not None:
                         progress.advance(task_id)
                     continue
 
-                result = normalize_vlm_frame_response(raw_result)
+                if phase1_stats is not None:
+                    phase1_stats.frames_analyzed += 1
+                logger.debug("[Pass 1] Analyzing frame %d of %d", frame_index, len(coarse_frames))
+
+                sheet_key = round(ts, 3)
+                sheet_result = sheet_results.get(sheet_key)
+                if sheet_result is not None:
+                    result = sheet_result
+                    elapsed = 0.0
+                    logger.debug(
+                        "[Pass 1] Frame %d @ %.1fs served from contact sheet", frame_index, ts
+                    )
+                else:
+                    start_time = time.perf_counter()
+                    raw_result = call_ollama(
+                        ollama_host,
+                        ollama_model,
+                        frame["frame_path"],
+                        coarse_prompt,
+                        ollama_timeout,
+                        client=client,
+                        phase="coarse",
+                        system_prompt=coarse_system_prompt,
+                    )
+                    elapsed = time.perf_counter() - start_time
+                    coarse_elapsed_total += elapsed
+
+                    if raw_result is None:
+                        coarse_failures += 1
+                        logger.debug(
+                            "[Pass 1] Frame %d @ %.1fs: no result (%.1fs)",
+                            frame_index,
+                            frame["timestamp"],
+                            elapsed,
+                        )
+                        pass1_frame_traces.append(
+                            CoarseFrameTrace(
+                                detection_id=make_detection_id(clip_id, ts, ts),
+                                clip_id=clip_id,
+                                source_file=clip["file_name"],
+                                timestamp=ts,
+                                start_time=ts,
+                                end_time=ts,
+                                sort_key=make_sort_key(clip["file_name"], ts, ts, clip_id),
+                                detected=False,
+                                confidence=0.0,
+                                quality_score=0,
+                                reject_reasons=["ollama call failed"],
+                                passed_gate=False,
+                                decision_reason="ollama_call_failed",
+                                **prescreen_fields,
+                                **sheet_meta.get(sheet_key, {}),
+                            )
+                        )
+                        if progress is not None and task_id is not None:
+                            progress.advance(task_id)
+                        continue
+
+                    result = normalize_vlm_frame_response(raw_result)
+
                 detected = bool(result.get("detected"))
                 confidence = float(result.get("confidence", 0.0) or 0.0)
                 quality_score = int(result.get("quality_score", 0) or 0)
@@ -1393,6 +1608,8 @@ def process_clip(
                         passed_gate=frame_passes,
                         decision_reason=decision_reason,
                         candidate_window=cand_win,
+                        **prescreen_fields,
+                        **sheet_meta.get(sheet_key, {}),
                     )
                 )
 
@@ -2256,6 +2473,7 @@ def main() -> None:
     pass0_records: list[ClipClassification] = []
     pass1_records: list[Pass1ClipTrace] = []
     pass2_records: list[Pass2ClipTrace] = []
+    prescreen_records: list[PrescreenRecord] = []
 
     def _save_trace_atomic(path: Path, model_obj: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2286,6 +2504,16 @@ def main() -> None:
             _save_trace_atomic(trace_dir / "pass2_fine_trace.json", p2_obj)
             if target_run_dir is not None and target_run_dir != output_dir:
                 _save_trace_atomic(output_dir / "pass2_fine_trace.json", p2_obj)
+        if (phase is None or phase == "prescreen") and prescreen_records:
+            ps_obj = PrescreenTraceOutput(
+                version=1,
+                total_clips=len({r.clip_id for r in prescreen_records}),
+                total_records=len(prescreen_records),
+                records=prescreen_records,
+            )
+            _save_trace_atomic(trace_dir / "prescreen_trace.json", ps_obj)
+            if target_run_dir is not None and target_run_dir != output_dir:
+                _save_trace_atomic(output_dir / "prescreen_trace.json", ps_obj)
 
     if args.resume and state is not None:
         prev_scan_stats = state.get("scan_stats")
@@ -2399,6 +2627,7 @@ def main() -> None:
                     pass0_collector=pass0_records,
                     pass1_collector=pass1_records,
                     pass2_collector=pass2_records,
+                    prescreen_collector=prescreen_records,
                     on_trace_flush=_flush_traces,
                 )
                 refined.detections.extend(detections)
@@ -2477,6 +2706,9 @@ def main() -> None:
                 classifications_path=classifications_file,
                 pass1_coarse_trace_path=pass1_trace_file,
                 pass2_fine_trace_path=pass2_trace_file,
+                prescreen_trace_path=trace_dir / "prescreen_trace.json"
+                if prescreen_records
+                else None,
             )
             logger.info("Archived run artifacts to %s", target_run_dir)
 
@@ -2513,6 +2745,9 @@ def main() -> None:
                         else None,
                         pass2_fine_trace_path=(trace_dir / "pass2_fine_trace.json")
                         if pass2_records
+                        else None,
+                        prescreen_trace_path=(trace_dir / "prescreen_trace.json")
+                        if prescreen_records
                         else None,
                     )
                 except Exception as exc:

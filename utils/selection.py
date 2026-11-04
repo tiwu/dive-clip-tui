@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from utils.models import RefinedDetection, SelectionCandidateTrace, SelectionTraceOutput
+from utils.prescreen import hsv_similarity
 
 logger = logging.getLogger(__name__)
+
+# Blend factor for the optional HSV histogram signal in pairwise similarity.
+# Text-only behaviour is preserved exactly when either histogram is missing.
+HSV_SIMILARITY_WEIGHT = 0.25
 
 STOPWORDS: frozenset[str] = frozenset({
     "the",
@@ -100,8 +105,32 @@ def _jaccard(tokens_a: frozenset[str], tokens_b: frozenset[str]) -> float:
     return intersection / union
 
 
+def _optional_float(value: Any) -> float | None:
+    """Coerce a value to float, returning None when it is missing or unusable."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except TypeError, ValueError:
+        return None
+
+
+def _histogram_similarity(d_i: Any, d_j: Any) -> float | None:
+    """Return HSV histogram similarity for two detections, or None when unavailable."""
+    left = _get_val(d_i, "hsv_histogram", None) or []
+    right = _get_val(d_j, "hsv_histogram", None) or []
+    if not left or not right:
+        return None
+    return hsv_similarity(left, right)
+
+
 def calculate_pairwise_similarity(d_i: Any, d_j: Any) -> float:
-    """Calculate S(d_i, d_j) in [0.0, 1.0] across subject, description, category, and time."""
+    """Calculate S(d_i, d_j) in [0.0, 1.0] across subject, description, category, and time.
+
+    When both detections carry an HSV histogram, the text score is blended with
+    histogram-intersection similarity. Missing histograms leave the text-only
+    score untouched so existing behaviour is preserved.
+    """
     subj_i = str(_get_val(d_i, "subject", "") or "").strip().lower()
     subj_j = str(_get_val(d_j, "subject", "") or "").strip().lower()
 
@@ -139,6 +168,9 @@ def calculate_pairwise_similarity(d_i: Any, d_j: Any) -> float:
         t_prox = 0.0
 
     similarity = 0.50 * j_subj + 0.20 * j_desc + 0.15 * i_cat + 0.15 * t_prox
+    hist_sim = _histogram_similarity(d_i, d_j)
+    if hist_sim is not None:
+        similarity = (1.0 - HSV_SIMILARITY_WEIGHT) * similarity + HSV_SIMILARITY_WEIGHT * hist_sim
     return max(0.0, min(1.0, similarity))
 
 
@@ -223,6 +255,8 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
             "selection_rank": None,
             "chronological_rank": None,
             "decision_reason": "unselected candidate",
+            "telemetry_score": _optional_float(_get_val(d, "telemetry_score", None)),
+            "hsv_similarity": None,
         }
 
     k_target = min(top_n, len(detections))
@@ -232,6 +266,7 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
         best_score = -float("inf")
         best_sim_penalty = 0.0
         best_similar_id: str | None = None
+        best_hsv_sim: float | None = None
         best_quota_penalty = 0.0
 
         for idx in candidate_indices:
@@ -245,15 +280,20 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
             if not selected_indices:
                 max_sim = 0.0
                 similar_id = None
+                max_hsv_sim = None
             else:
                 max_sim = 0.0
                 similar_id = None
+                max_hsv_sim = None
                 for s_idx in selected_indices:
                     s_det = detections[s_idx]
                     sim = calculate_pairwise_similarity(cand, s_det)
                     if sim > max_sim:
                         max_sim = sim
                         similar_id = trace_details[s_idx]["detection_id"]
+                    hist_sim = _histogram_similarity(cand, s_det)
+                    if hist_sim is not None and (max_hsv_sim is None or hist_sim > max_hsv_sim):
+                        max_hsv_sim = hist_sim
 
             clip_id = cand_meta["clip_id"]
             count_selected_for_clip = sum(
@@ -280,6 +320,7 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
                 best_score = mmr
                 best_sim_penalty = max_sim
                 best_similar_id = similar_id
+                best_hsv_sim = max_hsv_sim
                 best_quota_penalty = q_penalty
             else:
                 current_best_meta = trace_details[best_idx]
@@ -296,6 +337,7 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
                     best_score = mmr
                     best_sim_penalty = max_sim
                     best_similar_id = similar_id
+                    best_hsv_sim = max_hsv_sim
                     best_quota_penalty = q_penalty
 
         if best_idx is not None:
@@ -306,6 +348,7 @@ def select_diverse_highlights[T: (RefinedDetection, dict[str, Any])](
             m["mmr_score"] = best_score
             m["max_similarity_penalty"] = best_sim_penalty
             m["most_similar_selected_id"] = best_similar_id
+            m["hsv_similarity"] = best_hsv_sim
             m["quota_penalty"] = best_quota_penalty
             m["decision_reason"] = (
                 f"Selected rank {step} (MMR={best_score:.4f}, R={m['relevance_score']:.3f}, "

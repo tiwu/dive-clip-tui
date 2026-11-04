@@ -38,6 +38,20 @@ class ClipManifest(BaseModel):
     start_timecode: str = Field(default="", description="Starting timecode")
     end_timecode: str = Field(default="", description="Ending timecode")
     pix_fmt: str = Field(default="", description="Pixel format (e.g. yuv420p, yuv420p10le)")
+    has_audio: bool = Field(default=False, description="Clip contains an audio stream")
+    has_telemetry: bool = Field(default=False, description="Clip contains a sensor data stream")
+    telemetry_type: str = Field(
+        default="", description="Sensor track family: gopro, dji, insta360, or empty"
+    )
+    is_high_fps: bool = Field(default=False, description="Frame rate indicates slow-motion intent")
+    hilight_tags: list[float] = Field(
+        default_factory=list, description="GoPro HiLight marker timestamps in seconds"
+    )
+    creation_time: str = Field(default="", description="Container creation time tag")
+    bit_rate: float | None = Field(default=None, description="Container bit rate in bits/second")
+    bitrate_density: float | None = Field(
+        default=None, description="Bits per pixel per second (bit_rate / w / h / fps)"
+    )
 
 
 class ManifestOutput(BaseModel):
@@ -80,6 +94,15 @@ class RefinedDetection(BaseModel):
     story_role: str = Field(default="hero_subject", description="Story role")
     detection_id: str = Field(default="", description="Deterministic detection identifier")
     sort_key: str = Field(default="", description="Canonical sort key")
+    hsv_histogram: list[float] = Field(
+        default_factory=list, description="Compact HSV histogram of the highlight frame"
+    )
+    hsv_entropy: float | None = Field(
+        default=None, description="Shannon entropy of the HSV histogram"
+    )
+    telemetry_score: float | None = Field(
+        default=None, description="Telemetry action score in 0..1, None when unavailable"
+    )
 
     @model_validator(mode="after")
     def populate_deterministic_ids(self) -> Self:
@@ -180,6 +203,32 @@ class CoarseFrameTrace(BaseModel):
     passed_gate: bool = False
     decision_reason: str = ""
     candidate_window: list[float] | tuple[float, float] | None = None
+    prescreen_action: str = Field(default="", description="Pre-VLM screening decision")
+    telemetry_score: float | None = Field(
+        default=None, description="Telemetry action score in 0..1, None when unavailable"
+    )
+    hsv_entropy: float | None = Field(
+        default=None, description="Shannon entropy of the sampled HSV histogram"
+    )
+    laplacian_sharpness: float | None = Field(
+        default=None, description="Laplacian variance of the sampled frame"
+    )
+    audio_peak_db: float | None = Field(
+        default=None, description="Peak audio level in dB for the sampled window"
+    )
+    audio_spike_triggered: bool | None = Field(
+        default=None, description="Whether the audio peak exceeded the spike threshold"
+    )
+    contact_sheet_path: str = Field(default="", description="Path to the 2x2 contact sheet")
+    tile_index: int | None = Field(
+        default=None, description="Stable index of this tile within the contact sheet"
+    )
+    tile_timestamp: float | None = Field(
+        default=None, description="Source timestamp in seconds for this contact-sheet tile"
+    )
+    tile_count: int | None = Field(
+        default=None, description="Number of tiles the contact sheet contained"
+    )
 
 
 class Pass1ClipTrace(BaseModel):
@@ -292,6 +341,12 @@ class SelectionCandidateTrace(BaseModel):
     selection_rank: int | None = None
     chronological_rank: int | None = None
     decision_reason: str = ""
+    telemetry_score: float | None = Field(
+        default=None, description="Telemetry action score in 0..1, None when unavailable"
+    )
+    hsv_similarity: float | None = Field(
+        default=None, description="HSV histogram similarity against the most similar selection"
+    )
 
 
 class SelectionTraceOutput(BaseModel):
@@ -303,6 +358,83 @@ class SelectionTraceOutput(BaseModel):
     total_candidates: int = Field(..., ge=0)
     selected_count: int = Field(..., ge=0)
     candidates: list[SelectionCandidateTrace] = Field(default_factory=list)
+
+
+class PrescreenGateOutcome(BaseModel):
+    """Outcome of one pre-VLM gate evaluation."""
+
+    name: str
+    value: float | None = None
+    threshold: float | None = None
+    triggered: bool = False
+    outcome: Literal["pass", "reject", "advisory"] = "pass"
+    reason: str = ""
+
+
+class PrescreenScoreComponent(BaseModel):
+    """One weighted contribution to the telemetry action score."""
+
+    name: str
+    raw: float | None = None
+    normalized: float | None = None
+    weight: float = 0.0
+    contribution: float | None = None
+
+
+class PrescreenInterval(BaseModel):
+    """Candidate window a pre-VLM screening record describes."""
+
+    start: float = Field(..., ge=0, description="Window start in seconds")
+    end: float = Field(..., ge=0, description="Window end in seconds")
+    sample_count: int = Field(default=0, ge=0, description="Telemetry samples in the window")
+
+
+class PrescreenRecord(BaseModel):
+    """One pre-VLM screening decision for a single candidate window."""
+
+    clip_id: str
+    source_file: str
+    sort_key: str = ""
+    candidate_index: int = Field(default=0, ge=0)
+    interval: PrescreenInterval
+    gate_mode: Literal["advisory", "enabled"] = "advisory"
+    is_high_fps: bool = False
+    hilight_tags: list[float] = Field(default_factory=list)
+    hilight_candidates: list[list[float]] = Field(default_factory=list)
+    bitrate_density: float | None = None
+    telemetry_type: str = ""
+    scen_dominant: str | None = None
+    scen_confidence: float | None = None
+    scen_coverage: float | None = None
+    domain_prior_applied: bool = False
+    domain_prior_reason: str = ""
+    yavg: float | None = None
+    unif: float | None = None
+    roll_deg: float | None = None
+    pitch_deg: float | None = None
+    gyro_rms: float | None = None
+    gps_speed_ms: float | None = None
+    face_detected: bool | None = None
+    audio_peak_db: float | None = None
+    audio_spike_triggered: bool = False
+    laplacian_sharpness: float | None = None
+    hsv_entropy: float | None = None
+    thresholds: dict[str, float] = Field(default_factory=dict)
+    gates: list[PrescreenGateOutcome] = Field(default_factory=list)
+    telemetry_score: float | None = None
+    score_components: list[PrescreenScoreComponent] = Field(default_factory=list)
+    action: Literal["keep", "reject", "defer"] = "keep"
+    vlm_call: bool = False
+    reason: str = ""
+
+
+class PrescreenTraceOutput(BaseModel):
+    """Top-level prescreen trace file schema."""
+
+    version: int = 1
+    total_clips: int = Field(default=0, ge=0)
+    total_records: int = Field(default=0, ge=0)
+    records: list[PrescreenRecord] = Field(default_factory=list)
 
 
 class PromptCandidate(BaseModel):

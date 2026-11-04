@@ -2233,3 +2233,217 @@ def test_process_clip_on_trace_flush_called(tmp_path: Path) -> None:
 
     assert "pass0" in flush_calls
     assert "pass1" in flush_calls
+
+
+def _make_prescreen_record(**overrides):
+    """Build a minimal PrescreenRecord for trace-projection tests."""
+    from utils.models import PrescreenInterval, PrescreenRecord
+
+    payload = {
+        "clip_id": "ps_clip",
+        "source_file": "clip.mp4",
+        "interval": PrescreenInterval(start=10.0, end=20.0),
+        "action": "reject",
+        "telemetry_score": 0.42,
+        "hsv_entropy": 0.75,
+        "laplacian_sharpness": 123.4,
+        "audio_peak_db": -8.5,
+        "audio_spike_triggered": True,
+    }
+    payload.update(overrides)
+    return PrescreenRecord(**payload)
+
+
+def test_prescreen_trace_fields_empty_when_screening_disabled() -> None:
+    """A disabled funnel yields no trace fields at all."""
+    assert scan._prescreen_trace_fields(None, 12.0) == {}
+
+
+def test_prescreen_trace_fields_action_only_outside_records() -> None:
+    """Timestamps outside every window report the default keep action only."""
+    from utils.prescreen import PrescreenResult
+
+    result = PrescreenResult(records=[_make_prescreen_record()])
+
+    assert scan._prescreen_trace_fields(result, 99.0) == {"prescreen_action": "keep"}
+
+
+def test_prescreen_trace_fields_projects_covering_record() -> None:
+    """A timestamp inside a window carries that record's metrics."""
+    from utils.prescreen import PrescreenResult
+
+    result = PrescreenResult(records=[_make_prescreen_record()])
+    fields = scan._prescreen_trace_fields(result, 15.0)
+
+    assert fields == {
+        "prescreen_action": "reject",
+        "telemetry_score": 0.42,
+        "hsv_entropy": 0.75,
+        "laplacian_sharpness": 123.4,
+        "audio_peak_db": -8.5,
+        "audio_spike_triggered": True,
+    }
+
+
+def test_prescreen_trace_fields_interval_bounds_are_inclusive() -> None:
+    """Boundary timestamps resolve to the window covering them."""
+    from utils.prescreen import PrescreenResult
+
+    result = PrescreenResult(records=[_make_prescreen_record()])
+
+    assert scan._prescreen_trace_fields(result, 10.0)["prescreen_action"] == "reject"
+    assert scan._prescreen_trace_fields(result, 20.0)["prescreen_action"] == "reject"
+    assert scan._prescreen_trace_fields(result, 20.001)["prescreen_action"] == "keep"
+
+
+def test_prescreen_clip_returns_none_when_disabled(tmp_path: Path) -> None:
+    """A disabled config skips FFmpeg, telemetry, and screening entirely."""
+    from utils.prescreen import PrescreenConfig
+
+    with (
+        patch.object(scan, "load_telemetry") as mock_telemetry,
+        patch.object(scan, "screen_clip") as mock_screen,
+    ):
+        result, track = scan._prescreen_clip(
+            {"clip_id": "c1", "file_name": "clip.mp4", "duration": "12.0"},
+            str(tmp_path / "clip.mp4"),
+            PrescreenConfig(enabled=False),
+        )
+
+    assert result is None
+    assert track is None
+    mock_telemetry.assert_not_called()
+    mock_screen.assert_not_called()
+
+
+def test_prescreen_clip_loads_telemetry_and_screens(tmp_path: Path) -> None:
+    """Enabled screening loads the telemetry track and forwards clip metadata."""
+    from utils.prescreen import PrescreenConfig, PrescreenResult
+
+    track = MagicMock(name="track")
+    expected = PrescreenResult(duration=12.0)
+    cache_dir = tmp_path / "telemetry"
+
+    with (
+        patch.object(scan, "load_telemetry", return_value=track) as mock_telemetry,
+        patch.object(scan, "screen_clip", return_value=expected) as mock_screen,
+    ):
+        result, got_track = scan._prescreen_clip(
+            {
+                "clip_id": "c1",
+                "file_name": "clip.mp4",
+                "duration": "12.5",
+                "telemetry_type": "gpmf",
+                "hilight_tags": [3.0],
+                "bitrate_density": 1.5,
+                "is_high_fps": True,
+            },
+            str(tmp_path / "clip.mp4"),
+            PrescreenConfig(enabled=True),
+            telemetry_cache_dir=cache_dir,
+        )
+
+    assert result is expected
+    assert got_track is track
+    assert mock_telemetry.call_args.kwargs["telemetry_type"] == "gpmf"
+    assert mock_telemetry.call_args.kwargs["cache_path"] == cache_dir / "c1.telemetry.bin"
+    kwargs = mock_screen.call_args.kwargs
+    assert kwargs["clip_id"] == "c1"
+    assert kwargs["hilight_tags"] == [3.0]
+    assert kwargs["bitrate_density"] == 1.5
+    assert kwargs["is_high_fps"] is True
+    assert kwargs["track"] is track
+
+
+def test_analyze_contact_sheets_batches_and_maps_timestamps(tmp_path: Path) -> None:
+    """Frames are grouped into full sheets and results keyed by tile timestamp."""
+    frames = [
+        {"frame_path": str(tmp_path / f"f{index}.jpg"), "timestamp": float(index)}
+        for index in range(4)
+    ]
+    tiles = [{"detected": True, "subject": f"t{index}"} for index in range(4)]
+
+    with (
+        patch.object(scan, "compose_frame_mosaic", return_value=str(tmp_path / "s0.jpg")) as mosaic,
+        patch.object(scan, "call_ollama", return_value={"tiles": tiles}),
+        patch.object(scan, "normalize_vlm_sheet_response", return_value=tiles),
+    ):
+        results, meta = scan._analyze_contact_sheets(
+            frames,
+            sheet_dir=tmp_path / "sheets",
+            prompt="P",
+            system_prompt="S",
+            ollama_host="http://x",
+            ollama_model="m",
+            timeout=5.0,
+            client=None,
+        )
+
+    assert mosaic.call_count == 1
+    assert mosaic.call_args.args[0] == [frame["frame_path"] for frame in frames]
+    assert set(results) == {0.0, 1.0, 2.0, 3.0}
+    assert results[2.0]["subject"] == "t2"
+    assert meta[3.0] == {
+        "contact_sheet_path": str(tmp_path / "s0.jpg"),
+        "tile_index": 3,
+        "tile_timestamp": 3.0,
+        "tile_count": 4,
+    }
+
+
+def test_analyze_contact_sheets_skips_partial_batch_and_failures(tmp_path: Path) -> None:
+    """Partial batches and unusable sheets are left for the per-frame fallback."""
+    frames = [
+        {"frame_path": str(tmp_path / f"f{index}.jpg"), "timestamp": float(index)}
+        for index in range(5)
+    ]
+
+    with (
+        patch.object(scan, "compose_frame_mosaic", return_value=None),
+        patch.object(scan, "call_ollama") as mock_call,
+    ):
+        assert scan._analyze_contact_sheets(
+            frames,
+            sheet_dir=tmp_path / "sheets",
+            prompt="P",
+            system_prompt="S",
+            ollama_host="http://x",
+            ollama_model="m",
+            timeout=5.0,
+            client=None,
+        ) == ({}, {})
+    mock_call.assert_not_called()
+
+    with (
+        patch.object(scan, "compose_frame_mosaic", return_value=str(tmp_path / "s0.jpg")),
+        patch.object(scan, "call_ollama", return_value={"tiles": []}),
+        patch.object(scan, "normalize_vlm_sheet_response", return_value=None),
+    ):
+        assert scan._analyze_contact_sheets(
+            frames,
+            sheet_dir=tmp_path / "sheets",
+            prompt="P",
+            system_prompt="S",
+            ollama_host="http://x",
+            ollama_model="m",
+            timeout=5.0,
+            client=None,
+        ) == ({}, {})
+
+
+def test_analyze_contact_sheets_requires_full_batch(tmp_path: Path) -> None:
+    """A frame count below the slot count produces no sheet at all."""
+    frames = [{"frame_path": str(tmp_path / "f0.jpg"), "timestamp": 0.0}]
+
+    with patch.object(scan, "compose_frame_mosaic") as mosaic:
+        assert scan._analyze_contact_sheets(
+            frames,
+            sheet_dir=tmp_path / "sheets",
+            prompt="P",
+            system_prompt="S",
+            ollama_host="http://x",
+            ollama_model="m",
+            timeout=5.0,
+            client=None,
+        ) == ({}, {})
+    mosaic.assert_not_called()
