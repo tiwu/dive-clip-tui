@@ -664,3 +664,127 @@ def test_render_detections_rendered_cache(tmp_path: Path) -> None:
     assert rendered_count == 1
     assert failed_count == 0
     assert "c2_5.0s-10.0s_unknown_q0.mp4" in cache
+
+
+def test_render_detections_forwards_quality(tmp_path: Path) -> None:
+    """render_detections must pass the resolved quality down to render_clip."""
+    from utils.encoder import VideoQuality
+
+    source_video = tmp_path / "source.mp4"
+    source_video.touch()
+    highlights_dir = tmp_path / "highlights"
+    highlights_dir.mkdir(parents=True, exist_ok=True)
+
+    detections = [
+        {
+            "clip_id": "c1",
+            "file_path": str(source_video),
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "subject": "turtle",
+            "quality_score": 8,
+        }
+    ]
+
+    received: list[VideoQuality] = []
+
+    def mock_render_clip(source, start, end, out, quality=None):
+        received.append(quality)
+        out.write_bytes(b"newly rendered")
+        return True
+
+    with patch.object(render, "render_clip", side_effect=mock_render_clip):
+        rendered_count, failed_count = render.render_detections(
+            detections, highlights_dir, quality=VideoQuality(cq=17, crf=15)
+        )
+
+    assert rendered_count == 1
+    assert failed_count == 0
+    assert received == [VideoQuality(cq=17, crf=15)]
+
+
+def test_render_detections_omits_quality_when_unset(tmp_path: Path) -> None:
+    """Without an explicit quality the quality kwarg must not be forwarded."""
+    source_video = tmp_path / "source.mp4"
+    source_video.touch()
+    highlights_dir = tmp_path / "highlights"
+    highlights_dir.mkdir(parents=True, exist_ok=True)
+
+    detections = [
+        {
+            "clip_id": "c1",
+            "file_path": str(source_video),
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "subject": "turtle",
+            "quality_score": 8,
+        }
+    ]
+
+    def mock_render_clip(source, start, end, out):
+        out.write_bytes(b"newly rendered")
+        return True
+
+    with patch.object(render, "render_clip", side_effect=mock_render_clip):
+        rendered_count, failed_count = render.render_detections(detections, highlights_dir)
+
+    assert rendered_count == 1
+    assert failed_count == 0
+
+
+def test_main_passes_configured_quality(tmp_path: Path) -> None:
+    """main should resolve scan_parameters.video_quality and forward it."""
+    import os
+    import sys as sys_module
+
+    from utils.encoder import VideoQuality
+
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(
+        json.dumps({
+            "detections": [
+                {
+                    "clip_id": "clip001",
+                    "file_path": str(tmp_path / "source1.mp4"),
+                    "start_time": 10.0,
+                    "end_time": 15.0,
+                    "subject": "turtle",
+                    "quality_score": 8,
+                }
+            ]
+        })
+    )
+    (tmp_path / "source1.mp4").touch()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'general:\n  output_dir: "./outputs"\n'
+        "scan_parameters:\n  video_quality:\n    cq: 17\n    crf: 15\n"
+    )
+
+    original_argv = sys_module.argv
+    original_cwd = Path.cwd()
+    captured: dict[str, object] = {}
+
+    def fake_render_detections(detections, highlights_dir, state=None, quality=None):
+        captured["quality"] = quality
+        return len(detections), 0
+
+    try:
+        sys_module.argv = [
+            "05_render_clips.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "highlights"),
+            "--config",
+            str(config_path),
+        ]
+        os.chdir(tmp_path)
+        with patch.object(render, "render_detections", side_effect=fake_render_detections):
+            render.main()
+    finally:
+        sys_module.argv = original_argv
+        os.chdir(original_cwd)
+
+    assert captured["quality"] == VideoQuality(cq=17, crf=15)

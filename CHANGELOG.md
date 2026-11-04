@@ -6,6 +6,16 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Changed
+- Aftermovie assembly now cuts and applies transitions directly from the source footage in a single pass (falling back to pre-rendered clips only when the source is unavailable), avoiding multi-generation re-encoding loss (#69).
+- Raise the default `scan_parameters.fine_scale` to `1280:-2` so the fine VLM pass can resolve macro marine life more reliably (#69).
+- Thread a single resolved `VideoQuality` through `dive-clip scan`, `render-clips`, and `07_create_aftermovie.py`, so every encode in a run honours `scan_parameters.video_quality` (#69).
+
+### Fixed
+- Prevent duplicate clips in aftermovie assembly by building unique per-detection temporary filenames (`<clip_id>_<index>_<start>-<end>`) instead of reusing one stem per clip (#69).
+- Write the assembled aftermovie/highlight reel into the per-run directory (`<output>/runs/<run_id>/`) and expose it via a refreshed top-level convenience symlink instead of scattering it in the output root (#69).
+- Restore Constant Quality rate control for every render (`-rc:v vbr -cq:v 19 -b:v 0` with spatial/temporal AQ for NVENC, `-crf 19` for libx264), fixing severe bitrate starvation and macroblocking in 4K output (#69).
+
 ## [0.29.0] - 2026-11-04
 
 ### Added

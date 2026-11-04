@@ -14,6 +14,7 @@ from utils.run_archive import (
     default_run_log_path,
     generate_run_id,
     get_run_dir,
+    update_artifact_symlink,
     update_latest_symlink,
 )
 
@@ -160,6 +161,82 @@ def test_archive_run_artifacts_with_aftermovie(tmp_path: Path) -> None:
         aftermovie_path=output_dir / "nonexistent.mp4",
     )
     assert "aftermovie" not in archived_missing
+
+
+def test_archive_run_artifacts_skips_copy_when_already_in_run_dir(tmp_path: Path) -> None:
+    """An aftermovie already written inside run_dir must not be copied onto itself."""
+    output_dir = tmp_path / "output"
+    run_dir = output_dir / "runs" / "run-20261101-120000"
+    run_dir.mkdir(parents=True)
+    in_place = run_dir / "aftermovie.mp4"
+    in_place.write_bytes(b"fake mp4 data")
+
+    with patch("utils.run_archive.shutil.copy2") as mock_copy:
+        archived = archive_run_artifacts(run_dir, aftermovie_path=in_place)
+
+    mock_copy.assert_not_called()
+    assert archived["aftermovie"] == in_place
+    assert in_place.read_bytes() == b"fake mp4 data"
+
+
+def test_update_artifact_symlink_points_at_latest_run(tmp_path: Path) -> None:
+    """update_artifact_symlink links <output_dir>/<name> to the artifact in run_dir."""
+    out_dir = tmp_path / "out"
+    run_dir = out_dir / "runs" / "run-20261101-100000"
+    run_dir.mkdir(parents=True)
+    artifact = run_dir / "aftermovie.mp4"
+    artifact.write_bytes(b"video")
+
+    update_artifact_symlink(out_dir, run_dir, "aftermovie.mp4")
+
+    link = out_dir / "aftermovie.mp4"
+    assert link.is_symlink()
+    assert link.resolve() == artifact.resolve()
+
+
+def test_update_artifact_symlink_replaces_stale_link(tmp_path: Path) -> None:
+    """A stale convenience link must be repointed at the newest run."""
+    out_dir = tmp_path / "out"
+    old_run = out_dir / "runs" / "run-old"
+    new_run = out_dir / "runs" / "run-new"
+    old_run.mkdir(parents=True)
+    new_run.mkdir(parents=True)
+    (old_run / "aftermovie.mp4").write_bytes(b"old")
+    (new_run / "aftermovie.mp4").write_bytes(b"new")
+
+    update_artifact_symlink(out_dir, old_run, "aftermovie.mp4")
+    update_artifact_symlink(out_dir, new_run, "aftermovie.mp4")
+
+    link = out_dir / "aftermovie.mp4"
+    assert link.read_bytes() == b"new"
+    assert link.resolve() == (new_run / "aftermovie.mp4").resolve()
+
+
+def test_update_artifact_symlink_skips_missing_artifact(tmp_path: Path) -> None:
+    """No convenience link is created when the artifact does not exist."""
+    out_dir = tmp_path / "out"
+    run_dir = out_dir / "runs" / "run-1"
+    run_dir.mkdir(parents=True)
+
+    update_artifact_symlink(out_dir, run_dir, "aftermovie.mp4")
+
+    assert not (out_dir / "aftermovie.mp4").exists()
+    assert not (out_dir / "aftermovie.mp4").is_symlink()
+
+
+def test_update_artifact_symlink_exfat_fallback(tmp_path: Path) -> None:
+    """update_artifact_symlink records a text pointer when symlinks are unavailable."""
+    out_dir = tmp_path / "out"
+    run_dir = out_dir / "runs" / "run-20261101-100000"
+    run_dir.mkdir(parents=True)
+    (run_dir / "aftermovie.mp4").write_bytes(b"video")
+
+    with patch.object(Path, "symlink_to", side_effect=OSError(1, "Operation not permitted")):
+        update_artifact_symlink(out_dir, run_dir, "aftermovie.mp4")
+
+    fallback = out_dir / "aftermovie.txt"
+    assert fallback.exists()
+    assert "run-20261101-100000" in fallback.read_text(encoding="utf-8")
 
 
 def test_archive_run_artifacts_with_classifications(tmp_path: Path) -> None:

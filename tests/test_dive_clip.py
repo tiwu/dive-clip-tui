@@ -496,6 +496,45 @@ def test_background_render_worker(tmp_path: Path) -> None:
     assert mock_render.call_args[1].get("log_to_console") is False
 
 
+def test_background_render_worker_forwards_quality(tmp_path: Path) -> None:
+    """The background renderer must honour scan_parameters.video_quality."""
+    import json
+    import threading
+
+    from scripts.dive_clip import _run_background_render_worker
+    from utils.encoder import VideoQuality
+
+    detections_file = tmp_path / "detections_refined.json"
+    highlights_dir = tmp_path / "highlights"
+    detections_file.write_text(
+        json.dumps({
+            "total_clips": 1,
+            "total_detections": 1,
+            "detections": [{"file_path": "a.mp4", "subject": "turtle"}],
+        })
+    )
+
+    stop_event = threading.Event()
+    mock_render = MagicMock()
+    with patch("scripts.dive_clip.importlib.util.spec_from_file_location") as mock_spec:
+        mock_mod = MagicMock()
+        mock_mod.render_detections = mock_render
+        mock_spec.return_value.loader.exec_module = lambda mod: None
+        with patch("scripts.dive_clip.importlib.util.module_from_spec", return_value=mock_mod):
+            timer = threading.Timer(0.1, stop_event.set)
+            timer.start()
+            _run_background_render_worker(
+                detections_file,
+                highlights_dir,
+                stop_event,
+                VideoQuality(cq=17, crf=15),
+            )
+            timer.join()
+
+    assert mock_render.called
+    assert mock_render.call_args[1].get("quality") == VideoQuality(cq=17, crf=15)
+
+
 def test_build_parser_version() -> None:
     """build_parser should configure --version flag."""
     parser = build_parser()
@@ -777,12 +816,17 @@ def test_cmd_scan_with_assemble_runs_aftermovie(tmp_path: Path) -> None:
     assert assemble_cmd[assemble_cmd.index("--music") + 1] == str(music_file)
     assert "--top-n" in assemble_cmd
     assert assemble_cmd[assemble_cmd.index("--top-n") + 1] == "7"
-    assert assemble_cmd[assemble_cmd.index("--output") + 1] == str(output_folder / "aftermovie.mp4")
-
     latest = find_latest_run_dir(output_folder)
     assert latest is not None
-    assert (output_folder / "aftermovie.mp4").exists()
+    assert (
+        Path(assemble_cmd[assemble_cmd.index("--output") + 1]).resolve()
+        == (latest / "aftermovie.mp4").resolve()
+    )
+
     assert (latest / "aftermovie.mp4").exists()
+    convenience_link = output_folder / "aftermovie.mp4"
+    assert convenience_link.is_symlink()
+    assert convenience_link.resolve() == (latest / "aftermovie.mp4").resolve()
     state = json.loads((latest / "pipeline_state.json").read_text(encoding="utf-8"))
     assert state.get("assemble_done") is True
 
@@ -814,8 +858,11 @@ def test_cmd_scan_with_assemble_simple_mode(tmp_path: Path) -> None:
     assert mock_run.call_count == 4
     assemble_cmd = mock_run.call_args_list[3].args[0]
     assert "06_assemble_video.py" in assemble_cmd[1]
-    assert assemble_cmd[assemble_cmd.index("--output") + 1] == str(
-        output_folder / "highlight_reel.mp4"
+    latest = find_latest_run_dir(output_folder)
+    assert latest is not None
+    assert (
+        Path(assemble_cmd[assemble_cmd.index("--output") + 1]).resolve()
+        == (latest / "highlight_reel.mp4").resolve()
     )
 
 
@@ -840,7 +887,7 @@ def test_cmd_scan_assemble_resume_skips_completed(tmp_path: Path) -> None:
     )
     (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
     (run_dir / "detections_refined.json").write_text("{}", encoding="utf-8")
-    (output_folder / "aftermovie.mp4").write_bytes(b"video")
+    (run_dir / "aftermovie.mp4").write_bytes(b"video")
 
     parser = build_parser()
     args = parser.parse_args([
@@ -934,8 +981,44 @@ def test_cmd_scan_assemble_summary_panel_includes_aftermovie_path(tmp_path: Path
         for call in mock_console.print.call_args_list
         if call.args and isinstance(call.args[0], Panel)
     ]
-    expected_path = str(output_folder / "aftermovie.mp4")
+    run_dir = find_latest_run_dir(output_folder)
+    assert run_dir is not None
+    expected_path = str(run_dir / "aftermovie.mp4")
     assert any(expected_path in str(p.renderable) for p in panels)
+
+
+def test_cmd_scan_assemble_creates_output_dir_convenience_link(tmp_path: Path) -> None:
+    """A link at <output_dir>/aftermovie.mp4 should point at the latest run's aftermovie."""
+    input_folder = tmp_path / "footage"
+    input_folder.mkdir()
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "scan",
+        "--input",
+        str(input_folder),
+        "--output",
+        str(output_folder),
+        "--assemble",
+    ])
+
+    def fake_run(cmd, *rest, **kwargs):
+        if "07_create_aftermovie.py" in cmd[1] and "--output" in cmd:
+            target = Path(cmd[cmd.index("--output") + 1])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"video")
+        return MagicMock(returncode=0)
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=fake_run):
+        assert cmd_scan(args) == 0
+
+    run_dir = find_latest_run_dir(output_folder)
+    assert run_dir is not None
+    convenience_link = output_folder / "aftermovie.mp4"
+    assert convenience_link.is_symlink()
+    assert convenience_link.resolve() == (run_dir / "aftermovie.mp4").resolve()
 
 
 def test_cmd_assemble_subcommand_resolves_latest_run(tmp_path: Path) -> None:
@@ -967,7 +1050,9 @@ def test_cmd_assemble_subcommand_resolves_latest_run(tmp_path: Path) -> None:
     assert "06_assemble_video.py" in cmd[1]
     assert Path(cmd[cmd.index("--input") + 1]).resolve() == detections_file.resolve()
     assert Path(cmd[cmd.index("--clips-dir") + 1]).resolve() == highlights_dir.resolve()
-    assert Path(cmd[cmd.index("--output") + 1]) == output_folder / "highlight_reel.mp4"
+    assert (
+        Path(cmd[cmd.index("--output") + 1]).resolve() == (run_dir / "highlight_reel.mp4").resolve()
+    )
     assert cmd[cmd.index("--top-n") + 1] == "6"
 
 
@@ -1014,11 +1099,78 @@ def test_cmd_aftermovie_subcommand_resolves_latest_run(tmp_path: Path) -> None:
     assert "07_create_aftermovie.py" in cmd[1]
     assert Path(cmd[cmd.index("--input") + 1]).resolve() == detections_file.resolve()
     assert Path(cmd[cmd.index("--clips-dir") + 1]).resolve() == highlights_dir.resolve()
-    assert Path(cmd[cmd.index("--output") + 1]) == output_folder / "aftermovie.mp4"
+    assert Path(cmd[cmd.index("--output") + 1]).resolve() == (run_dir / "aftermovie.mp4").resolve()
     assert cmd[cmd.index("--music") + 1] == str(music_file)
     assert cmd[cmd.index("--music-volume") + 1] == "0.2"
     assert cmd[cmd.index("--fade-duration") + 1] == "1.5"
     assert cmd[cmd.index("--top-n") + 1] == "8"
+
+
+def test_cmd_assemble_links_run_artifact_at_output_root(tmp_path: Path) -> None:
+    """The assembled reel stays in the run dir and is exposed via a top-level symlink."""
+    output_folder = tmp_path / "outputs"
+    run_dir = output_folder / "runs" / "run-20261101-120000"
+    (run_dir / "highlights").mkdir(parents=True)
+    (run_dir / "detections_refined.json").write_text('{"detections": []}', encoding="utf-8")
+
+    from utils.run_archive import update_latest_symlink
+
+    update_latest_symlink(output_folder, run_dir)
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_folder}"\n', encoding="utf-8")
+
+    parser = build_parser()
+    args = parser.parse_args(["assemble", "--config", str(config_file)])
+
+    def fake_run(cmd: list[str], *unused_args: object, **unused_kwargs: object) -> MagicMock:
+        Path(cmd[cmd.index("--output") + 1]).write_bytes(b"reel")
+        return MagicMock(returncode=0)
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=fake_run):
+        assert args.func(args) == 0
+
+    convenience_link = output_folder / "highlight_reel.mp4"
+    assert convenience_link.is_symlink()
+    assert convenience_link.resolve() == (run_dir / "highlight_reel.mp4").resolve()
+    # The symlink must never replace the real artifact.
+    assert (run_dir / "highlight_reel.mp4").read_bytes() == b"reel"
+
+
+def test_cmd_aftermovie_leaves_explicit_output_untouched(tmp_path: Path) -> None:
+    """An explicit --output path outside the run dir must not be turned into a symlink."""
+    output_folder = tmp_path / "outputs"
+    run_dir = output_folder / "runs" / "run-20261101-120000"
+    (run_dir / "highlights").mkdir(parents=True)
+    (run_dir / "detections_refined.json").write_text('{"detections": []}', encoding="utf-8")
+
+    from utils.run_archive import update_latest_symlink
+
+    update_latest_symlink(output_folder, run_dir)
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_folder}"\n', encoding="utf-8")
+    explicit_output = tmp_path / "custom-aftermovie.mp4"
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "aftermovie",
+        "--config",
+        str(config_file),
+        "--output",
+        str(explicit_output),
+    ])
+
+    def fake_run(cmd: list[str], *unused_args: object, **unused_kwargs: object) -> MagicMock:
+        Path(cmd[cmd.index("--output") + 1]).write_bytes(b"custom")
+        return MagicMock(returncode=0)
+
+    with patch("scripts.dive_clip.subprocess.run", side_effect=fake_run):
+        assert args.func(args) == 0
+
+    assert not explicit_output.is_symlink()
+    assert explicit_output.read_bytes() == b"custom"
+    assert not (output_folder / "custom-aftermovie.mp4").exists()
 
 
 def test_cmd_scan_assemble_failure_preserves_prior_steps(tmp_path: Path) -> None:

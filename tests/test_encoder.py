@@ -5,10 +5,12 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from utils.encoder import (
+    VideoQuality,
     clear_encoder_cache,
     get_fallback_encoder,
     get_video_encoder,
     probe_nvenc,
+    resolve_video_quality,
 )
 
 
@@ -92,3 +94,74 @@ def test_get_fallback_encoder() -> None:
     assert args[args.index("-pix_fmt") + 1] == "yuv420p"
 
     assert get_fallback_encoder("libx264") is None
+
+
+def _arg_value(args: list[str], flag: str) -> str:
+    return args[args.index(flag) + 1]
+
+
+def test_get_video_encoder_nvenc_uses_constant_quality_rate_control() -> None:
+    """NVENC must use VBR constant-quality mode; without it ffmpeg defaults to ~2 Mbps."""
+    _, args = get_video_encoder("h264_nvenc")
+
+    assert _arg_value(args, "-preset") == "p5"
+    assert _arg_value(args, "-tune") == "hq"
+    assert _arg_value(args, "-rc:v") == "vbr"
+    assert _arg_value(args, "-cq:v") == "19"
+    assert _arg_value(args, "-b:v") == "0"
+    assert _arg_value(args, "-spatial-aq") == "1"
+    assert _arg_value(args, "-temporal-aq") == "1"
+
+
+def test_get_video_encoder_libx264_uses_constant_rate_factor() -> None:
+    """libx264 must pin a CRF value so renders do not fall back to default quality."""
+    _, args = get_video_encoder("libx264", threads=2)
+
+    assert _arg_value(args, "-crf") == "19"
+    assert _arg_value(args, "-preset") == "veryfast"
+
+
+def test_get_fallback_encoder_uses_constant_rate_factor() -> None:
+    fallback = get_fallback_encoder("h264_nvenc", threads=4)
+
+    assert fallback is not None
+    _, args = fallback
+    assert _arg_value(args, "-crf") == "19"
+
+
+def test_get_video_encoder_honours_custom_quality() -> None:
+    quality = VideoQuality(cq=23, crf=26)
+
+    _, nvenc_args = get_video_encoder("h264_nvenc", quality=quality)
+    _, x264_args = get_video_encoder("libx264", quality=quality)
+    fallback = get_fallback_encoder("h264_nvenc", quality=quality)
+
+    assert _arg_value(nvenc_args, "-cq:v") == "23"
+    assert _arg_value(x264_args, "-crf") == "26"
+    assert fallback is not None
+    assert _arg_value(fallback[1], "-crf") == "26"
+
+
+def test_resolve_video_quality_defaults() -> None:
+    quality = resolve_video_quality(None)
+
+    assert quality.cq == 19
+    assert quality.crf == 19
+
+
+def test_resolve_video_quality_reads_scan_parameters() -> None:
+    config = {"scan_parameters": {"video_quality": {"cq": 21, "crf": 24}}}
+
+    quality = resolve_video_quality(config)
+
+    assert quality.cq == 21
+    assert quality.crf == 24
+
+
+def test_resolve_video_quality_ignores_invalid_values() -> None:
+    config = {"scan_parameters": {"video_quality": {"cq": "high", "crf": None}}}
+
+    quality = resolve_video_quality(config)
+
+    assert quality.cq == 19
+    assert quality.crf == 19
