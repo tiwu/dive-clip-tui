@@ -453,6 +453,11 @@ default.
    with no signal reports `signal unavailable` and is skipped, and weights renormalize
    over whichever signals exist.
 
+The funnel runs first for each clip, before Pass 0 domain classification. With
+`gate_mode: "enabled"`, a clip whose windows are all rejected is skipped outright
+(recorded as `skipped_prescreen` in `classifications.json`) without any VLM call
+or coarse frame extraction. Advisory mode never skips clips.
+
 #### Telemetry Specifications & Coordinates Reference
 * **GoPro GPMF Format**: Based on the [GoPro GPMF parser specification](https://github.com/gopro/gpmf-parser).
   Every KLV payload is 32-bit aligned (`((payload_length + 3) & ~3)`).

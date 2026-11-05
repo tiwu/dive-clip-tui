@@ -165,7 +165,7 @@ When using the GitHub CLI:
   `((payload_length + 3) & ~3)`. A missing sensor must never act as a penalty — drop
   the signal and renormalize weights. Telemetry specifications, coordinate axes, and
   conversion formulas must be permanently cited in `README.md` and module docstrings.
-- **Pre-VLM screening:** `utils/prescreen.py` runs before Pass 1 and is off by
+- **Pre-VLM screening:** `utils/prescreen.py` runs before Pass 0 and is off by
   default (`prescreen.enabled`). Keep image math dependency-free (pure Python over
   ffmpeg `rgb24` bytes; no NumPy/Pillow). Screening decisions are recorded in
   `prescreen_trace.json`, one record per candidate window, never per raw sample.

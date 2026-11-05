@@ -900,6 +900,21 @@ def _prescreen_trace_fields(result: PrescreenResult | None, timestamp: float) ->
     return fields
 
 
+def _prescreen_rejects_whole_clip(
+    prescreen_config: PrescreenConfig, result: PrescreenResult | None
+) -> bool:
+    """Return True when the funnel rejected every candidate window of a clip.
+
+    Only ``gate_mode: "enabled"`` may drop footage; advisory mode never produces
+    ``reject`` actions, so it can never trigger a whole-clip skip.
+    """
+    if not prescreen_config.enabled or prescreen_config.gate_mode != "enabled":
+        return False
+    if result is None or not result.records:
+        return False
+    return all(record.action == "reject" for record in result.records)
+
+
 def _prescreen_clip(
     clip: dict,
     file_path: str,
@@ -1037,6 +1052,7 @@ def process_clip(
 ) -> list[RefinedDetection]:
     """Process a single clip through 3-stage domain-aware scanning.
 
+    Pre-screen: Optional metadata/telemetry/programmatic gates (no VLM); may skip the clip.
     Pass 0: Video domain classification (sample frames).
     Pass 1: Domain coarse scan (candidate windows & subject identification).
     Pass 2: Subject-routed fine scan (quality scoring & refined highlight windows).
@@ -1105,6 +1121,52 @@ def process_clip(
     client = ollama_client or create_vlm_client(config)
 
     tags = clip.get("tags", [])
+
+    # ---------- Pre-screen: metadata, telemetry & programmatic gates (no VLM) ----------
+    # Runs first so clips that fail every gate never cost a Pass 0 VLM call or a
+    # coarse frame extraction.
+    prescreen_config = PrescreenConfig.from_config(config)
+    prescreen_result: PrescreenResult | None = None
+    if prescreen_config.enabled:
+        if state is not None:
+            state.set_activity(f"scan: {clip['file_name']} (pre-screen)")
+        prescreen_result, _track = _prescreen_clip(
+            clip,
+            file_path,
+            prescreen_config,
+            telemetry_cache_dir=work_dir / "telemetry",
+        )
+        if prescreen_result is not None and prescreen_collector is not None:
+            prescreen_collector.extend(prescreen_result.records)
+            if on_trace_flush is not None:
+                on_trace_flush("prescreen")
+
+    if _prescreen_rejects_whole_clip(prescreen_config, prescreen_result):
+        if pass0_collector is not None:
+            pass0_collector.append(
+                ClipClassification(
+                    clip_id=clip_id,
+                    file_name=clip.get("file_name", ""),
+                    file_path=str(file_path),
+                    domain="unusable",
+                    usable=False,
+                    reason="all candidate windows rejected by pre-screen gates",
+                    disposition="skipped_prescreen",
+                    sort_key=make_sort_key(clip.get("file_name", ""), 0.0, 0.0, clip_id),
+                )
+            )
+            if on_trace_flush is not None:
+                on_trace_flush("pass0")
+        msg = f"⚡ Skipped {clip['file_name']}: all candidate windows rejected by pre-screen gates"
+        logger.warning(msg)
+        get_console().print(f"[yellow]{msg}[/yellow]")
+        if checkpoint is not None:
+            checkpoint.detected_domain = "unusable"
+            checkpoint.pass_stage = "completed"
+            if checkpoint_file is not None:
+                checkpoint.save_atomic(checkpoint_file)
+        cleanup_work_dir(clip_work_dir)
+        return []
 
     # ---------- Pass 0: Domain Resolution / Classification ----------
     registry = load_custom_templates(config)
@@ -1355,20 +1417,6 @@ def process_clip(
 
     pass1_frame_traces: list[CoarseFrameTrace] = []
 
-    prescreen_config = PrescreenConfig.from_config(config)
-    prescreen_result: PrescreenResult | None = None
-    if prescreen_config.enabled:
-        prescreen_result, _track = _prescreen_clip(
-            clip,
-            file_path,
-            prescreen_config,
-            telemetry_cache_dir=work_dir / "telemetry",
-        )
-        if prescreen_result is not None and prescreen_collector is not None:
-            prescreen_collector.extend(prescreen_result.records)
-            if on_trace_flush is not None:
-                on_trace_flush("prescreen")
-
     if skip_coarse_inference and checkpoint is not None:
         pass1_frame_traces.extend(
             CoarseFrameTrace(
@@ -1402,9 +1450,16 @@ def process_clip(
 
         sheet_results: dict[float, dict[str, Any]] = {}
         sheet_meta: dict[float, dict[str, Any]] = {}
-        if prescreen_config.contact_sheet and len(coarse_frames) > 1:
+        # Rejected frames are skipped in the loop below; keep them out of sheets too.
+        sheet_frames = [
+            frame
+            for frame in coarse_frames
+            if _prescreen_trace_fields(prescreen_result, frame["timestamp"]).get("prescreen_action")
+            != "reject"
+        ]
+        if prescreen_config.contact_sheet and len(sheet_frames) > 1:
             sheet_results, sheet_meta = _analyze_contact_sheets(
-                coarse_frames,
+                sheet_frames,
                 sheet_dir=clip_work_dir / "sheets",
                 prompt=coarse_prompt,
                 system_prompt=coarse_system_prompt,
@@ -1417,7 +1472,7 @@ def process_clip(
                 logger.info(
                     "[Pass 1] Contact sheets covered %d/%d frames for %s",
                     len(sheet_results),
-                    len(coarse_frames),
+                    len(sheet_frames),
                     clip["file_name"],
                 )
 
