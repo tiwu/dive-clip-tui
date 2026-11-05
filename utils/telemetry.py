@@ -289,11 +289,28 @@ def _walk_container(
             continue
         is_container = type_byte in GPMF_CONTAINER_TYPES or key in GPMF_CONTAINER_KEYS
         if is_container:
-            _walk_container(child, leaves, state)
+            stream_state = dict(state)
+            if key == "STRM":
+                stream_state["scal"] = None
+            _walk_container(child, leaves, stream_state)
             continue
         values = _decode_leaf_values(key, type_byte, child)
         if not values:
             continue
+
+        if key == "SCAL":
+            state["scal"] = values
+            continue
+
+        if key in ("GYRO", "ACCL") and state.get("scal"):
+            scal = state["scal"]
+            scal_len = len(scal)
+            values = [
+                float(val) / float(scal[i % scal_len])
+                if float(scal[i % scal_len]) != 0
+                else float(val)
+                for i, val in enumerate(values)
+            ]
 
         seconds = 0.0
         if state.get("stmp_us") is not None and state.get("stmp_base_us") is not None:
