@@ -60,7 +60,7 @@ def test_build_parser() -> None:
 
 
 def test_build_parser_with_flags() -> None:
-    """build_parser should parse resume, reset, and debug flags."""
+    """build_parser should parse resume, reset, debug, and trace flags."""
     parser = build_parser()
     args = parser.parse_args([
         "scan",
@@ -71,10 +71,12 @@ def test_build_parser_with_flags() -> None:
         "--resume",
         "--reset",
         "--debug",
+        "--trace",
     ])
     assert args.resume is True
     assert args.reset is True
     assert args.debug is True
+    assert args.trace is True
 
 
 def test_cmd_scan_skips_completed_steps(tmp_path: Path) -> None:

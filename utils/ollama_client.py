@@ -130,7 +130,7 @@ class OllamaClient(BaseVLMClient):
                 timeout=self.timeout,
             )
             response.raise_for_status()
-            logger.debug("Ollama response text: %s", response.text)
+            logger.trace("Ollama response text: %s", response.text)
             result = response.json()
         except requests.exceptions.RequestException as exc:
             logger.warning("Ollama request failed: %s", exc)

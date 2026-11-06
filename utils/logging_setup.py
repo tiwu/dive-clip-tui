@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -18,12 +19,26 @@ from rich.logging import RichHandler
 from utils.signals import setup_signal_handlers
 
 __all__ = [
+    "TRACE",
     "ExcludeNoConsoleFilter",
     "configure_logging",
     "default_log_path",
     "get_console",
     "setup_signal_handlers",
 ]
+
+TRACE: int = 5
+logging.addLevelName(TRACE, "TRACE")
+logging.TRACE = TRACE  # type: ignore[attr-defined]
+
+
+def _logger_trace(self: logging.Logger, message: str, *args: Any, **kwargs: Any) -> None:
+    if self.isEnabledFor(TRACE):
+        self._log(TRACE, message, args, **kwargs)
+
+
+if not hasattr(logging.Logger, "trace"):
+    logging.Logger.trace = _logger_trace  # type: ignore[attr-defined]
 
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
@@ -56,6 +71,7 @@ def default_log_path(output_dir: Path) -> Path:
 
 def configure_logging(
     debug: bool = False,
+    trace: bool = False,
     log_file: Path | None = None,
     console: Console | None = None,
 ) -> Path | None:
@@ -95,7 +111,13 @@ def configure_logging(
             root.removeHandler(existing)
             existing.close()
 
-    root.setLevel(logging.DEBUG if debug else logging.INFO)
+    if trace:
+        level = TRACE
+    elif debug:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    root.setLevel(level)
     for handler in handlers:
         setattr(handler, _OWNED_ATTR, True)
         root.addHandler(handler)

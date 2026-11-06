@@ -324,6 +324,7 @@ def main() -> None:
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--trace", action="store_true", help="Enable trace logging")
     parser.add_argument(
         "--input",
         default=None,
@@ -348,7 +349,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    configure_logging(debug=args.debug, log_file=args.log_file)
+    configure_logging(debug=args.debug, trace=args.trace, log_file=args.log_file)
     setup_signal_handlers()
 
     try:

@@ -2361,6 +2361,11 @@ def main() -> None:
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Enable ultra-verbose trace logging (raw VLM response texts)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -2408,7 +2413,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    configure_logging(debug=args.debug, log_file=args.log_file)
+    configure_logging(debug=args.debug, trace=args.trace, log_file=args.log_file)
 
     try:
         config = load_config(args.config)

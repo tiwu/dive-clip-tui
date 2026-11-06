@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add `TRACE` log level (level 5) and `--trace` CLI flag to log low-level raw VLM response payloads without cluttering `--debug` output (#75).
+
 ### Changed
 - Run pre-VLM screening before Pass 0 domain classification, so clips whose candidate windows are all rejected (`prescreen.gate_mode: "enabled"`) are skipped without any VLM call or coarse frame extraction, and rejected frames are kept out of Pass 1 contact sheets (#75).
 
