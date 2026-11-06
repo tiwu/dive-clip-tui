@@ -53,6 +53,7 @@ def main() -> None:
         help="Number of top-quality clips to include (default: 10, or config)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--trace", action="store_true", help="Enable trace logging")
     parser.add_argument(
         "--log-file",
         type=Path,
@@ -61,7 +62,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     setup_signal_handlers()
-    configure_logging(debug=args.debug, log_file=args.log_file)
+    configure_logging(debug=args.debug, trace=args.trace, log_file=args.log_file)
 
     try:
         config = load_config(args.config)

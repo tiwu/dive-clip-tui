@@ -45,6 +45,7 @@ from utils.prompt_templates import (  # noqa: E402
     infer_generic_context,
 )
 from utils.run_archive import (  # noqa: E402
+    archive_file,
     archive_run_artifacts,
     find_latest_run_dir,
     get_run_dir,
@@ -207,7 +208,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
     output_folder.mkdir(parents=True, exist_ok=True)
 
     config = args.config
-    debug_mode = args.debug
+    debug_mode = bool(getattr(args, "debug", False))
+    trace_mode = bool(getattr(args, "trace", False))
 
     if getattr(args, "classifications", None):
         c_path = Path(args.classifications)
@@ -238,6 +240,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         run_dir = get_run_dir(output_folder)
 
     run_dir.mkdir(parents=True, exist_ok=True)
+    if Path(config).exists():
+        archive_file(config, run_dir, "config.yaml")
     state_path = run_dir / "pipeline_state.json"
     state = PipelineState(state_path)
 
@@ -292,7 +296,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         )
 
     log_path = args.log_file or (run_dir / "run.log")
-    configure_logging(debug=debug_mode, log_file=log_path)
+    configure_logging(debug=debug_mode, trace=trace_mode, log_file=log_path)
     update_latest_symlink(output_folder, run_dir)
     logger.info("Dive Clip Curation Pipeline v%s", version)
     logger.info("Logging to %s", log_path)
@@ -320,7 +324,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         "--log-file",
         str(log_path),
     ]
-    if debug_mode:
+    if trace_mode:
+        ingest_cmd.append("--trace")
+    elif debug_mode:
         ingest_cmd.append("--debug")
 
     if not state.is_step_done("ingest") or not manifest_path.exists():
@@ -356,7 +362,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         "--log-file",
         str(log_path),
     ]
-    if debug_mode:
+    if trace_mode:
+        scan_cmd.append("--trace")
+    elif debug_mode:
         scan_cmd.append("--debug")
     if is_resuming:
         scan_cmd.append("--resume")
@@ -410,7 +418,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         "--log-file",
         str(log_path),
     ]
-    if debug_mode:
+    if trace_mode:
+        render_cmd.append("--trace")
+    elif debug_mode:
         render_cmd.append("--debug")
 
     if not state.is_step_done("render"):
@@ -467,7 +477,9 @@ def cmd_scan(args: argparse.Namespace) -> int:
         music_arg = getattr(args, "music", None)
         if assemble_mode != "simple" and music_arg:
             assemble_cmd.extend(["--music", str(music_arg)])
-        if debug_mode:
+        if trace_mode:
+            assemble_cmd.append("--trace")
+        elif debug_mode:
             assemble_cmd.append("--debug")
 
         if not state.is_step_done("assemble") or not assembled_video_path.exists():
@@ -581,6 +593,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         detections_path=detections_path,
         log_file=log_path,
         stats_path=stats_path,
+        config_path=config,
     )
     update_latest_symlink(output_folder, run_dir)
 
@@ -1231,6 +1244,8 @@ def cmd_classify(args: argparse.Namespace) -> int:
         run_dir = get_run_dir(output_folder)
 
     run_dir.mkdir(parents=True, exist_ok=True)
+    if Path(args.config).exists():
+        archive_file(args.config, run_dir, "config.yaml")
     state_path = run_dir / "pipeline_state.json"
     state = PipelineState(state_path)
 
@@ -1251,7 +1266,11 @@ def cmd_classify(args: argparse.Namespace) -> int:
         dest_output_files.append(root_classifications)
 
     log_path = args.log_file or (run_dir / "classify.log")
-    configure_logging(debug=args.debug, log_file=log_path)
+    configure_logging(
+        debug=bool(getattr(args, "debug", False)),
+        trace=bool(getattr(args, "trace", False)),
+        log_file=log_path,
+    )
     update_latest_symlink(output_folder, run_dir)
 
     console = get_console()
@@ -1319,6 +1338,7 @@ def cmd_classify(args: argparse.Namespace) -> int:
         manifest_path=manifest_path,
         log_file=log_path,
         classifications_path=run_output_file,
+        config_path=args.config,
     )
 
     if args.specialize_generic:
@@ -1399,6 +1419,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     scan_p.add_argument("--debug", action="store_true", help="Enable debug logging")
     scan_p.add_argument(
+        "--trace",
+        action="store_true",
+        help="Enable ultra-verbose trace logging (raw VLM response texts)",
+    )
+    scan_p.add_argument(
         "--resume",
         nargs="?",
         const=True,
@@ -1470,6 +1495,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     classify_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     classify_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    classify_p.add_argument("--trace", action="store_true", help="Enable trace logging")
     classify_p.add_argument(
         "--log-file",
         type=Path,
@@ -1513,6 +1539,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     assemble_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     assemble_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    assemble_p.add_argument("--trace", action="store_true", help="Enable trace logging")
     assemble_p.add_argument(
         "--log-file",
         type=Path,
@@ -1564,6 +1591,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     aftermovie_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     aftermovie_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    aftermovie_p.add_argument("--trace", action="store_true", help="Enable trace logging")
     aftermovie_p.add_argument(
         "--log-file",
         type=Path,
@@ -1592,6 +1620,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     review_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    review_p.add_argument("--trace", action="store_true", help="Enable trace logging")
     review_p.add_argument(
         "--log-file",
         type=Path,
@@ -1608,7 +1637,10 @@ def main(argv: list[str] | None = None) -> None:
     setup_signal_handlers()
     parser = build_parser()
     args = parser.parse_args(argv)
-    configure_logging(debug=getattr(args, "debug", False))
+    configure_logging(
+        debug=bool(getattr(args, "debug", False)),
+        trace=bool(getattr(args, "trace", False)),
+    )
     try:
         sys.exit(args.func(args))
     except KeyboardInterrupt:

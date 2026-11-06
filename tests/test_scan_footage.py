@@ -6,6 +6,7 @@ import importlib.util
 import json
 import logging
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1402,6 +1403,7 @@ def test_scan_main_archives_to_run_dir(tmp_path: Path, monkeypatch: pytest.Monke
     assert (output_dir / "detections_refined.json").exists()
     assert (run_dir / "detections_refined.json").exists()
     assert (run_dir / "manifest_raw.json").exists()
+    assert (run_dir / "config.yaml").exists()
 
 
 def test_scan_main_archives_with_archive_flag(
@@ -1438,6 +1440,7 @@ def test_scan_main_archives_with_archive_flag(
     assert run_dirs[0].name.startswith("run-")
     assert (run_dirs[0] / "detections_refined.json").exists()
     assert (run_dirs[0] / "manifest_raw.json").exists()
+    assert (run_dirs[0] / "config.yaml").exists()
 
 
 def test_scan_main_passes_use_ramdisk_to_get_work_dir(
@@ -2447,3 +2450,188 @@ def test_analyze_contact_sheets_requires_full_batch(tmp_path: Path) -> None:
             client=None,
         ) == ({}, {})
     mosaic.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Issue #75 — pre-screen runs before Pass 0 and can drop whole clips
+# ---------------------------------------------------------------------------
+
+
+def _prescreen_order_clip(tmp_path: Path) -> dict:
+    video = tmp_path / "ps_clip.mp4"
+    video.touch()
+    return {
+        "clip_id": "ps_clip",
+        "file_name": "ps_clip.mp4",
+        "file_path": str(video),
+        "fps": 25.0,
+        "duration": 30.0,
+    }
+
+
+def _prescreen_order_config(gate_mode: str = "enabled", **prescreen: Any) -> dict:
+    return {
+        "scan_parameters": {
+            "domain": "auto",
+            "classify_clips": "auto",
+            "classify_frames_count": 3,
+            "coarse_fps": 0.5,
+        },
+        "ollama": {"host": "http://localhost:11434", "model": "qwen2.5-vl:7b"},
+        "prescreen": {"enabled": True, "gate_mode": gate_mode, **prescreen},
+    }
+
+
+def test_process_clip_prescreen_early_exit_skips_pass0_and_pass1(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A clip whose windows are all rejected never reaches Pass 0 or Pass 1."""
+    from utils.checkpoint import ClipScanCheckpoint
+    from utils.models import ClipClassification, PrescreenRecord
+    from utils.prescreen import PrescreenResult
+
+    caplog.set_level(logging.INFO)
+    clip = _prescreen_order_clip(tmp_path)
+    record = _make_prescreen_record(interval={"start": 0.0, "end": 30.0})
+    result = PrescreenResult(records=[record], rejected_intervals=[(0.0, 30.0)], duration=30.0)
+
+    pass0_collector: list[ClipClassification] = []
+    prescreen_collector: list[PrescreenRecord] = []
+    flush_calls: list[str] = []
+    checkpoints_dir = tmp_path / "checkpoints"
+
+    with (
+        patch.object(scan, "_prescreen_clip", return_value=(result, None)),
+        patch.object(scan, "extract_classification_frames") as mock_classify_frames,
+        patch.object(scan, "extract_frames") as mock_extract,
+        patch.object(scan, "call_ollama") as mock_call,
+    ):
+        detections = scan.process_clip(
+            clip,
+            _prescreen_order_config(),
+            tmp_path / "work",
+            checkpoints_dir=checkpoints_dir,
+            pass0_collector=pass0_collector,
+            prescreen_collector=prescreen_collector,
+            on_trace_flush=flush_calls.append,
+        )
+
+    assert detections == []
+    mock_classify_frames.assert_not_called()
+    mock_extract.assert_not_called()
+    mock_call.assert_not_called()
+    assert prescreen_collector == [record]
+    assert "prescreen" in flush_calls
+    assert "pass0" in flush_calls
+    assert len(pass0_collector) == 1
+    assert pass0_collector[0].disposition == "skipped_prescreen"
+    assert pass0_collector[0].usable is False
+    checkpoint = ClipScanCheckpoint.load(checkpoints_dir / "ps_clip.json")
+    assert checkpoint is not None
+    assert checkpoint.pass_stage == "completed"
+    assert checkpoint.detected_domain == "unusable"
+    assert "rejected by pre-screen" in caplog.text
+
+
+def test_process_clip_prescreen_advisory_never_drops_clip(tmp_path: Path) -> None:
+    """Advisory mode defers windows and the clip continues into Pass 0."""
+    from utils.prescreen import PrescreenResult
+
+    clip = _prescreen_order_clip(tmp_path)
+    record = _make_prescreen_record(interval={"start": 0.0, "end": 30.0}, action="defer")
+    result = PrescreenResult(records=[record], deferred_intervals=[(0.0, 30.0)], duration=30.0)
+
+    with (
+        patch.object(scan, "_prescreen_clip", return_value=(result, None)),
+        patch.object(scan, "extract_classification_frames", return_value=[]) as mock_frames,
+        patch.object(scan, "extract_frames", return_value=[]),
+    ):
+        scan.process_clip(clip, _prescreen_order_config("advisory"), tmp_path / "work")
+
+    mock_frames.assert_called_once()
+
+
+def test_process_clip_prescreen_partial_reject_continues(tmp_path: Path) -> None:
+    """Only some rejected windows keep the clip in the pipeline."""
+    from utils.prescreen import PrescreenResult
+
+    clip = _prescreen_order_clip(tmp_path)
+    records = [
+        _make_prescreen_record(interval={"start": 0.0, "end": 10.0}),
+        _make_prescreen_record(interval={"start": 10.0, "end": 30.0}, action="keep"),
+    ]
+    result = PrescreenResult(records=records, rejected_intervals=[(0.0, 10.0)], duration=30.0)
+
+    with (
+        patch.object(scan, "_prescreen_clip", return_value=(result, None)),
+        patch.object(scan, "extract_classification_frames", return_value=[]) as mock_frames,
+        patch.object(scan, "extract_frames", return_value=[]),
+    ):
+        scan.process_clip(clip, _prescreen_order_config(), tmp_path / "work")
+
+    mock_frames.assert_called_once()
+
+
+def test_process_clip_prescreen_runs_before_pass0(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The pre-screen log line precedes every Pass 0 and Pass 1 line."""
+    from utils.prescreen import PrescreenResult
+
+    caplog.set_level(logging.INFO)
+    clip = _prescreen_order_clip(tmp_path)
+    order: list[str] = []
+
+    def fake_prescreen(*args, **kwargs):
+        order.append("prescreen")
+        return PrescreenResult(duration=30.0), None
+
+    def fake_classify_frames(*args, **kwargs):
+        order.append("pass0")
+        return []
+
+    def fake_extract(*args, **kwargs):
+        order.append("pass1")
+        return []
+
+    with (
+        patch.object(scan, "_prescreen_clip", side_effect=fake_prescreen),
+        patch.object(scan, "extract_classification_frames", side_effect=fake_classify_frames),
+        patch.object(scan, "extract_frames", side_effect=fake_extract),
+    ):
+        scan.process_clip(clip, _prescreen_order_config(), tmp_path / "work")
+
+    assert order == ["prescreen", "pass0", "pass1"]
+    messages = [r.getMessage() for r in caplog.records]
+    first_pass0 = next(i for i, m in enumerate(messages) if m.startswith("[Pass 0]"))
+    first_pass1 = next(i for i, m in enumerate(messages) if m.startswith("[Pass 1]"))
+    assert first_pass0 < first_pass1
+
+
+def test_process_clip_contact_sheets_skip_prescreen_rejected_frames(tmp_path: Path) -> None:
+    """Frames inside rejected windows are never tiled into contact sheets."""
+    from utils.prescreen import PrescreenResult
+
+    clip = _prescreen_order_clip(tmp_path)
+    config = _prescreen_order_config(contact_sheet=True)
+    config["scan_parameters"].update({"domain": "underwater", "classify_clips": "off"})
+    records = [
+        _make_prescreen_record(interval={"start": 0.0, "end": 10.0}),
+        _make_prescreen_record(interval={"start": 10.5, "end": 30.0}, action="keep"),
+    ]
+    result = PrescreenResult(records=records, rejected_intervals=[(0.0, 10.0)], duration=30.0)
+    frames = [
+        {"frame_path": str(tmp_path / f"c{i}.jpg"), "timestamp": float(ts), "frame_number": i}
+        for i, ts in enumerate([2, 6, 12, 16, 20, 24])
+    ]
+
+    with (
+        patch.object(scan, "_prescreen_clip", return_value=(result, None)),
+        patch.object(scan, "extract_frames", return_value=frames),
+        patch.object(scan, "_analyze_contact_sheets", return_value=({}, {})) as mock_sheets,
+        patch.object(scan, "call_ollama", return_value={"detected": False, "confidence": 0.1}),
+    ):
+        scan.process_clip(clip, config, tmp_path / "work")
+
+    sheet_frames = mock_sheets.call_args.args[0]
+    assert [f["timestamp"] for f in sheet_frames] == [12.0, 16.0, 20.0, 24.0]

@@ -277,6 +277,7 @@ def archive_run_artifacts(
     pass2_fine_trace_path: Path | str | None = None,
     selection_trace_path: Path | str | None = None,
     prescreen_trace_path: Path | str | None = None,
+    config_path: Path | str | None = None,
 ) -> dict[str, Path]:
     """Archive available pipeline artifacts into `run_dir`.
 
@@ -349,5 +350,11 @@ def archive_run_artifacts(
                     archived["log"] = dest
             else:
                 archived["log"] = src_log
+
+    if config_path is not None:
+        src_cfg = Path(config_path)
+        dest = archive_file(src_cfg, target_dir, "config.yaml")
+        if dest:
+            archived["config"] = dest
 
     return archived

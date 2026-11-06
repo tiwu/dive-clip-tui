@@ -531,3 +531,22 @@ def test_orientation_gate():
     orient_fail = next(g for g in gates_fail if g["gate"] == "orientation")
     assert orient_fail["outcome"] == "fail"
     assert "tilted" in orient_fail["reason"].lower() or "inverted" in orient_fail["reason"].lower()
+
+
+def test_parse_gpmf_applies_scal_to_gyro():
+    """GPMF GYRO values scaled by stream SCAL divider produce correct units."""
+    # SCAL of 100 with raw values [300, 400, 0] should scale to [3.0, 4.0, 0.0]
+    payload = _stmp(1_000_000) + _container(
+        "DEVC",
+        _container(
+            "STRM",
+            _i16("SCAL", [100]) + _i16("GYRO", [300, 400, 0]),
+        ),
+    )
+    track = parse_gpmf(payload, duration=1.0)
+    assert track is not None
+    series = track.series("GYRO")
+    assert series is not None
+    assert series.values == [3.0, 4.0, 0.0]
+    record = aggregate_window(track, 0.0, 1.0)
+    assert record["gyro_rms"] == pytest.approx((25.0 / 3.0) ** 0.5, rel=1e-3)

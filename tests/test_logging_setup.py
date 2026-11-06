@@ -170,3 +170,39 @@ def test_exclude_no_console_filter(tmp_path: Path) -> None:
     console_output = test_console.export_text()
     assert "visible to all" in console_output
     assert "hidden from console" not in console_output
+
+
+def test_trace_log_level_and_method(tmp_path: Path) -> None:
+    """TRACE level (5) should be registered and logger.trace() should emit."""
+    from utils.logging_setup import TRACE
+
+    assert TRACE == 5
+    assert logging.getLevelName(5) == "TRACE"
+    assert logging.getLevelName("TRACE") == 5
+
+    log_path = tmp_path / "trace.log"
+    configure_logging(trace=True, log_file=log_path)
+    assert logging.getLogger().level == TRACE
+
+    test_logger = logging.getLogger("test_trace")
+    test_logger.trace("deep trace info")
+    test_logger.debug("debug message")
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "deep trace info" in content
+    assert "debug message" in content
+
+
+def test_trace_suppressed_when_debug_only(tmp_path: Path) -> None:
+    """When only debug=True is set, debug records emit but trace records are suppressed."""
+    log_path = tmp_path / "debug_only.log"
+    configure_logging(debug=True, trace=False, log_file=log_path)
+    assert logging.getLogger().level == logging.DEBUG
+
+    test_logger = logging.getLogger("test_debug_only")
+    test_logger.trace("hidden trace info")
+    test_logger.debug("visible debug message")
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "hidden trace info" not in content
+    assert "visible debug message" in content

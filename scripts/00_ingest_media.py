@@ -248,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output", default="outputs/manifest.json", help="Output manifest JSON path"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--trace", action="store_true", help="Enable trace logging")
     parser.add_argument(
         "--log-file",
         type=Path,
@@ -260,7 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
-    configure_logging(debug=args.debug, log_file=args.log_file)
+    configure_logging(debug=args.debug, trace=args.trace, log_file=args.log_file)
     setup_signal_handlers()
 
     folder = Path(args.input)

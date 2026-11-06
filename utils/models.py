@@ -171,7 +171,7 @@ class ClipClassification(BaseModel):
     )
     disposition: str = Field(
         default="accepted",
-        description="accepted | skipped_unusable | skipped_non_target_domain | reused_from_input",
+        description="accepted | skipped_prescreen | skipped_unusable | skipped_non_target_domain | reused_from_input",
     )
     frame_evaluations: list[Pass0FrameTrace] = Field(
         default_factory=list, description="Trace of Pass 0 frame evaluations"

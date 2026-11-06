@@ -259,6 +259,46 @@ def test_archive_run_artifacts_with_classifications(tmp_path: Path) -> None:
     assert "total_clips" in (run_dir / "classifications.json").read_text(encoding="utf-8")
 
 
+def test_archive_run_artifacts_with_config(tmp_path: Path) -> None:
+    """archive_run_artifacts copies config_path into run_dir as config.yaml."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    cfg_file = tmp_path / "custom_config.yaml"
+    cfg_file.write_text("general:\n  input_dir: ./footage\n", encoding="utf-8")
+
+    run_dir = output_dir / "runs" / "run-20261102-120000"
+    archived = archive_run_artifacts(
+        run_dir,
+        config_path=cfg_file,
+    )
+
+    assert "config" in archived
+    assert archived["config"] == run_dir / "config.yaml"
+    assert (run_dir / "config.yaml").exists()
+    assert "general:" in (run_dir / "config.yaml").read_text(encoding="utf-8")
+
+    # Missing config file is safely ignored
+    missing_run_dir = output_dir / "runs" / "run-20261102-130000"
+    archived_missing = archive_run_artifacts(
+        missing_run_dir,
+        config_path=tmp_path / "nonexistent.yaml",
+    )
+    assert "config" not in archived_missing
+
+    # In-place config is not recopied
+    in_place_run_dir = output_dir / "runs" / "run-20261102-140000"
+    in_place_run_dir.mkdir(parents=True)
+    in_place_cfg = in_place_run_dir / "config.yaml"
+    in_place_cfg.write_text("in_place: true\n", encoding="utf-8")
+    archived_in_place = archive_run_artifacts(
+        in_place_run_dir,
+        config_path=in_place_cfg,
+    )
+    assert archived_in_place["config"] == in_place_cfg
+    assert in_place_cfg.read_text(encoding="utf-8") == "in_place: true\n"
+
+
 def test_resolve_assembly_artifacts(tmp_path: Path) -> None:
     """resolve_assembly_artifacts resolves from explicit paths, latest run, or output dir."""
     from utils.run_archive import resolve_assembly_artifacts, update_latest_symlink

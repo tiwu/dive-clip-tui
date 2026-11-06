@@ -6,6 +6,16 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add `TRACE` log level (level 5) and `--trace` CLI flag to log low-level raw VLM response payloads without cluttering `--debug` output (#75).
+- Archive a snapshot of the active configuration (`config.yaml`) directly inside the run directory for complete experiment and pipeline run traceability (#75).
+
+### Changed
+- Run pre-VLM screening before Pass 0 domain classification, so clips whose candidate windows are all rejected (`prescreen.gate_mode: "enabled"`) are skipped without any VLM call or coarse frame extraction, and rejected frames are kept out of Pass 1 contact sheets (#75).
+
+### Fixed
+- Apply GPMF stream scale factor (`SCAL`) to `GYRO` and `ACCL` telemetry samples, normalizing gyro rates to true `rad/s` and preventing false `shake` gate rejections (#75).
+
 ## [0.32.0] - 2026-11-04
 
 ### Added

@@ -168,7 +168,9 @@ class OpenRouterClient(BaseVLMClient):
 
         payload = self._build_payload(image_b64, prompt, system_prompt)
         try:
-            result = self._post_with_retry(payload).json()
+            response = self._post_with_retry(payload)
+            logger.trace("OpenRouter response text: %s", response.text)
+            result = response.json()
             content = result["choices"][0]["message"]["content"]
         except requests.exceptions.RequestException as exc:
             logger.warning("OpenRouter request failed: %s", exc)
