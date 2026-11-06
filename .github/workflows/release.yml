@@ -21,6 +21,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - uses: actions/setup-python@v7
         with:
@@ -32,7 +33,7 @@ jobs:
 
       - name: Fetch merged pull request metadata
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
         run: >-
           gh pr list
           --repo "$GITHUB_REPOSITORY"
@@ -70,7 +71,7 @@ jobs:
       - name: Publish GitHub Release
         if: steps.prepare.outputs.release == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
           VERSION: ${{ steps.prepare.outputs.version }}
         run: >-
           gh release create "v${VERSION}"
