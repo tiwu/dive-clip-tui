@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-11-06
+
 ### Added
 - Add `TRACE` log level (level 5) and `--trace` CLI flag to log low-level raw VLM response payloads without cluttering `--debug` output (#75).
 - Archive a snapshot of the active configuration (`config.yaml`) directly inside the run directory for complete experiment and pipeline run traceability (#75).
