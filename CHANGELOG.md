@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.33.1] - 2026-11-06
+
 ### Fixed
 - Authenticate release workflow with `RELEASE_TOKEN` secret to bypass branch protection rules when publishing releases (#77).
 
