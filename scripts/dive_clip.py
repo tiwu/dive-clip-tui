@@ -45,6 +45,7 @@ from utils.prompt_templates import (  # noqa: E402
     infer_generic_context,
 )
 from utils.run_archive import (  # noqa: E402
+    archive_file,
     archive_run_artifacts,
     find_latest_run_dir,
     get_run_dir,
@@ -239,6 +240,8 @@ def cmd_scan(args: argparse.Namespace) -> int:
         run_dir = get_run_dir(output_folder)
 
     run_dir.mkdir(parents=True, exist_ok=True)
+    if Path(config).exists():
+        archive_file(config, run_dir, "config.yaml")
     state_path = run_dir / "pipeline_state.json"
     state = PipelineState(state_path)
 
@@ -590,6 +593,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         detections_path=detections_path,
         log_file=log_path,
         stats_path=stats_path,
+        config_path=config,
     )
     update_latest_symlink(output_folder, run_dir)
 
@@ -1240,6 +1244,8 @@ def cmd_classify(args: argparse.Namespace) -> int:
         run_dir = get_run_dir(output_folder)
 
     run_dir.mkdir(parents=True, exist_ok=True)
+    if Path(args.config).exists():
+        archive_file(args.config, run_dir, "config.yaml")
     state_path = run_dir / "pipeline_state.json"
     state = PipelineState(state_path)
 
@@ -1332,6 +1338,7 @@ def cmd_classify(args: argparse.Namespace) -> int:
         manifest_path=manifest_path,
         log_file=log_path,
         classifications_path=run_output_file,
+        config_path=args.config,
     )
 
     if args.specialize_generic:

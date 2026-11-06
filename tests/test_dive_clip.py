@@ -304,6 +304,23 @@ def test_cmd_scan_writes_step_timestamps(tmp_path: Path) -> None:
         assert state[f"{step}_duration_seconds"] >= 0
 
 
+def test_cmd_scan_archives_config(tmp_path: Path) -> None:
+    """cmd_scan should preserve a copy of the active config file in run_dir."""
+    config_file = tmp_path / "custom_config.yaml"
+    config_file.write_text("general:\n  input_dir: ./footage\n", encoding="utf-8")
+    args = _scan_args(tmp_path, debug=False)
+    args.config = str(config_file)
+
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)):
+        assert cmd_scan(args) == 0
+
+    latest = find_latest_run_dir(Path(args.output))
+    assert latest is not None
+    archived_cfg = latest / "config.yaml"
+    assert archived_cfg.exists()
+    assert "general:" in archived_cfg.read_text(encoding="utf-8")
+
+
 def test_resolve_paths_prefers_cli_over_config(tmp_path: Path) -> None:
     """Explicit flags must win over general.input_dir / general.output_dir."""
     config_path = tmp_path / "config.yaml"

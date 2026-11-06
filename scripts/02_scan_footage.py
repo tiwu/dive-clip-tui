@@ -86,7 +86,7 @@ from utils.prompt_templates import (
     resolve_domain_from_keywords,
     resolve_template_for_subject,
 )
-from utils.run_archive import archive_run_artifacts, get_run_dir
+from utils.run_archive import archive_file, archive_run_artifacts, get_run_dir
 from utils.selection import make_detection_id, make_sort_key, tokenize_content_words
 from utils.signals import setup_signal_handlers
 from utils.stats import (
@@ -2480,6 +2480,8 @@ def main() -> None:
 
     checkpoints_dir = (target_run_dir or output_dir) / "checkpoints"
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    if target_run_dir is not None and getattr(args, "config", None) and Path(args.config).exists():
+        archive_file(args.config, target_run_dir, "config.yaml")
 
     refined = DetectionsRefined(total_clips=0, total_detections=0, detections=[])
     completed_clips: set[str] = set()
@@ -2772,6 +2774,7 @@ def main() -> None:
                 prescreen_trace_path=trace_dir / "prescreen_trace.json"
                 if prescreen_records
                 else None,
+                config_path=args.config,
             )
             logger.info("Archived run artifacts to %s", target_run_dir)
 
@@ -2812,6 +2815,7 @@ def main() -> None:
                         prescreen_trace_path=(trace_dir / "prescreen_trace.json")
                         if prescreen_records
                         else None,
+                        config_path=args.config,
                     )
                 except Exception as exc:
                     logger.warning("Could not archive partial run artifacts on interrupt: %s", exc)

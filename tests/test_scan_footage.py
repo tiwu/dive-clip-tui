@@ -1403,6 +1403,7 @@ def test_scan_main_archives_to_run_dir(tmp_path: Path, monkeypatch: pytest.Monke
     assert (output_dir / "detections_refined.json").exists()
     assert (run_dir / "detections_refined.json").exists()
     assert (run_dir / "manifest_raw.json").exists()
+    assert (run_dir / "config.yaml").exists()
 
 
 def test_scan_main_archives_with_archive_flag(
@@ -1439,6 +1440,7 @@ def test_scan_main_archives_with_archive_flag(
     assert run_dirs[0].name.startswith("run-")
     assert (run_dirs[0] / "detections_refined.json").exists()
     assert (run_dirs[0] / "manifest_raw.json").exists()
+    assert (run_dirs[0] / "config.yaml").exists()
 
 
 def test_scan_main_passes_use_ramdisk_to_get_work_dir(
