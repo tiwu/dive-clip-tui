@@ -8,7 +8,7 @@ This directory contains version-controlled architectural specifications and impl
 Stage 1 — Plan the change
 1. User queues an issue with 'agent:plan' or initiates planning in chat (e.g. '/plan').
 2. If no issue exists yet, agent creates one via 'gh issue create --label "agent:plan-review"'.
-3. Agent writes docs/plans/PLAN-<id>-<slug>.md, embeds/links it in the issue body, and sets 'agent:plan-review'.
+3. Agent writes docs/plans/PLAN-<id>-<slug>.md, embeds/links it in the issue body, attaches it (plus any supporting research notes) as a GitHub Issue Artifact, and sets 'agent:plan-review'.
 4. The plan records the change category, proposed SemVer impact, and a draft changelog entry.
 5. Agent stops and waits for the user to approve the plan ('agent:approved' or explicit chat approval).
 
@@ -23,6 +23,7 @@ Stage 2 — Implement and release
 - **Issue/PR Viewing**: Always pass `--json title,body,labels,comments` to `gh issue view` and `gh pr view` to avoid GraphQL `projectCards` deprecation errors.
 - **PR Bodies**: Write PR descriptions containing Markdown, diagrams, or code blocks to a file and pass `--body-file <path>` to `gh pr create` / `gh pr edit` to avoid shell command substitution and redirection syntax errors.
 - **PR Update Fallback**: If `gh pr edit` errors on `projectCards`, use `gh api repos/:owner/:repo/pulls/:number -X PATCH -F body=@<file>`.
+- **Issue Artifacts**: Attach plans (`"type": "plan"`), research notes (`"type": "generic"`), or links (`"type": "link"`) via `gh api -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" repos/:owner/:repo/issues/:number/artifacts -X POST --input <json_file>`. Artifact `name` values may only contain letters, numbers, spaces, `.`, `-`, and `_` (no `:` or `&`, which fail with HTTP 422).
 - **Markdown & Math Formatting**: Do not use LaTeX math (`$...$` or `$$...$$`) for multi-character variables or expressions containing underscores (e.g. `\text{var_name}`) in plans, issue bodies, or PR descriptions. GitHub's KaTeX renderer fails on unescaped underscores with `'_' allowed only in math mode`. Use fenced code blocks (`python`) or backtick code spans (`` `var_name` ``) instead.
 
 ### Label Taxonomy
