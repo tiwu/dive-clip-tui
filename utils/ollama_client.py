@@ -74,12 +74,16 @@ class OllamaClient(BaseVLMClient):
         metrics: OllamaMetrics | None = None,
         session: requests.Session | None = None,
         num_ctx: int | None = None,
+        num_predict: int | None = None,
     ) -> None:
         if num_ctx is not None and (isinstance(num_ctx, bool) or num_ctx <= 0):
             raise ValueError(f"ollama num_ctx must be a positive integer, got {num_ctx!r}")
+        if num_predict is not None and (isinstance(num_predict, bool) or num_predict <= 0):
+            raise ValueError(f"ollama num_predict must be a positive integer, got {num_predict!r}")
         super().__init__(model, timeout, metrics, session)
         self.host = host
         self.num_ctx = num_ctx
+        self.num_predict = num_predict
 
     def generate(
         self,
@@ -116,8 +120,13 @@ class OllamaClient(BaseVLMClient):
         }
         if system_prompt and system_prompt.strip():
             payload["system"] = system_prompt.strip()
+        options: dict[str, Any] = {}
         if self.num_ctx is not None:
-            payload["options"] = {"num_ctx": self.num_ctx}
+            options["num_ctx"] = self.num_ctx
+        if self.num_predict is not None:
+            options["num_predict"] = self.num_predict
+        if options:
+            payload["options"] = options
 
         try:
             logger.debug("Sending Ollama request to %s", self.host)
@@ -153,6 +162,12 @@ class OllamaClient(BaseVLMClient):
         elapsed = time.perf_counter() - started
         prompt_eval = result.get("prompt_eval_count", 0)
         eval_count = result.get("eval_count", 0)
+        if eval_count >= 512:
+            logger.warning(
+                "Ollama generated %d tokens despite think=False. Possible qwen3-vl-thinking token explosion. "
+                "Consider capping with ollama.num_predict or using a non-thinking model variant.",
+                eval_count,
+            )
         logger.debug(
             "[%s] Ollama response in %.1fs: %d prompt tokens, %d generated tokens",
             phase,

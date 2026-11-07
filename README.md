@@ -240,6 +240,7 @@ add them.
 | `model` | `qwen2.5vl:3b` | Vision model for Pass 0/1/2 |
 | `timeout_seconds` | `120` | Per-request timeout |
 | `num_ctx` | unset | Optional context window in tokens, sent as `options.num_ctx` (lower it to fit a model in memory; unset keeps the model's default) |
+| `num_predict` | unset | Optional token generation cap, sent as `options.num_predict` (e.g. 256–512 to cap runaway thinking models) |
 
 **`vlm`**
 
@@ -272,6 +273,7 @@ Any other `provider` value fails at startup with the list of supported backends.
 | `fine_scale` | `"1280:-2"` | Pass 2 resolution (`"iw/2:-2"` for half, `"null"` for none) |
 | `coarse_confidence_threshold` | `0.80` | Minimum confidence to open a fine-scan window |
 | `coarse_quality_threshold` | `4` | Minimum 1–10 score to keep a coarse frame (rejects dangling/upside-down) |
+| `coarse_establishing_quality_threshold` | `7` | Minimum 1–10 score for establishing shots in Pass 1 to promote to Pass 2 |
 | `fine_padding_seconds` | `2` | Extra context around a detected action |
 | `fine_pre_roll_seconds` | `1.5` | Lead-in before a fine highlight |
 | `fine_post_roll_seconds` | `2.0` | Tail after a fine highlight |
@@ -302,6 +304,7 @@ want the best moments even if they cluster in one file.
 | --- | --- | --- |
 | `enabled` | `false` | Turn the funnel on at all |
 | `gate_mode` | `"advisory"` | `advisory` records gate failures but drops nothing; `enabled` rejects failing windows |
+| `window_duration` | `8.0` | Candidate pre-screen window duration in seconds for clips without HiLight tags |
 | `sample_fps` | `0.5` | Frames per second sampled for visual metrics |
 | `sample_size` | `64` | Downscale samples to 64×64 for cheap luma/Laplacian math |
 | `keyframes_only` | `true` | Prefer keyframes, fall back to a full seek pass |
@@ -359,6 +362,32 @@ tracked config:
 export OLLAMA_HOST=plotter.local:11434
 uv run dive-clip scan --input ./footage --output ./highlights
 ```
+
+#### Ollama systemd service overrides and reasoning model tuning
+
+When running Ollama as a systemd service, package upgrades overwrite `/etc/systemd/system/ollama.service`, resetting environment variables. To persist high-performance settings across updates, use a systemd drop-in override:
+
+```bash
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+sudo tee /etc/systemd/system/ollama.service.d/override.conf <<'EOF'
+[Service]
+Environment="OLLAMA_KV_CACHE_TYPE=q8_0"
+Environment="OLLAMA_KEEP_ALIVE=2h0m0s"
+Environment="OLLAMA_FLASH_ATTENTION=1"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+##### Image tokens and reasoning model tuning (`qwen3-vl`)
+
+- **Image prompt tokens**: Ollama's `qwen3vl` runner passes `--image-min-tokens 1024` by default, requiring ~1,450–1,480 prompt evaluation tokens per 640×360 frame. Prompt evaluation is fast on GPUs (~1.5–1.8s), but token generation depends heavily on output length.
+- **Thinking token explosion**: Under Ollama `0.40.15+`, models using `RENDERER qwen3-vl-thinking` (such as `qwen3-vl:8b`) ignore `"think": false` and generate 1,100–2,100 reasoning tokens per frame before closing `</think>` and emitting JSON. This can slow down Pass 1 and Pass 2 from ~4s/frame to 25–30s/frame.
+- **Mitigation strategies**:
+  1. **Non-thinking models**: Prefer `qwen2.5vl:3b` or `qwen2.5-vl:7b` for high-throughput scanning.
+  2. **Generation cap**: Set `ollama.num_predict: 256` in `config.yaml` to cap generated tokens per VLM call.
+  3. **Custom Modelfile**: Override the template/renderer to remove thinking tags if creating custom model variants.
+
 
 **Cloud VLM (OpenRouter).** Set the key, then switch the provider:
 

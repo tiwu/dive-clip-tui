@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+import utils.logging_setup  # noqa: F401
+
 
 @pytest.fixture
 def tmp_output_dir(tmp_path: Path) -> Path:
@@ -68,7 +70,11 @@ def sample_detections() -> list[dict]:
 @pytest.fixture
 def sample_detections_file(tmp_path: Path, sample_detections: list[dict]) -> Path:
     """Write sample detections to a JSON file and return its path."""
-    data = {"detections": sample_detections, "total_detections": len(sample_detections), "total_clips": 2}
+    data = {
+        "detections": sample_detections,
+        "total_detections": len(sample_detections),
+        "total_clips": 2,
+    }
     p = tmp_path / "detections_refined.json"
     p.write_text(json.dumps(data, indent=2))
     return p

@@ -2635,3 +2635,219 @@ def test_process_clip_contact_sheets_skip_prescreen_rejected_frames(tmp_path: Pa
 
     sheet_frames = mock_sheets.call_args.args[0]
     assert [f["timestamp"] for f in sheet_frames] == [12.0, 16.0, 20.0, 24.0]
+
+
+def test_build_promoted_clusters() -> None:
+    # 0.25 FPS -> 4.0s step. step_gap = 4.4s.
+    # Case: 0.0, 4.0 promoted -> cluster [0.0, 4.0] -> pad 2.0 -> [0.0, 6.0]
+    # 8.0 rejected -> 12.0 promoted -> cluster [12.0, 12.0] -> pad 2.0 -> [10.0, 14.0]
+    # 6.0 < 10.0 so they do NOT merge.
+    windows = scan._build_promoted_clusters(
+        promoted_timestamps=[0.0, 4.0, 12.0],
+        coarse_fps=0.25,
+        fine_padding=2.0,
+        duration_sec=20.0,
+    )
+    assert windows == [(0.0, 6.0), (10.0, 14.0)]
+
+    # Case: empty promoted timestamps
+    assert scan._build_promoted_clusters([], 0.25, 2.0, 20.0) == []
+
+    # Case: overlapping padded windows (pad 4.0s bridges gap)
+    windows_overlap = scan._build_promoted_clusters(
+        promoted_timestamps=[0.0, 4.0, 11.5],
+        coarse_fps=0.25,
+        fine_padding=4.0,
+        duration_sec=20.0,
+    )
+    assert windows_overlap == [(0.0, 15.5)]
+
+
+def test_process_clip_role_aware_promotion(tmp_path: Path) -> None:
+    clip = _prescreen_order_clip(tmp_path)
+    config = _prescreen_order_config()
+    config["scan_parameters"].update({
+        "domain": "underwater",
+        "classify_clips": "off",
+        "coarse_quality_threshold": 4,
+        "coarse_establishing_quality_threshold": 7,
+    })
+    frames = [
+        {"frame_path": str(tmp_path / "c0.jpg"), "timestamp": 0.0, "frame_number": 0},
+        {"frame_path": str(tmp_path / "c1.jpg"), "timestamp": 4.0, "frame_number": 1},
+    ]
+
+    responses = [
+        {
+            "detected": True,
+            "confidence": 0.85,
+            "quality_score": 5,
+            "story_role": "establishing",
+            "subject": "reef",
+        },
+        {
+            "detected": True,
+            "confidence": 0.85,
+            "quality_score": 5,
+            "story_role": "subject",
+            "subject": "turtle",
+        },
+    ]
+    resp_iter = iter(responses)
+
+    def fake_ollama(*args, **kwargs):
+        if kwargs.get("phase") == "coarse":
+            return next(resp_iter)
+        return {
+            "detected": True,
+            "confidence": 0.9,
+            "quality_score": 8,
+            "story_role": "hero_subject",
+        }
+
+    pass1_collector: list[scan.Pass1ClipTrace] = []
+    with (
+        patch.object(scan, "_prescreen_clip", return_value=(None, None)),
+        patch.object(scan, "extract_frames", return_value=frames),
+        patch.object(scan, "call_ollama", side_effect=fake_ollama),
+    ):
+        scan.process_clip(
+            clip,
+            config,
+            tmp_path / "work",
+            pass1_collector=pass1_collector,
+        )
+
+    assert len(pass1_collector) == 1
+    trace = pass1_collector[0]
+    assert len(trace.frame_traces) == 2
+    assert trace.frame_traces[0].promoted_to_pass2 is False
+    assert trace.frame_traces[0].passed_gate is False
+    assert trace.frame_traces[0].decision_reason == "low_quality"
+    assert trace.frame_traces[1].promoted_to_pass2 is True
+    assert trace.frame_traces[1].passed_gate is True
+    assert trace.frame_traces[1].decision_reason == "passed"
+
+
+def test_load_existing_traces_for_resume(tmp_path: Path) -> None:
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir(parents=True)
+
+    (output_dir / "classifications.json").write_text(
+        json.dumps({
+            "total_clips": 2,
+            "classifications": [
+                {
+                    "clip_id": "c1",
+                    "file_name": "clip1.mp4",
+                    "file_path": "/c1.mp4",
+                    "domain": "underwater",
+                    "sort_key": "1",
+                },
+                {
+                    "clip_id": "c2",
+                    "file_name": "clip2.mp4",
+                    "file_path": "/c2.mp4",
+                    "domain": "motorcycle",
+                    "sort_key": "2",
+                },
+            ],
+        })
+    )
+    (output_dir / "pass1_coarse_trace.json").write_text(
+        json.dumps({
+            "total_clips": 2,
+            "clips": [
+                {
+                    "clip_id": "c1",
+                    "source_file": "clip1.mp4",
+                    "sort_key": "1",
+                    "detected_domain": "underwater",
+                    "template_used": "pelagics",
+                    "coarse_threshold": 0.6,
+                    "coarse_quality_threshold": 4,
+                    "frame_traces": [],
+                    "merged_windows": [],
+                },
+                {
+                    "clip_id": "c2",
+                    "source_file": "clip2.mp4",
+                    "sort_key": "2",
+                    "detected_domain": "motorcycle",
+                    "template_used": "motorcycle",
+                    "coarse_threshold": 0.6,
+                    "coarse_quality_threshold": 4,
+                    "frame_traces": [],
+                    "merged_windows": [],
+                },
+            ],
+        })
+    )
+    (output_dir / "pass2_fine_trace.json").write_text(
+        json.dumps({
+            "total_clips": 2,
+            "clips": [
+                {
+                    "clip_id": "c1",
+                    "source_file": "clip1.mp4",
+                    "sort_key": "1",
+                    "quality_threshold": 7,
+                    "fine_pre_roll_seconds": 1.5,
+                    "fine_post_roll_seconds": 2.0,
+                    "merge_gap_seconds": 2.0,
+                    "max_clip_duration": 12.0,
+                    "frame_traces": [],
+                },
+                {
+                    "clip_id": "c2",
+                    "source_file": "clip2.mp4",
+                    "sort_key": "2",
+                    "quality_threshold": 7,
+                    "fine_pre_roll_seconds": 1.5,
+                    "fine_post_roll_seconds": 2.0,
+                    "merge_gap_seconds": 2.0,
+                    "max_clip_duration": 12.0,
+                    "frame_traces": [],
+                },
+            ],
+        })
+    )
+    (output_dir / "prescreen_trace.json").write_text(
+        json.dumps({
+            "version": 1,
+            "total_clips": 2,
+            "total_records": 2,
+            "records": [
+                {
+                    "clip_id": "c1",
+                    "source_file": "clip1.mp4",
+                    "candidate_index": 0,
+                    "interval": {"start": 0.0, "end": 8.0},
+                    "gates": [],
+                    "action": "keep",
+                    "vlm_call": True,
+                },
+                {
+                    "clip_id": "c2",
+                    "source_file": "clip2.mp4",
+                    "candidate_index": 0,
+                    "interval": {"start": 0.0, "end": 8.0},
+                    "gates": [],
+                    "action": "keep",
+                    "vlm_call": True,
+                },
+            ],
+        })
+    )
+
+    completed_clips = {"clip1.mp4"}
+    completed_clip_ids = {"c1"}
+
+    p0, p1, p2, ps = scan._load_existing_traces_for_resume(
+        output_dir, completed_clips, completed_clip_ids
+    )
+
+    assert len(p0) == 1 and p0[0].clip_id == "c1"
+    assert len(p1) == 1 and p1[0].clip_id == "c1"
+    assert len(p2) == 1 and p2[0].clip_id == "c1"
+    assert len(ps) == 1 and ps[0].clip_id == "c1"

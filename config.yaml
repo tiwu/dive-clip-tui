@@ -17,6 +17,10 @@ ollama:
   # Context window (tokens) sent as options.num_ctx on every request. Omit/null to use the
   # model's own default (e.g. its Modelfile). Lower it to fit a model in memory.
   # num_ctx: 32768
+  # Maximum tokens to generate per request, sent as options.num_predict.
+  # Caps runaway reasoning models (e.g. qwen3-vl-thinking) that produce hundreds of
+  # thinking tokens before returning JSON. 256-512 is sufficient for compact scan JSON.
+  # num_predict: 256
 
 # VLM backend for the scan pipeline (Pass 0, 1 and 2).
 # "ollama" (default) uses the `ollama` section above. "openrouter" uploads sampled frames
@@ -47,6 +51,7 @@ scan_parameters:
                                     #   (or "iw/2:-2" for half resolution or "null" for no scaling)
   coarse_confidence_threshold: 0.80 # Minimum confidence to trigger fine scan
   coarse_quality_threshold: 4       # Minimum score (1-10) to reject upside-down/dangling frames in coarse pass
+  coarse_establishing_quality_threshold: 7 # Minimum quality_score (1-10) for "establishing" shots to promote to fine scan
   fine_padding_seconds: 2           # Extra context before/after detected action
   fine_pre_roll_seconds: 1.5        # Seconds to include before detected fine highlight
   fine_post_roll_seconds: 2.0       # Seconds to include after detected fine highlight
@@ -78,6 +83,7 @@ prescreen:
   # "advisory" records gate failures but never drops a window. "enabled" rejects the
   # windows that fail a gate, which is the behaviour that actually saves VLM calls.
   gate_mode: "advisory"
+  window_duration: 8.0              # Duration (s) of candidate pre-screen windows for clips without HiLight tags
   sample_fps: 0.5                   # Frames per second sampled for visual/HSV metrics
   sample_size: 64                   # Downscale samples to 64x64 for cheap luma/Laplacian math
   keyframes_only: true              # Prefer keyframes; falls back to a full seek pass if none

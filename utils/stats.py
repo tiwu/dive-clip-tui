@@ -108,6 +108,7 @@ class Phase1Stats(BaseModel):
     frames_extracted: int = 0
     frames_analyzed: int = 0
     detections_detected: int = 0
+    prescreen_rejected: int = 0
     ollama_calls: int = 0
     ollama_failures: int = 0
     elapsed_seconds: float = 0.0

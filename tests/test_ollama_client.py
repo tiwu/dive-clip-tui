@@ -239,3 +239,35 @@ def test_num_ctx_must_be_positive() -> None:
 
     with pytest.raises(ValueError, match="num_ctx"):
         ollama_client.OllamaClient("http://localhost:11434", "model", num_ctx=0)
+
+
+def test_generate_sends_num_predict_option_when_set(tmp_path: Path) -> None:
+    _, payload, _ = _generate_with(tmp_path, {"response": "{}"}, num_predict=256)
+    assert payload["options"] == {"num_predict": 256}
+
+
+def test_generate_sends_both_num_ctx_and_num_predict(tmp_path: Path) -> None:
+    _, payload, _ = _generate_with(tmp_path, {"response": "{}"}, num_ctx=16384, num_predict=256)
+    assert payload["options"] == {"num_ctx": 16384, "num_predict": 256}
+
+
+def test_num_predict_must_be_positive() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="num_predict"):
+        ollama_client.OllamaClient("http://localhost:11434", "model", num_predict=0)
+    with pytest.raises(ValueError, match="num_predict"):
+        ollama_client.OllamaClient("http://localhost:11434", "model", num_predict=-10)
+    with pytest.raises(ValueError, match="num_predict"):
+        ollama_client.OllamaClient("http://localhost:11434", "model", num_predict=True)
+
+
+def test_warns_on_runaway_thinking_tokens(tmp_path: Path, caplog) -> None:
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _generate_with(tmp_path, {"response": '{"detected": true}', "eval_count": 600})
+    assert any(
+        "qwen3-vl-thinking" in record.message or "600 tokens" in record.message
+        for record in caplog.records
+    )
