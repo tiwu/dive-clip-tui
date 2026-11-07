@@ -124,13 +124,17 @@ checks currently include existing unrelated violations.
 
 When we discuss a feature and make a plan, follow the two-stage issue and PR process
 in `docs/plans/README.md`:
-1. **Stage 1 (Plan)**: Once requirements are aligned, if no GitHub issue exists yet, create one with `gh issue create --label "agent:plan-review"`, write `docs/plans/PLAN-<id>-<slug>.md` (including the proposed SemVer impact and draft changelog entry), embed the plan in the issue body, and stop to wait for user approval before writing implementation code.
+1. **Stage 1 (Plan)**: Once requirements are aligned, if no GitHub issue exists yet, create one with `gh issue create --label "agent:plan-review"`, write `docs/plans/PLAN-<id>-<slug>.md` (including the proposed SemVer impact and draft changelog entry), embed the plan in the issue body, attach the plan (and any supporting research/benchmark files) as **GitHub Issue Artifacts**, and stop to wait for user approval before writing implementation code.
 2. **Stage 2 (Implement & PR)**: After approval, implement on `feature/issue-<id>-<slug>`, add a `CHANGELOG.md` entry under `[Unreleased]`, and open a linked PR (`Closes #<id>`) with one SemVer label (unlabeled defaults to minor). CI enforces the tests, lint, formatting, and changelog requirements.
 
 When using the GitHub CLI:
 - Pass `--json title,body,labels,comments` to `gh issue view` (or `gh pr view`) to avoid the deprecated GraphQL `projectCards` failure.
 - When creating or editing PR descriptions with Markdown, write the body to a file and pass `--body-file` to prevent shell command substitution and redirection syntax errors.
 - If `gh pr edit` fails due to the GraphQL `projectCards` deprecation, update the PR via the GitHub REST API: `gh api repos/:owner/:repo/pulls/:number -X PATCH -F body=@<file>`.
+- **Issue Artifacts**: Attach plans (`"type": "plan"`), research/benchmark reports (`"type": "generic"`), links (`"type": "link"`), or HTML (`"type": "embedded_html"`) to issues via the REST API:
+  `gh api -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2026-03-10" repos/:owner/:repo/issues/:number/artifacts -X POST --input <json_file>`
+  where `<json_file>` contains `{"type": "...", "name": "...", "body": "..."}`.
+  **Important**: Artifact `name` must start and end with an alphanumeric character and contain **only** letters, numbers, spaces, periods (`.`), hyphens (`-`), and underscores (`_`) — never use colons (`:`), ampersands (`&`), or slashes (`/`), which fail with `HTTP 422`.
 - Do not use LaTeX math (`$...$` or `$$...$$`) for multi-character identifiers or variables containing underscores (e.g. `\text{var_name}`) in plans, issue bodies, or PR descriptions. GitHub's KaTeX renderer fails on underscores with `'_' allowed only in math mode`. Use fenced code blocks (`python`) or backtick code spans (`` `var_name` ``) instead.
 
 ---
@@ -157,6 +161,14 @@ When using the GitHub CLI:
   returns pure JSON.
 - **Ollama requests:** use `utils/ollama_client.py` for shared request handling
   and metrics rather than calling the API directly from scripts.
+- **Ollama service & `qwen3-vl` behavior:** Persistent host environment variables
+  (`OLLAMA_KV_CACHE_TYPE=q8_0`, `OLLAMA_KEEP_ALIVE=2h0m0s`, `OLLAMA_FLASH_ATTENTION=1`)
+  belong in `/etc/systemd/system/ollama.service.d/override.conf` so Ollama upgrades
+  do not wipe them. Note that Ollama's `qwen3vl` runner automatically injects
+  `--image-min-tokens 1024`, and under Ollama `0.40+` the built-in `qwen3-vl-thinking`
+  renderer ignores `"think": false` and defers `"format": "json"` grammar constraints
+  until after `</think>` unless overridden with a custom non-thinking `Modelfile`
+  (`TEMPLATE {{ .Prompt }}`) or bounded via `num_predict`.
 - **Telemetry:** `utils/telemetry.py` decodes GoPro GPMF (`gpmd`) tracks; DJI
   (`djmd`) and Insta360 (`insta`) tracks are detected but not decoded. Telemetry
   streams must be dynamically detected across camera models by codec tag / handler
