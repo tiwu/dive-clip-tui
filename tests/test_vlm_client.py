@@ -117,6 +117,12 @@ def test_factory_forwards_num_ctx():
     assert create_vlm_client({}).num_ctx is None
 
 
+def test_factory_forwards_num_predict():
+    client = create_vlm_client({"ollama": {"model": "m", "num_predict": 256}})
+    assert client.num_predict == 256
+    assert create_vlm_client({}).num_predict is None
+
+
 # --- OpenRouterClient ------------------------------------------------------------
 
 

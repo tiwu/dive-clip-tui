@@ -68,6 +68,7 @@ DEFAULT_SAMPLE_FPS = 0.5
 # Luma standard deviation that maps to maximal non-uniformity (0..255 scale).
 UNIFORMITY_STDEV_SCALE = 64.0
 DEFAULT_HILIGHT_PAD_SECONDS = 4.0
+DEFAULT_WINDOW_DURATION = 8.0
 VALID_GATE_MODES = ("advisory", "enabled")
 
 
@@ -86,6 +87,7 @@ class PrescreenConfig:
     audio_window: int = DEFAULT_AUDIO_WINDOW
     blur_min: float = DEFAULT_BLUR_MIN
     contact_sheet: bool = False
+    window_duration: float = DEFAULT_WINDOW_DURATION
     gate_thresholds: dict[str, float] = field(default_factory=dict)
     weights: dict[str, float] = field(default_factory=dict)
     domain_prior_thresholds: dict[str, float] = field(default_factory=dict)
@@ -101,6 +103,8 @@ class PrescreenConfig:
         if mode not in VALID_GATE_MODES:
             logger.warning("Unknown prescreen gate_mode %r; using 'advisory'", mode)
             mode = "advisory"
+        raw_wd = _as_float(raw.get("window_duration"), DEFAULT_WINDOW_DURATION)
+        window_duration = raw_wd if raw_wd > 0.0 else DEFAULT_WINDOW_DURATION
         return cls(
             enabled=_as_bool(raw.get("enabled"), False),
             gate_mode=mode,
@@ -115,6 +119,7 @@ class PrescreenConfig:
             audio_window=_as_int(raw.get("audio_window"), DEFAULT_AUDIO_WINDOW),
             blur_min=_as_float(raw.get("blur_min"), DEFAULT_BLUR_MIN),
             contact_sheet=_as_bool(raw.get("contact_sheet"), False),
+            window_duration=window_duration,
             gate_thresholds=_as_float_map(raw.get("gate_thresholds")),
             weights=_as_float_map(raw.get("weights")),
             domain_prior_thresholds=_as_float_map(raw.get("domain_prior_thresholds")),
@@ -190,6 +195,32 @@ def candidate_windows(
         if end <= start:
             continue
         windows.append((round(start, 3), round(end, 3)))
+    return windows
+
+
+def _build_default_windows(
+    clip_duration: float, window_duration: float
+) -> list[tuple[float, float]]:
+    """Partition clip into fixed-duration candidate windows, merging short tails."""
+    if clip_duration <= 0.0:
+        return []
+    if window_duration <= 0.0 or clip_duration <= window_duration:
+        return [(0.0, round(float(clip_duration), 3))]
+
+    windows: list[tuple[float, float]] = []
+    current = 0.0
+    while current < clip_duration:
+        end = min(clip_duration, current + window_duration)
+        windows.append((round(current, 3), round(end, 3)))
+        current = end
+
+    if len(windows) > 1:
+        last_start, last_end = windows[-1]
+        if (last_end - last_start) < 0.5 * window_duration:
+            windows.pop()
+            prev_start, _ = windows[-1]
+            windows[-1] = (prev_start, round(float(clip_duration), 3))
+
     return windows
 
 
@@ -711,8 +742,11 @@ class PrescreenResult:
 
     def action_at(self, timestamp: float) -> tuple[str, PrescreenRecord | None]:
         """Return the screening action that covers ``timestamp``."""
-        for record in self.records:
-            if record.interval.start <= timestamp <= record.interval.end:
+        for idx, record in enumerate(self.records):
+            is_last = idx == len(self.records) - 1
+            if record.interval.start <= timestamp < record.interval.end or (
+                is_last and record.interval.start <= timestamp <= record.interval.end
+            ):
                 return record.action, record
         return "keep", None
 
@@ -757,11 +791,16 @@ def screen_clip(
 
     tags = [float(tag) for tag in (hilight_tags or [])]
     windows: list[tuple[float, float]] = []
-    for start, end in intervals or candidate_windows(tags, clip_duration):
-        if end > start:
-            windows.append((round(float(start), 3), round(float(end), 3)))
-    if not windows and clip_duration > 0:
-        windows.append((0.0, round(float(clip_duration), 3)))
+    if intervals is not None:
+        for start, end in intervals:
+            if end > start:
+                windows.append((round(float(start), 3), round(float(end), 3)))
+    elif tags:
+        for start, end in candidate_windows(tags, clip_duration):
+            if end > start:
+                windows.append((round(float(start), 3), round(float(end), 3)))
+    else:
+        windows = _build_default_windows(clip_duration, cfg.window_duration)
 
     frames = extract_raw_frames(
         video_path,
@@ -778,10 +817,17 @@ def screen_clip(
     prior = telemetry_domain_prior(track, cfg.domain_prior_thresholds, clip_duration)
 
     for index, (start, end) in enumerate(windows):
+        is_last = index == len(windows) - 1
         window_frames = [
-            frame for frame, stamp in zip(frames, timestamps, strict=False) if start <= stamp <= end
+            frame
+            for frame, stamp in zip(frames, timestamps, strict=False)
+            if (start <= stamp < end) or (is_last and start <= stamp <= end)
         ]
-        window_stamps = [stamp for stamp in timestamps if start <= stamp <= end]
+        window_stamps = [
+            stamp
+            for stamp in timestamps
+            if (start <= stamp < end) or (is_last and start <= stamp <= end)
+        ]
         window_visual = (
             visual_metrics(window_frames, window_stamps, size=cfg.sample_size)
             if window_frames

@@ -204,6 +204,7 @@ class CoarseFrameTrace(BaseModel):
     reject_reasons: list[str] = Field(default_factory=list)
     description: str = ""
     passed_gate: bool = False
+    promoted_to_pass2: bool = False
     decision_reason: str = ""
     candidate_window: list[float] | tuple[float, float] | None = None
     prescreen_action: str = Field(default="", description="Pre-VLM screening decision")
@@ -244,6 +245,7 @@ class Pass1ClipTrace(BaseModel):
     template_used: str
     coarse_threshold: float
     coarse_quality_threshold: int
+    coarse_establishing_quality_threshold: int = 7
     frame_traces: list[CoarseFrameTrace] = Field(default_factory=list)
     merged_windows: list[list[float]] = Field(default_factory=list)
     window_routing: dict[str, str] = Field(default_factory=dict)

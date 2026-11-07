@@ -209,6 +209,7 @@ def create_vlm_client(config: dict[str, Any]) -> VLMClient:
             ollama_cfg.get("model", "qwen2.5-vl:7b"),
             ollama_cfg.get("timeout_seconds", 90),
             num_ctx=ollama_cfg.get("num_ctx"),
+            num_predict=ollama_cfg.get("num_predict"),
         )
 
     if provider == "openrouter":

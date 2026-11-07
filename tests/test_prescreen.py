@@ -550,7 +550,7 @@ def test_screen_clip_rejects_when_enabled() -> None:
         patch("utils.prescreen.extract_audio_peak_levels", audio_mock),
     ):
         result = screen_clip("clip.mp4", clip_id="c2", duration=20.0, config=config)
-    assert result.rejected_intervals == [(0.0, 20.0)]
+    assert result.rejected_intervals == [(0.0, 8.0), (8.0, 16.0), (16.0, 20.0)]
     assert result.intervals_for("keep") == []
     assert result.action_at(5.0)[0] == "reject"
 
@@ -647,3 +647,71 @@ def test_screen_clip_survives_unsampleable_video() -> None:
     assert record.yavg is None
     assert record.laplacian_sharpness is None
     assert result.action_at(1.0)[0] == "keep"
+
+
+def test_build_default_windows() -> None:
+    from utils.prescreen import _build_default_windows
+
+    assert _build_default_windows(25.0, 8.0) == [(0.0, 8.0), (8.0, 16.0), (16.0, 25.0)]
+    assert _build_default_windows(24.0, 8.0) == [(0.0, 8.0), (8.0, 16.0), (16.0, 24.0)]
+    assert _build_default_windows(20.0, 8.0) == [(0.0, 8.0), (8.0, 16.0), (16.0, 20.0)]
+    assert _build_default_windows(10.0, 8.0) == [(0.0, 10.0)]
+    assert _build_default_windows(8.0, 8.0) == [(0.0, 8.0)]
+    assert _build_default_windows(5.0, 8.0) == [(0.0, 5.0)]
+    assert _build_default_windows(0.0, 8.0) == []
+    assert _build_default_windows(20.0, 0.0) == [(0.0, 20.0)]
+    assert _build_default_windows(20.0, -5.0) == [(0.0, 20.0)]
+
+
+def test_prescreen_config_window_duration() -> None:
+    cfg = PrescreenConfig()
+    assert cfg.window_duration == 8.0
+    cfg2 = PrescreenConfig.from_config({"prescreen": {"window_duration": 12.5}})
+    assert cfg2.window_duration == 12.5
+    cfg_invalid = PrescreenConfig.from_config({"prescreen": {"window_duration": -4.0}})
+    assert cfg_invalid.window_duration == 8.0
+    cfg_str_invalid = PrescreenConfig.from_config({"prescreen": {"window_duration": "bogus"}})
+    assert cfg_str_invalid.window_duration == 8.0
+
+
+def test_screen_clip_partitions_clip_into_window_duration_segments() -> None:
+    frames = [make_checker() for _ in range(25)]
+    frames_mock, audio_mock = _patch_sampling(frames, [])
+    config = PrescreenConfig(enabled=True, sample_size=SIZE, sample_fps=1.0, window_duration=8.0)
+    with (
+        patch("utils.prescreen.extract_raw_frames", frames_mock),
+        patch("utils.prescreen.extract_audio_peak_levels", audio_mock),
+    ):
+        result = screen_clip("clip.mp4", clip_id="c_partition", duration=25.0, config=config)
+    assert len(result.records) == 3
+    assert [(r.interval.start, r.interval.end) for r in result.records] == [
+        (0.0, 8.0),
+        (8.0, 16.0),
+        (16.0, 25.0),
+    ]
+
+
+def test_screen_clip_partial_clip_rejection() -> None:
+    import importlib
+
+    scan = importlib.import_module("scripts.02_scan_footage")
+    _prescreen_rejects_whole_clip = scan._prescreen_rejects_whole_clip
+
+    # First 8 frames dark, next 8 frames good checker
+    frames = [make_frame(2, 2, 2) for _ in range(8)] + [make_checker() for _ in range(8)]
+    frames_mock, audio_mock = _patch_sampling(frames, [])
+    config = PrescreenConfig(
+        enabled=True, gate_mode="enabled", sample_size=SIZE, sample_fps=1.0, window_duration=8.0
+    )
+    with (
+        patch("utils.prescreen.extract_raw_frames", frames_mock),
+        patch("utils.prescreen.extract_audio_peak_levels", audio_mock),
+    ):
+        result = screen_clip("clip.mp4", clip_id="c_partial", duration=16.0, config=config)
+
+    assert len(result.records) == 2
+    assert result.records[0].action == "reject"
+    assert result.records[1].action == "keep"
+    assert result.rejected_intervals == [(0.0, 8.0)]
+    assert result.intervals_for("keep") == [(8.0, 16.0)]
+    assert not _prescreen_rejects_whole_clip(config, result)

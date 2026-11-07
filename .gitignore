@@ -50,3 +50,7 @@ outputs/*.md
 # Local agent tools and skills
 .agents/
 .agents
+
+# Local Ollama Modelfiles
+Modelfile*
+

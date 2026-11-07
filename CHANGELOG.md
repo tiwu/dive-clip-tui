@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Changed
+- Partition clips without HiLight tags into fixed-duration pre-screen windows (`prescreen.window_duration`, default `8.0s`), add role-aware Pass 1→Pass 2 promotion (`scan_parameters.coarse_establishing_quality_threshold`, default `7`) with cluster-then-pad window merging, support `ollama.num_predict` token caps, and document systemd Ollama service overrides (#79).
+
+### Fixed
+- Preserve existing `prescreen_trace.json`, `classifications.json`, `pass1_coarse_trace.json`, and `pass2_fine_trace.json` records when resuming a scan with `--resume` (#79).
+
 ## [0.33.1] - 2026-11-06
 
 ### Fixed

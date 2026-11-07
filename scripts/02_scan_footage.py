@@ -16,7 +16,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -116,9 +116,12 @@ def call_ollama(
     phase: str = "unspecified",
     system_prompt: str | None = None,
     num_ctx: int | None = None,
+    num_predict: int | None = None,
 ) -> dict[str, Any] | None:
     """Compatibility wrapper around the shared Ollama client."""
-    request_client = client or OllamaClient(host, model, timeout, num_ctx=num_ctx)
+    request_client = client or OllamaClient(
+        host, model, timeout, num_ctx=num_ctx, num_predict=num_predict
+    )
     return request_client.generate(image_path, prompt, phase, system_prompt=system_prompt)
 
 
@@ -1030,6 +1033,133 @@ def _analyze_contact_sheets(
     return results, meta
 
 
+def _build_promoted_clusters(
+    promoted_timestamps: Sequence[float],
+    coarse_fps: float,
+    fine_padding: float,
+    duration_sec: float = 0.0,
+) -> list[tuple[float, float]]:
+    """Cluster consecutive promoted coarse timestamps, pad clusters, and merge overlaps."""
+    if not promoted_timestamps:
+        return []
+    sorted_ts = sorted(promoted_timestamps)
+    step_gap = (1.0 / coarse_fps) * 1.1 if coarse_fps > 0 else 4.4
+
+    clusters: list[tuple[float, float]] = []
+    c_start = sorted_ts[0]
+    c_end = sorted_ts[0]
+    for ts in sorted_ts[1:]:
+        if ts - c_end <= step_gap:
+            c_end = ts
+        else:
+            clusters.append((c_start, c_end))
+            c_start = ts
+            c_end = ts
+    clusters.append((c_start, c_end))
+
+    padded: list[tuple[float, float]] = []
+    for start, end in clusters:
+        p_start = max(0.0, start - fine_padding)
+        p_end = min(duration_sec, end + fine_padding) if duration_sec > 0 else end + fine_padding
+        padded.append((round(p_start, 3), round(p_end, 3)))
+
+    merged: list[tuple[float, float]] = []
+    for start, end in padded:
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+
+    return merged
+
+
+def _load_existing_traces_for_resume(
+    output_dir: Path,
+    completed_clips: set[str],
+    completed_clip_ids: set[str] | None = None,
+) -> tuple[
+    list[ClipClassification],
+    list[Pass1ClipTrace],
+    list[Pass2ClipTrace],
+    list[PrescreenRecord],
+]:
+    """Hydrate trace collectors from existing trace files for completed clips upon resume."""
+    c_ids = completed_clip_ids or set()
+    pass0_records: list[ClipClassification] = []
+    pass1_records: list[Pass1ClipTrace] = []
+    pass2_records: list[Pass2ClipTrace] = []
+    prescreen_records: list[PrescreenRecord] = []
+
+    def _matches(clip_id: str, file_name: str) -> bool:
+        return clip_id in c_ids or file_name in completed_clips
+
+    # 1. classifications.json
+    p0_path = output_dir / "classifications.json"
+    if p0_path.is_file():
+        try:
+            data = json.loads(p0_path.read_text(encoding="utf-8"))
+            raw_list = data if isinstance(data, list) else data.get("classifications", [])
+            for item in raw_list:
+                try:
+                    rec = ClipClassification.model_validate(item)
+                    if _matches(rec.clip_id, rec.file_name):
+                        pass0_records.append(rec)
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("Could not load classifications from %s for resume: %s", p0_path, exc)
+
+    # 2. pass1_coarse_trace.json
+    p1_path = output_dir / "pass1_coarse_trace.json"
+    if p1_path.is_file():
+        try:
+            data = json.loads(p1_path.read_text(encoding="utf-8"))
+            raw_list = data if isinstance(data, list) else data.get("clips", [])
+            for item in raw_list:
+                try:
+                    rec = Pass1ClipTrace.model_validate(item)
+                    if _matches(rec.clip_id, rec.source_file):
+                        pass1_records.append(rec)
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("Could not load pass1 coarse trace from %s for resume: %s", p1_path, exc)
+
+    # 3. pass2_fine_trace.json
+    p2_path = output_dir / "pass2_fine_trace.json"
+    if p2_path.is_file():
+        try:
+            data = json.loads(p2_path.read_text(encoding="utf-8"))
+            raw_list = data if isinstance(data, list) else data.get("clips", [])
+            for item in raw_list:
+                try:
+                    rec = Pass2ClipTrace.model_validate(item)
+                    if _matches(rec.clip_id, rec.source_file):
+                        pass2_records.append(rec)
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("Could not load pass2 fine trace from %s for resume: %s", p2_path, exc)
+
+    # 4. prescreen_trace.json
+    ps_path = output_dir / "prescreen_trace.json"
+    if ps_path.is_file():
+        try:
+            data = json.loads(ps_path.read_text(encoding="utf-8"))
+            raw_list = data if isinstance(data, list) else data.get("records", [])
+            for item in raw_list:
+                try:
+                    rec = PrescreenRecord.model_validate(item)
+                    if _matches(rec.clip_id, rec.source_file):
+                        prescreen_records.append(rec)
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("Could not load prescreen trace from %s for resume: %s", ps_path, exc)
+
+    return pass0_records, pass1_records, pass2_records, prescreen_records
+
+
 def process_clip(
     clip: dict,
     config: dict,
@@ -1067,6 +1197,7 @@ def process_clip(
     clip_id = get_clip_id(clip)
     clip_work_dir = work_dir / clip_id
     clip_work_dir.mkdir(parents=True, exist_ok=True)
+    clip_duration = parse_duration(clip.get("duration", ""))
 
     scan_params = config.get("scan_parameters", {})
     coarse_fps = scan_params.get("coarse_fps", 0.5)
@@ -1075,6 +1206,9 @@ def process_clip(
     fine_scale = scan_params.get("fine_scale")
     coarse_threshold = scan_params.get("coarse_confidence_threshold", 0.65)
     coarse_quality_threshold = scan_params.get("coarse_quality_threshold", 4)
+    coarse_establishing_quality_threshold = scan_params.get(
+        "coarse_establishing_quality_threshold", 7
+    )
     fine_padding = scan_params.get("fine_padding_seconds", 4)
     quality_threshold = scan_params.get("quality_threshold", 7)
     checkpoint_interval = scan_params.get("checkpoint_interval_frames", 20)
@@ -1513,6 +1647,7 @@ def process_clip(
                             confidence=cached.confidence,
                             quality_score=cached.quality_score,
                             passed_gate=cached.candidate_window is not None,
+                            promoted_to_pass2=cached.candidate_window is not None,
                             decision_reason="passed"
                             if cached.candidate_window is not None
                             else "failed_gate",
@@ -1526,6 +1661,8 @@ def process_clip(
 
                 prescreen_fields = _prescreen_trace_fields(prescreen_result, ts)
                 if prescreen_fields.get("prescreen_action") == "reject":
+                    if phase1_stats is not None:
+                        phase1_stats.prescreen_rejected += 1
                     logger.debug(
                         "[Pass 1] Frame %d @ %.1fs rejected by pre-screen, skipping VLM",
                         frame_index,
@@ -1545,6 +1682,7 @@ def process_clip(
                             quality_score=0,
                             reject_reasons=["prescreen_reject"],
                             passed_gate=False,
+                            promoted_to_pass2=False,
                             decision_reason="prescreen_rejected",
                             **prescreen_fields,
                         )
@@ -1602,6 +1740,7 @@ def process_clip(
                                 quality_score=0,
                                 reject_reasons=["ollama call failed"],
                                 passed_gate=False,
+                                promoted_to_pass2=False,
                                 decision_reason="ollama_call_failed",
                                 **prescreen_fields,
                                 **sheet_meta.get(sheet_key, {}),
@@ -1627,10 +1766,13 @@ def process_clip(
                     if phase1_stats is not None:
                         phase1_stats.detections_detected += 1
 
+                req_quality = (
+                    coarse_establishing_quality_threshold
+                    if story_role == "establishing"
+                    else coarse_quality_threshold
+                )
                 frame_passes = (
-                    detected
-                    and confidence >= coarse_threshold
-                    and quality_score >= coarse_quality_threshold
+                    detected and confidence >= coarse_threshold and quality_score >= req_quality
                 )
                 if frame_passes:
                     cand_win = (max(0.0, ts - fine_padding), ts + fine_padding)
@@ -1664,6 +1806,7 @@ def process_clip(
                         reject_reasons=reject_reasons,
                         description=description,
                         passed_gate=frame_passes,
+                        promoted_to_pass2=frame_passes,
                         decision_reason=decision_reason,
                         candidate_window=cand_win,
                         **prescreen_fields,
@@ -1766,6 +1909,7 @@ def process_clip(
                     template_used=matched_template.name if matched_template else dom_config.name,
                     coarse_threshold=coarse_threshold,
                     coarse_quality_threshold=coarse_quality_threshold,
+                    coarse_establishing_quality_threshold=coarse_establishing_quality_threshold,
                     frame_traces=pass1_frame_traces,
                     merged_windows=[],
                     window_routing={},
@@ -1794,20 +1938,6 @@ def process_clip(
         cleanup_work_dir(clip_work_dir)
         return []
 
-    # Merge overlapping windows
-    candidate_windows.sort()
-    merged: list[tuple[float, float]] = []
-    for start, end in candidate_windows:
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-
-    if phase1_stats is not None:
-        phase1_stats.candidate_windows += len(merged)
-        phase1_stats.candidate_duration += sum(end - start for start, end in merged)
-        phase1_stats.elapsed_seconds += coarse_elapsed_total
-
     # Reconstruct coarse_hits from checkpoint if resuming
     if not coarse_hits and checkpoint is not None:
         coarse_hits.extend(
@@ -1815,6 +1945,30 @@ def process_clip(
             for r in checkpoint.coarse_results.values()
             if r.detected and r.candidate_window is not None
         )
+
+    # Cluster-then-pad window merging
+    promoted_ts = [h[0] for h in coarse_hits]
+    if promoted_ts:
+        merged = _build_promoted_clusters(
+            promoted_timestamps=promoted_ts,
+            coarse_fps=coarse_fps,
+            fine_padding=fine_padding,
+            duration_sec=clip_duration,
+        )
+    else:
+        # Fallback to existing candidate_windows if checkpoint had no coarse_results
+        candidate_windows.sort()
+        merged = []
+        for start, end in candidate_windows:
+            if merged and start < merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+
+    if phase1_stats is not None:
+        phase1_stats.candidate_windows += len(merged)
+        phase1_stats.candidate_duration += sum(end - start for start, end in merged)
+        phase1_stats.elapsed_seconds += coarse_elapsed_total
 
     window_routing: dict[str, dict[str, str]] = (
         dict(checkpoint.window_routing)
@@ -1844,6 +1998,7 @@ def process_clip(
                 template_used=matched_template.name if matched_template else dom_config.name,
                 coarse_threshold=coarse_threshold,
                 coarse_quality_threshold=coarse_quality_threshold,
+                coarse_establishing_quality_threshold=coarse_establishing_quality_threshold,
                 frame_traces=pass1_frame_traces,
                 merged_windows=[[w[0], w[1]] for w in merged],
                 window_routing={k: v.get("subject", "") for k, v in window_routing.items()},
@@ -1995,6 +2150,7 @@ def process_clip(
                                 quality_score=0,
                                 reject_reasons=["ollama call failed"],
                                 passed_gate=False,
+                                promoted_to_pass2=False,
                                 decision_reason="ollama_call_failed",
                             )
                         )
@@ -2525,11 +2681,14 @@ def main() -> None:
             logger.error("Failed to load classifications from %s: %s", args.classifications, exc)
             sys.exit(1)
 
+    completed_clip_ids: set[str] = set()
     if args.resume and state is not None:
         for clip in clips:
             cname = clip.get("file_name", "unknown")
+            cid = get_clip_id(clip)
             if state.is_item_done("scan", cname):
                 completed_clips.add(cname)
+                completed_clip_ids.add(cid)
 
     scan_start_time = time.perf_counter()
     p0_stats = Phase0Stats()
@@ -2539,6 +2698,13 @@ def main() -> None:
     pass1_records: list[Pass1ClipTrace] = []
     pass2_records: list[Pass2ClipTrace] = []
     prescreen_records: list[PrescreenRecord] = []
+
+    if args.resume and completed_clips:
+        pass0_records, pass1_records, pass2_records, prescreen_records = (
+            _load_existing_traces_for_resume(
+                target_run_dir or output_dir, completed_clips, completed_clip_ids
+            )
+        )
 
     def _save_trace_atomic(path: Path, model_obj: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
