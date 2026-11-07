@@ -12,15 +12,16 @@ general:
 ollama:
   # OLLAMA_HOST overrides this value when set (e.g. export OLLAMA_HOST=plotter.local:11434)
   host: "http://localhost:11434"
-  model: "qwen2.5vl:3b"
+  #model: "qwen2.5vl:3b"
+  model: "qwen3-vl:8b-instruct"
   timeout_seconds: 120
   # Context window (tokens) sent as options.num_ctx on every request. Omit/null to use the
   # model's own default (e.g. its Modelfile). Lower it to fit a model in memory.
-  # num_ctx: 32768
+  num_ctx: 32768
   # Maximum tokens to generate per request, sent as options.num_predict.
   # Caps runaway reasoning models (e.g. qwen3-vl-thinking) that produce hundreds of
   # thinking tokens before returning JSON. 256-512 is sufficient for compact scan JSON.
-  # num_predict: 256
+  num_predict: 512
 
 # VLM backend for the scan pipeline (Pass 0, 1 and 2).
 # "ollama" (default) uses the `ollama` section above. "openrouter" uploads sampled frames
@@ -45,7 +46,7 @@ scan_parameters:
     cq: 19                          # NVENC constant-quality level (lower = better quality, bigger files)
     crf: 19                         # libx264 CRF level (lower = better quality, bigger files)
   coarse_fps: 0.25                   # 0.25 frames per second during coarse scan (1 frame every 4 seconds)
-  coarse_scale: "426:-2"            # Downscale coarse frames for fast VLM screening
+  coarse_scale: "960:-2"            # Downscale coarse frames for fast VLM screening
   fine_fps: 1.0                     # 1 frame per second during highlight windows
   fine_scale: "1280:-2"             # Resolution for fine identification (720p; 854 gave the VLM too few pixels)
                                     #   (or "iw/2:-2" for half resolution or "null" for no scaling)
@@ -79,10 +80,10 @@ selection:
 # any VLM call and can reject or defer candidate windows so the model only sees
 # footage worth describing. Disabled by default: nothing here runs until enabled.
 prescreen:
-  enabled: false                    # Turn the funnel on (FFmpeg sampling + telemetry)
+  enabled: true                    # Turn the funnel on (FFmpeg sampling + telemetry)
   # "advisory" records gate failures but never drops a window. "enabled" rejects the
   # windows that fail a gate, which is the behaviour that actually saves VLM calls.
-  gate_mode: "advisory"
+  gate_mode: "enabled"
   window_duration: 8.0              # Duration (s) of candidate pre-screen windows for clips without HiLight tags
   sample_fps: 0.5                   # Frames per second sampled for visual/HSV metrics
   sample_size: 64                   # Downscale samples to 64x64 for cheap luma/Laplacian math
