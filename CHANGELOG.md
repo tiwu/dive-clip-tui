@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+- Updated `config.yaml` defaults for `prescreen.enabled`, `prescreen.gate_mode`, `scan_parameters.coarse_scale`, `ollama.num_ctx`, and `ollama.num_predict` to improve pre-screening, VLM context size, and token limits.
+
 ## [0.34.0] - 2026-11-07
 
 ### Changed
