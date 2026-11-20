@@ -20,6 +20,12 @@ Specifications & Formats Reference
 * **GoPro Body Coordinates**: +X right, +Y bottom, +Z optical axis (lens forward).
   When upright and level, gravity vector points down +Y (gy = 1.0, tilt = 0°).
   Inversion / dangling occurs when gy < 0 (tilt > 90°).
+* **GPMF Clock & Scaling Scope**: Real GoPro ``gpmd`` streams carry ``STMP``
+  microsecond clocks inside nested ``DEVC -> STRM`` containers, while ``SCAL``
+  dividers apply only to the current ``STRM`` sensor stream. The parser keeps a
+  track-wide shared ``STMP`` base clock across containers (normalizing chapters
+  to ``0.0s``) while resetting ``SCAL`` on every ``STRM`` boundary; multi-``DEVC``
+  payloads lacking ``STMP`` fall back to even interpolation across ``duration``.
 * **Research & Deep Dive**: ``docs/research/highlight-detection-and-telemetry.md``
 """
 
@@ -269,52 +275,80 @@ GPS_SIGNALS = set(GPS_COMPONENTS)
 def _walk_container(
     payload: bytes,
     leaves: dict[str, list[tuple[float, Any]]],
-    state: dict[str, Any],
+    clock: dict[str, float | None],
+    *,
+    scal: list[float] | None = None,
+    fallback_timestamp: float | None = None,
+    devc_step: float | None = None,
+    devc_seen: list[int] | None = None,
 ) -> None:
-    """Walk a GPMF container payload, attributing leaf samples to the stream clock.
+    """Walk a GPMF container payload, attributing leaf samples to the track clock.
 
     ``STMP`` records carry the sample clock in microseconds. The first value seen
-    becomes the base offset; later values advance the clock used for subsequent
-    leaves. Leaf samples inside one KLV record share that record's timestamp, which
-    keeps 200 Hz signals auditable without inventing per-sample timing.
+    anywhere in the track sets the shared base offset; later values advance the
+    shared track clock across nested ``DEVC`` / ``STRM`` containers while ``SCAL``
+    remains strictly scoped to each ``STRM`` stream. Leaf samples inside one KLV
+    record share that record's timestamp, which keeps 200 Hz signals auditable
+    without inventing per-sample timing.
     """
+    local_scal = scal
     for key, type_byte, child in _iter_klv(payload):
         if key == "STMP":
             # Firmware variance: STMP records are 4- or 8-byte microsecond counts.
             if len(child) in (4, 8):
                 value = float(int.from_bytes(child, "big"))
-                if state.get("stmp_base_us") is None:
-                    state["stmp_base_us"] = value
-                state["stmp_us"] = value
+                if clock.get("stmp_base_us") is None:
+                    clock["stmp_base_us"] = value
+                clock["stmp_us"] = value
             continue
         is_container = type_byte in GPMF_CONTAINER_TYPES or key in GPMF_CONTAINER_KEYS
         if is_container:
-            stream_state = dict(state)
-            if key == "STRM":
-                stream_state["scal"] = None
-            _walk_container(child, leaves, stream_state)
+            child_scal = None if key == "STRM" else local_scal
+            child_fallback = fallback_timestamp
+            if (
+                key == "DEVC"
+                and devc_step is not None
+                and devc_seen is not None
+                and child_fallback is None
+            ):
+                child_fallback = devc_seen[0] * devc_step
+                devc_seen[0] += 1
+            _walk_container(
+                child,
+                leaves,
+                clock,
+                scal=child_scal,
+                fallback_timestamp=child_fallback,
+                devc_step=devc_step,
+                devc_seen=devc_seen,
+            )
             continue
         values = _decode_leaf_values(key, type_byte, child)
         if not values:
             continue
 
         if key == "SCAL":
-            state["scal"] = values
+            local_scal = values
             continue
 
-        if key in ("GYRO", "ACCL") and state.get("scal"):
-            scal = state["scal"]
-            scal_len = len(scal)
+        if key in ("GYRO", "ACCL") and local_scal:
+            scal_len = len(local_scal)
             values = [
-                float(val) / float(scal[i % scal_len])
-                if float(scal[i % scal_len]) != 0
+                float(val) / float(local_scal[i % scal_len])
+                if float(local_scal[i % scal_len]) != 0
                 else float(val)
                 for i, val in enumerate(values)
             ]
 
-        seconds = 0.0
-        if state.get("stmp_us") is not None and state.get("stmp_base_us") is not None:
-            seconds = max(0.0, (float(state["stmp_us"]) - state["stmp_base_us"]) / 1_000_000.0)
+        if clock.get("stmp_us") is not None and clock.get("stmp_base_us") is not None:
+            seconds = max(
+                0.0,
+                (float(clock["stmp_us"]) - float(clock["stmp_base_us"])) / 1_000_000.0,  # type: ignore[arg-type]
+            )
+        elif fallback_timestamp is not None:
+            seconds = fallback_timestamp
+        else:
+            seconds = 0.0
         if key in SAMPLE_COMPONENTS:
             grouped = _group_samples(values, SAMPLE_COMPONENTS[key])
             leaves.setdefault(key, []).extend((seconds, sample) for sample in grouped)
@@ -327,9 +361,17 @@ def parse_gpmf(data: bytes, duration: float = 0.0) -> TelemetryTrack | None:
     if not data:
         return None
     leaves: dict[str, list[tuple[float, Any]]] = {}
-    state: dict[str, Any] = {"stmp_us": None, "stmp_base_us": None}
+    clock: dict[str, float | None] = {"stmp_us": None, "stmp_base_us": None}
     try:
-        _walk_container(data, leaves, state)
+        devc_count = sum(1 for key, _, _ in _iter_klv(data) if key == "DEVC")
+        devc_step = (duration / devc_count) if (duration > 0.0 and devc_count > 1) else None
+        _walk_container(
+            data,
+            leaves,
+            clock,
+            devc_step=devc_step,
+            devc_seen=[0],
+        )
     except (struct.error, IndexError, ValueError) as exc:
         logger.debug("GPMF decode failed: %s", exc)
         return None

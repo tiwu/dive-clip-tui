@@ -489,7 +489,7 @@ or coarse frame extraction. Advisory mode never skips clips.
 
 #### Telemetry Specifications & Coordinates Reference
 * **GoPro GPMF Format**: Based on the [GoPro GPMF parser specification](https://github.com/gopro/gpmf-parser).
-  Every KLV payload is 32-bit aligned (`((payload_length + 3) & ~3)`).
+  Every KLV payload is 32-bit aligned (`((payload_length + 3) & ~3)`). Real GoPro streams carry `STMP` microsecond clocks inside nested `DEVC -> STRM` containers while `SCAL` scaling factors apply only per `STRM` stream; `utils/telemetry.py` maintains a shared track-wide `STMP` clock offset across containers (normalizing chapters to `0.0s`) while resetting `SCAL` at each `STRM` boundary, falling back to even `DEVC` interpolation across `duration` when `STMP` is absent.
 * **GoPro Coordinate System**: Camera body axes are defined as:
   * `+X`: Camera right
   * `+Y`: Camera bottom

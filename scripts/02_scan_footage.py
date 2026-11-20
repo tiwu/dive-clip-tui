@@ -2020,6 +2020,7 @@ def process_clip(
     fine_elapsed_total = 0.0
     fine_confidences: list[float] = []
     pass2_frame_traces: list[FineFrameTrace] = []
+    orientation_reject_timestamps: list[float] = []
     merge_events: list[MergeEvent] = []
     dropped_overlaps: list[DroppedOverlap] = []
 
@@ -2169,6 +2170,9 @@ def process_clip(
                     frame_passes = detected and quality_score >= quality_threshold
                     fine_confidences.append(confidence)
 
+                    if not frame_passes and _is_orientation_rejection(reject_reasons):
+                        orientation_reject_timestamps.append(ts)
+
                     if frame_passes:
                         fine_passed += 1
                         if phase2_stats is not None:
@@ -2281,6 +2285,7 @@ def process_clip(
         max_clip_duration=max_clip_duration,
         trace_merge_events=merge_events,
         trace_dropped_overlaps=dropped_overlaps,
+        rejected_orientation_timestamps=orientation_reject_timestamps,
     )
     if phase2_stats is not None:
         phase2_stats.detections_dedup += len(all_detections)
@@ -2332,18 +2337,38 @@ def process_clip(
     return all_detections
 
 
+_ORIENTATION_REJECTION_KEYWORDS: tuple[str, ...] = (
+    "upside down",
+    "inverted",
+    "tilted",
+    "dangling",
+    "sideways",
+    "orientation",
+)
+
+
+def _is_orientation_rejection(reject_reasons: Sequence[str] | None) -> bool:
+    """Return True if any VLM reject reason indicates camera inversion or severe tilt."""
+    if not reject_reasons:
+        return False
+    combined = " ".join(str(r).lower() for r in reject_reasons)
+    return any(kw in combined for kw in _ORIENTATION_REJECTION_KEYWORDS)
+
+
 def _deduplicate_detections(
     detections: list[RefinedDetection],
     merge_gap_seconds: float = 1.5,
     max_clip_duration: float = 12.0,
     trace_merge_events: list[MergeEvent] | None = None,
     trace_dropped_overlaps: list[DroppedOverlap] | None = None,
+    rejected_orientation_timestamps: Sequence[float] | None = None,
 ) -> list[RefinedDetection]:
     """Merge contiguous detections of the same subject and deduplicate overlapping windows.
 
     1. Contiguous or adjacent windows sharing content tokens within the same clip are merged
        into a continuous highlight segment (up to max_clip_duration), preserving the highest
-       quality score, highest confidence, and most descriptive detail.
+       quality score, highest confidence, and most descriptive detail — unless separated by a
+       frame rejected for camera orientation/inversion.
     2. Any remaining overlapping windows of different subjects are deduplicated by
        keeping the detection with the higher quality score.
     """
@@ -2351,6 +2376,12 @@ def _deduplicate_detections(
         return []
 
     from collections import defaultdict
+
+    blocked_orientation_ts = (
+        sorted(float(t) for t in rejected_orientation_timestamps)
+        if rejected_orientation_timestamps
+        else []
+    )
 
     # Group by clip_id
     clip_groups: dict[str, list[RefinedDetection]] = defaultdict(list)
@@ -2389,7 +2420,27 @@ def _deduplicate_detections(
             within_cap = merged_duration <= max_clip_duration
 
             if is_adjacent and subjects_match:
-                if not within_cap:
+                prev_center = (prev.start_time + prev.end_time) / 2.0
+                det_center = (det.start_time + det.end_time) / 2.0
+                if blocked_orientation_ts and any(
+                    prev_center <= t <= det_center for t in blocked_orientation_ts
+                ):
+                    if trace_merge_events is not None:
+                        trace_merge_events.append(
+                            MergeEvent(
+                                merged_detection_id=make_detection_id(
+                                    det.clip_id, det.start_time, det.end_time
+                                ),
+                                constituent_ids=[
+                                    make_detection_id(prev.clip_id, prev.start_time, prev.end_time),
+                                    make_detection_id(det.clip_id, det.start_time, det.end_time),
+                                ],
+                                matched_tokens=sorted(shared_tokens),
+                                action="blocked_orientation_rejection",
+                            )
+                        )
+                    merged_group.append(det)
+                elif not within_cap:
                     # Duration cap exceeded: start new segment and record split
                     if trace_merge_events is not None:
                         trace_merge_events.append(
