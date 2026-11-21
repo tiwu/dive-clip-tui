@@ -550,3 +550,97 @@ def test_parse_gpmf_applies_scal_to_gyro():
     assert series.values == [3.0, 4.0, 0.0]
     record = aggregate_window(track, 0.0, 1.0)
     assert record["gyro_rms"] == pytest.approx((25.0 / 3.0) ** 0.5, rel=1e-3)
+
+
+def _stmp64(microseconds: int) -> bytes:
+    """Build an 8-byte uint64 ``STMP`` record matching GoPro firmware."""
+    return _klv("STMP", ord("J"), struct.pack(">Q", microseconds), 8)
+
+
+def test_parse_gpmf_persists_stmp_clock_across_nested_devc_strm():
+    """Nested DEVC -> STRM -> STMP clocks must advance track-wide timestamps."""
+    payload = b"".join([
+        _container(
+            "DEVC",
+            _container(
+                "STRM", _stmp64(100_000) + _i16("GRAV", [0, 32767, 0]) + _i16("GYRO", [0, 0, 0])
+            ),
+        ),
+        _container(
+            "DEVC",
+            _container(
+                "STRM", _stmp64(10_100_000) + _i16("GRAV", [0, 32767, 0]) + _i16("GYRO", [1, 1, 1])
+            ),
+        ),
+        _container(
+            "DEVC",
+            _container(
+                "STRM",
+                _stmp64(270_100_000)
+                + _i16("GRAV", [14155, -10911, -27459])
+                + _i16("GYRO", [2, 0, 0]),
+            ),
+        ),
+    ])
+
+    track = parse_gpmf(payload, duration=280.0)
+    assert track is not None
+    grav = track.series("GRAV")
+    assert grav is not None
+    assert grav.timestamps == pytest.approx([0.0, 10.0, 270.0])
+
+    # Mid-clip upright window receives samples and passes orientation gate
+    rec_mid = aggregate_window(track, 8.0, 16.0)
+    assert rec_mid["sample_count"] > 0
+    assert rec_mid["tilt_deg"] == pytest.approx(0.0, abs=0.1)
+
+    # Late inverted window receives samples and fails orientation gate
+    rec_late = aggregate_window(track, 264.0, 272.0)
+    assert rec_late["sample_count"] > 0
+    assert rec_late["tilt_deg"] is not None
+    assert rec_late["tilt_deg"] > 100.0
+    gates = evaluate_gates(rec_late, thresholds={"tilt_max": 100.0}, mode="enabled")
+    assert gates_reject(gates) is True
+
+
+def test_parse_gpmf_normalizes_chapter2_nonzero_initial_stmp():
+    """Chapter 2+ clips with high initial STMP must normalize cleanly to 0.0s."""
+    payload = b"".join([
+        _container("DEVC", _container("STRM", _stmp64(768_000_000) + _i32("YAVG", [100]))),
+        _container("DEVC", _container("STRM", _stmp64(778_000_000) + _i32("YAVG", [110]))),
+    ])
+
+    track = parse_gpmf(payload, duration=20.0)
+    assert track is not None
+    yavg = track.series("YAVG")
+    assert yavg is not None
+    assert yavg.timestamps == pytest.approx([0.0, 10.0])
+
+
+def test_parse_gpmf_isolates_scal_per_strm():
+    """SCAL inside one STRM must not bleed into sibling STRM streams."""
+    payload = _container(
+        "DEVC",
+        _container("STRM", _stmp64(1_000_000) + _i16("SCAL", [100]) + _i16("ACCL", [100, 200, 300]))
+        + _container("STRM", _stmp64(1_000_000) + _i16("GYRO", [5, 0, 0])),
+    )
+
+    track = parse_gpmf(payload, duration=1.0)
+    assert track is not None
+    assert track.series("ACCL").values == [1.0, 2.0, 3.0]
+    assert track.series("GYRO").values == [5, 0, 0]
+
+
+def test_parse_gpmf_fallback_interpolates_multi_devc_without_stmp():
+    """Multi-DEVC payloads lacking STMP should distribute blocks across duration."""
+    payload = b"".join([
+        _container("DEVC", _container("STRM", _i32("YAVG", [100]))),
+        _container("DEVC", _container("STRM", _i32("YAVG", [110]))),
+        _container("DEVC", _container("STRM", _i32("YAVG", [120]))),
+    ])
+
+    track = parse_gpmf(payload, duration=30.0)
+    assert track is not None
+    yavg = track.series("YAVG")
+    assert yavg is not None
+    assert yavg.timestamps == pytest.approx([0.0, 10.0, 20.0])

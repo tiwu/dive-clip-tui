@@ -238,6 +238,91 @@ def test_deduplicate_detections_preserves_single_char_unrelated_subjects() -> No
     assert result[0].subject == "b"
 
 
+def test_is_orientation_rejection() -> None:
+    """_is_orientation_rejection matches inverted/tilted/dangling reasons and ignores others."""
+    assert scan._is_orientation_rejection(["Frame is upside down (inverted perspective)"]) is True
+    assert scan._is_orientation_rejection(["camera angle is tilted and unbalanced"]) is True
+    assert scan._is_orientation_rejection(["dangling camera", "sideways framing"]) is True
+    assert scan._is_orientation_rejection(["blurry frame", "no diver visible"]) is False
+    assert scan._is_orientation_rejection([]) is False
+
+
+def test_deduplicate_detections_blocks_merge_across_orientation_rejection() -> None:
+    """Adjacent detections must not merge across a Pass 2 orientation-rejected frame."""
+    from utils.models import MergeEvent, RefinedDetection
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="GX010832.MP4",
+        file_path="/GX010832.MP4",
+        start_time=10.0,
+        end_time=13.5,
+        subject="diver exploring reef",
+        confidence=0.95,
+        quality_score=8,
+        description="first segment",
+    )
+    det2 = RefinedDetection(
+        clip_id="c1",
+        file_name="GX010832.MP4",
+        file_path="/GX010832.MP4",
+        start_time=14.5,
+        end_time=18.0,
+        subject="diver exploring reef",
+        confidence=0.95,
+        quality_score=8,
+        description="second segment",
+    )
+    merge_events: list[MergeEvent] = []
+    result = scan._deduplicate_detections(
+        [det1, det2],
+        merge_gap_seconds=1.5,
+        max_clip_duration=12.0,
+        trace_merge_events=merge_events,
+        rejected_orientation_timestamps=[14.0],
+    )
+    assert len(result) == 2
+    assert (result[0].start_time, result[0].end_time) == (10.0, 13.5)
+    assert (result[1].start_time, result[1].end_time) == (14.5, 18.0)
+    assert any(ev.action == "blocked_orientation_rejection" for ev in merge_events)
+
+
+def test_deduplicate_detections_still_merges_when_rejection_outside_span() -> None:
+    """Orientation rejections outside the gap between two detections must not block merging."""
+    from utils.models import RefinedDetection
+
+    det1 = RefinedDetection(
+        clip_id="c1",
+        file_name="GX010832.MP4",
+        file_path="/GX010832.MP4",
+        start_time=10.0,
+        end_time=13.5,
+        subject="diver exploring reef",
+        confidence=0.95,
+        quality_score=8,
+        description="first segment",
+    )
+    det2 = RefinedDetection(
+        clip_id="c1",
+        file_name="GX010832.MP4",
+        file_path="/GX010832.MP4",
+        start_time=14.5,
+        end_time=18.0,
+        subject="diver exploring reef",
+        confidence=0.95,
+        quality_score=8,
+        description="second segment",
+    )
+    result = scan._deduplicate_detections(
+        [det1, det2],
+        merge_gap_seconds=1.5,
+        max_clip_duration=12.0,
+        rejected_orientation_timestamps=[2.0, 25.0],
+    )
+    assert len(result) == 1
+    assert (result[0].start_time, result[0].end_time) == (10.0, 18.0)
+
+
 def test_normalize_vlm_frame_response() -> None:
     """normalize_vlm_frame_response sanitizes invalid story_role and strips arbitrary keys."""
     raw = {

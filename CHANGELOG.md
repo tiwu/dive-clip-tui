@@ -8,6 +8,9 @@ All notable changes to this project are documented here. This changelog follows
 
 - Updated `config.yaml` defaults for `prescreen.enabled`, `prescreen.gate_mode`, `scan_parameters.coarse_scale`, `ollama.num_ctx`, and `ollama.num_predict` to improve pre-screening, VLM context size, and token limits.
 
+### Fixed
+- Fix GoPro GPMF `STMP` clock reset across nested `DEVC`/`STRM` containers so pre-VLM orientation and shake gates evaluate every window, and prevent Pass 2 shot merging from bridging across frames rejected as upside down or tilted (#84).
+
 ## [0.34.0] - 2026-11-07
 
 ### Changed
