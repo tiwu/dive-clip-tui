@@ -42,18 +42,52 @@ def find_latest_run_dir(output_dir: Path | str) -> Path | None:
     return candidates[-1]
 
 
+def _resolve_latest_run_dir(output_dir: Path | str) -> Path | None:
+    """Resolve the latest run directory via symlink, exFAT ``latest.txt``, or ``runs/`` scan."""
+    out_path = Path(output_dir)
+    latest_link = out_path / "latest"
+    if latest_link.is_dir():
+        return latest_link.resolve()
+
+    latest_txt = out_path / "latest.txt"
+    if latest_txt.is_file():
+        try:
+            lines = latest_txt.read_text(encoding="utf-8").splitlines()
+            raw = lines[0].strip() if lines else ""
+        except OSError:
+            raw = ""
+        if raw:
+            candidate = Path(raw) if Path(raw).is_absolute() else (out_path / raw)
+            if candidate.is_dir():
+                return candidate.resolve()
+
+    return find_latest_run_dir(out_path)
+
+
 def resolve_run_dir(output_dir: Path | str, target: str | Path | None = None) -> Path:
-    """Resolve an existing run directory by run ID or explicit path.
+    """Resolve an existing run directory by run ID, ``'latest'``, or explicit path.
 
     If target is None, returns a new timestamped run directory.
+    If target is ``'latest'``, resolves ``<output_dir>/latest``, exFAT ``latest.txt``,
+    or the newest run directory under ``<output_dir>/runs/``.
     If target is specified but not found, raises FileNotFoundError.
     """
     if target is None:
         return get_run_dir(output_dir)
 
+    if str(target).strip() == "latest":
+        latest = _resolve_latest_run_dir(output_dir)
+        if latest is not None:
+            return latest
+        raise FileNotFoundError(f"Run directory not found: {target}")
+
     direct_path = Path(target)
     if direct_path.is_dir():
         return direct_path
+
+    relative_out = Path(output_dir) / target
+    if relative_out.is_dir():
+        return relative_out
 
     relative_run = Path(output_dir) / "runs" / target
     if relative_run.is_dir():
@@ -175,14 +209,11 @@ def resolve_assembly_artifacts(
     Returns (detections_path, clips_dir, latest_run).
     """
     out_path = Path(output_dir)
+    latest_link = out_path / "latest"
     if run is not None:
         latest_run: Path | None = resolve_run_dir(out_path, run)
-        latest_link = out_path / "latest"
     else:
-        latest_link = out_path / "latest"
-        latest_run = (
-            latest_link.resolve() if latest_link.exists() else find_latest_run_dir(out_path)
-        )
+        latest_run = _resolve_latest_run_dir(out_path)
 
     if input_detections:
         detections_path = Path(input_detections)
