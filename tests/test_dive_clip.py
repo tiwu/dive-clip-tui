@@ -1351,3 +1351,69 @@ def test_cmd_scan_worker_joined_before_final_render(tmp_path: Path) -> None:
 
     assert rc == 0
     assert step_log == ["ingest", "scan", "render"]
+
+
+def test_build_parser_storyline_and_extended_aftermovie_flags(tmp_path: Path) -> None:
+    """dive-clip storyline and extended aftermovie flags forward arguments accurately."""
+    output_folder = tmp_path / "outputs"
+    output_folder.mkdir()
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_folder}"\n', encoding="utf-8")
+
+    parser = build_parser()
+    st_args = parser.parse_args([
+        "storyline",
+        "--config",
+        str(config_file),
+        "--run",
+        "run-20261119-155336",
+        "--provider",
+        "openrouter",
+        "--durations",
+        "60,150",
+        "--narrative",
+        "Macro highlights",
+        "--deterministic-only",
+    ])
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run:
+        assert st_args.func(st_args) == 0
+
+    st_cmd = mock_run.call_args.args[0]
+    assert "04_plan_storyline.py" in st_cmd[1]
+    assert st_cmd[st_cmd.index("--provider") + 1] == "openrouter"
+    assert st_cmd[st_cmd.index("--durations") + 1] == "60,150"
+    assert "--deterministic-only" in st_cmd
+
+    run_dir = output_folder / "runs" / "run-20261119-155336"
+    (run_dir / "highlights").mkdir(parents=True)
+    (run_dir / "detections_refined.json").write_text('{"detections": []}', encoding="utf-8")
+    af_args = parser.parse_args([
+        "aftermovie",
+        "--config",
+        str(config_file),
+        "--run",
+        "run-20261119-155336",
+        "--plan",
+        "storyline_plans.json",
+        "--option",
+        "teaser",
+        "--dry-run",
+        "--target-duration",
+        "120",
+        "--max-per-source-file",
+        "1",
+    ])
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_run2:
+        assert af_args.func(af_args) == 0
+
+    af_cmd = mock_run2.call_args.args[0]
+    assert "07_create_aftermovie.py" in af_cmd[1]
+    assert af_cmd[af_cmd.index("--plan") + 1] == "storyline_plans.json"
+    assert af_cmd[af_cmd.index("--option") + 1] == "teaser"
+    assert "--dry-run" in af_cmd
+    assert af_cmd[af_cmd.index("--target-duration") + 1] == "120.0"
+    assert af_cmd[af_cmd.index("--max-per-source-file") + 1] == "1"

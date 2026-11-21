@@ -3,7 +3,7 @@
 # Base config: config.yaml
 
 general:
-  project_name: "Madagascar_Dives_2026_Subjects"
+  project_name: ""  # Optional fallback label for EDL titles (folder ingest uses folder name)
   output_dir: "./outputs_subjects"
 
 ollama:

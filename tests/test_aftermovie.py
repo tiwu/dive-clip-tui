@@ -10,6 +10,8 @@ import sys as sys_module
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from rich.console import Console
+
 # Load scripts/07_create_aftermovie.py directly (name starts with a digit)
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 _aftermovie_spec = importlib.util.spec_from_file_location(
@@ -764,3 +766,235 @@ def test_aftermovie_falls_back_to_prerendered_clip_when_source_missing(tmp_path:
 
     assert len(sources) == 1
     assert sources[0].name == "clip001_10.0s-15.0s_turtle_q9.mp4"
+
+
+def test_aftermovie_dry_run_skips_ffmpeg(tmp_path: Path, capsys) -> None:
+    """--dry-run prints shot preview and exits 0 without invoking FFmpeg."""
+    source = tmp_path / "GX010778.MP4"
+    source.touch()
+    detections = {
+        "detections": [
+            {
+                "clip_id": "c1",
+                "detection_id": "c1_00000.00_00007.00",
+                "file_name": "GX010778.MP4",
+                "file_path": str(source),
+                "start_time": 0.0,
+                "end_time": 7.0,
+                "domain": "underwater",
+                "story_role": "hero_subject",
+                "subject": "Yellowtail Fusiliers",
+                "quality_score": 9,
+                "confidence": 0.95,
+                "description": "fusiliers",
+            }
+        ]
+    }
+    det_path = tmp_path / "detections_refined.json"
+    det_path.write_text(json.dumps(detections), encoding="utf-8")
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text('general:\n  output_dir: "./outputs"\n', encoding="utf-8")
+
+    orig_argv, orig_exit, orig_cwd = sys_module.argv, sys_module.exit, Path.cwd()
+    exit_code = None
+
+    def fake_exit(code=0):
+        nonlocal exit_code
+        exit_code = code
+        raise SystemExit(code)
+
+    try:
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--input",
+            str(det_path),
+            "--config",
+            str(cfg_path),
+            "--target-duration",
+            "60",
+            "--order",
+            "story_arc",
+            "--dry-run",
+        ]
+        sys_module.exit = fake_exit
+        os.chdir(tmp_path)
+        with (
+            patch.object(aftermovie, "render_clip_with_fade") as mock_render,
+            patch.object(aftermovie, "get_console", return_value=Console(stderr=True, width=160)),
+            contextlib.suppress(SystemExit),
+        ):
+            aftermovie.main()
+    finally:
+        sys_module.argv, sys_module.exit = orig_argv, orig_exit
+        os.chdir(orig_cwd)
+
+    assert exit_code == 0
+    mock_render.assert_not_called()
+    captured = capsys.readouterr()
+    assert "Yellowtail Fusiliers" in captured.err
+    assert "Preview: 1 clips" in captured.err
+
+
+def test_aftermovie_plan_option_and_option_all(tmp_path: Path) -> None:
+    """--plan + --option applies act-boundary fades, and --option all renders each option MP4."""
+    src1 = tmp_path / "GX010814.MP4"
+    src2 = tmp_path / "GX010881.MP4"
+    src3 = tmp_path / "GX010803.MP4"
+    for p in (src1, src2, src3):
+        p.touch()
+
+    plans_payload = {
+        "schema_version": 1,
+        "proposals": [
+            {
+                "id": "teaser",
+                "title": "Teaser",
+                "target_duration_seconds": 10,
+                "estimated_duration_seconds": 10.0,
+                "clip_count": 3,
+                "acts": [],
+                "shots": [
+                    {
+                        "detection_id": "d1",
+                        "clip_id": "c1",
+                        "file_name": "GX010814.MP4",
+                        "file_path": str(src1),
+                        "act": 1,
+                        "in_time": 2.0,
+                        "out_time": 5.0,
+                        "subject": "boats",
+                        "transition_in": "fade",
+                        "transition_out": "cut",
+                    },
+                    {
+                        "detection_id": "d2",
+                        "clip_id": "c2",
+                        "file_name": "GX010881.MP4",
+                        "file_path": str(src2),
+                        "act": 1,
+                        "in_time": 31.0,
+                        "out_time": 34.5,
+                        "subject": "seahorse",
+                        "transition_in": "cut",
+                        "transition_out": "fade",
+                    },
+                    {
+                        "detection_id": "d3",
+                        "clip_id": "c3",
+                        "file_name": "GX010803.MP4",
+                        "file_path": str(src3),
+                        "act": 2,
+                        "in_time": 362.0,
+                        "out_time": 365.5,
+                        "subject": "shark",
+                        "transition_in": "fade",
+                        "transition_out": "fade",
+                    },
+                ],
+            },
+            {
+                "id": "highlight",
+                "title": "Highlight",
+                "target_duration_seconds": 12,
+                "estimated_duration_seconds": 3.5,
+                "clip_count": 1,
+                "acts": [],
+                "shots": [
+                    {
+                        "detection_id": "d3",
+                        "clip_id": "c3",
+                        "file_name": "GX010803.MP4",
+                        "file_path": str(src3),
+                        "act": 1,
+                        "in_time": 362.0,
+                        "out_time": 365.5,
+                        "subject": "shark",
+                        "transition_in": "fade",
+                        "transition_out": "fade",
+                    }
+                ],
+            },
+        ],
+    }
+    plan_file = tmp_path / "storyline_plans.json"
+    plan_file.write_text(json.dumps(plans_payload), encoding="utf-8")
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text('general:\n  output_dir: "./outputs"\n', encoding="utf-8")
+
+    fade_flags: list[tuple[float, float, bool, bool]] = []
+    concat_outputs: list[Path] = []
+
+    def mock_render(source, start, end, output, **kwargs):
+        fade_flags.append((
+            float(start),
+            float(end),
+            bool(kwargs.get("fade_in")),
+            bool(kwargs.get("fade_out")),
+        ))
+        Path(output).touch()
+        return True
+
+    def mock_concat(clips, out):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).touch()
+        return True
+
+    def mock_music(video, music, out, *args):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).touch()
+        concat_outputs.append(Path(out))
+        return True
+
+    orig_argv, orig_cwd = sys_module.argv, Path.cwd()
+    try:
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--config",
+            str(cfg_path),
+            "--plan",
+            str(plan_file),
+            "--option",
+            "teaser",
+            "--output",
+            str(tmp_path / "teaser_cut.mp4"),
+        ]
+        os.chdir(tmp_path)
+        with (
+            patch.object(aftermovie, "render_clip_with_fade", side_effect=mock_render),
+            patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
+            patch.object(aftermovie, "add_background_music", side_effect=mock_music),
+        ):
+            aftermovie.main()
+
+        assert fade_flags == [
+            (2.0, 5.0, True, False),
+            (31.0, 34.5, False, True),
+            (362.0, 365.5, True, True),
+        ]
+
+        concat_outputs.clear()
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--config",
+            str(cfg_path),
+            "--plan",
+            str(plan_file),
+            "--option",
+            "all",
+            "--output",
+            str(tmp_path / "aftermovie.mp4"),
+        ]
+        with (
+            patch.object(aftermovie, "render_clip_with_fade", side_effect=mock_render),
+            patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
+            patch.object(aftermovie, "add_background_music", side_effect=mock_music),
+        ):
+            aftermovie.main()
+
+        assert [p.name for p in concat_outputs] == [
+            "aftermovie_teaser.mp4",
+            "aftermovie_highlight.mp4",
+        ]
+    finally:
+        sys_module.argv = orig_argv
+        os.chdir(orig_cwd)

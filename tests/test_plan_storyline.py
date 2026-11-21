@@ -39,6 +39,7 @@ def test_build_prompt() -> None:
     prompt = storyline.build_prompt(detections, target_duration=4)
 
     assert "professional underwater video editor" in prompt
+    assert "Madagascar" not in prompt
     assert "4 minutes" in prompt
     assert "dive1.mp4" in prompt
     assert "turtle" in prompt
@@ -54,6 +55,7 @@ def test_build_prompt_empty_detections() -> None:
     prompt = storyline.build_prompt(detections, target_duration=4)
 
     assert "professional underwater video editor" in prompt
+    assert "Madagascar" not in prompt
     assert "4 minutes" in prompt
 
 
@@ -328,3 +330,222 @@ def test_main_success_claude(tmp_path: Path, monkeypatch) -> None:
     guide_path = output_dir / "storyline_edit_guide.md"
     assert guide_path.exists()
     assert guide_path.read_text(encoding="utf-8") == "# Storyline Output"
+
+
+def test_deterministic_only_multi_option_and_validation(tmp_path: Path, monkeypatch) -> None:
+    """--deterministic-only creates validated storyline_plans.json and storyline_edit_guide.md."""
+    import json
+    import sys
+
+    from utils.models import RefinedDetection, StorylineProposalSet
+    from utils.storyline import validate_and_normalize_plan
+
+    output_dir = tmp_path / "outputs"
+    run_dir = output_dir / "runs" / "run-20261119-155336"
+    run_dir.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"general:\n  output_dir: '{output_dir}'\n")
+
+    manifest = {
+        "clips": [
+            {
+                "file_name": "GX010814.MP4",
+                "creation_time": "2026-09-12T11:43:00Z",
+                "fps": 50.0,
+                "has_audio": True,
+            },
+            {
+                "file_name": "GX010881.MP4",
+                "creation_time": "2026-09-15T08:09:00Z",
+                "fps": 50.0,
+                "has_audio": True,
+            },
+            {
+                "file_name": "GX010803.MP4",
+                "creation_time": "2026-09-12T08:22:00Z",
+                "fps": 50.0,
+                "has_audio": True,
+            },
+        ]
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    detections = {
+        "total_clips": 3,
+        "total_detections": 3,
+        "detections": [
+            {
+                "clip_id": "c_814",
+                "detection_id": "c_814_00001.50_00005.00",
+                "file_name": "GX010814.MP4",
+                "file_path": "/GX010814.MP4",
+                "start_time": 1.5,
+                "end_time": 13.0,
+                "domain": "generic",
+                "story_role": "establishing",
+                "subject": "dive boats",
+                "quality_score": 8,
+                "confidence": 0.95,
+                "description": "dive boats anchored",
+            },
+            {
+                "clip_id": "c_881",
+                "detection_id": "c_881_00030.50_00034.00",
+                "file_name": "GX010881.MP4",
+                "file_path": "/GX010881.MP4",
+                "start_time": 30.5,
+                "end_time": 42.0,
+                "domain": "underwater",
+                "template": "macro",
+                "story_role": "hero_subject",
+                "subject": "seahorse",
+                "quality_score": 8,
+                "confidence": 0.95,
+                "description": "seahorse clinging to orange coral",
+            },
+            {
+                "clip_id": "c_803",
+                "detection_id": "c_803_00361.50_00365.00",
+                "file_name": "GX010803.MP4",
+                "file_path": "/GX010803.MP4",
+                "start_time": 361.5,
+                "end_time": 370.0,
+                "domain": "underwater",
+                "template": "pelagics",
+                "story_role": "hero_subject",
+                "subject": "shark",
+                "quality_score": 8,
+                "confidence": 0.95,
+                "description": "shark in deep blue water",
+            },
+        ],
+    }
+    (run_dir / "detections_refined.json").write_text(json.dumps(detections), encoding="utf-8")
+
+    # Unit-test validate_and_normalize_plan clamping, unknown IDs, and max_per_source_file
+    det_by_id = {d["detection_id"]: RefinedDetection(**d) for d in detections["detections"]}
+    raw_plan = {
+        "id": "teaser",
+        "title": "Teaser",
+        "target_duration_seconds": 55,
+        "acts": [
+            {
+                "act_number": 1,
+                "title": "Act 1",
+                "shots": [
+                    {"detection_id": "hallucinated_id", "in_time": 0, "out_time": 5},
+                    {"detection_id": "c_881_00030.50_00034.00", "in_time": 10.0, "out_time": 50.0},
+                    {"detection_id": "c_881_00030.50_00034.00", "in_time": 31.0, "out_time": 35.0},
+                ],
+            }
+        ],
+    }
+    norm_plan, warns = validate_and_normalize_plan(raw_plan, det_by_id, max_per_source_file=1)
+    assert norm_plan.clip_count == 1
+    assert norm_plan.shots[0].in_time == 30.5
+    assert norm_plan.shots[0].out_time == 42.0
+    assert norm_plan.shots[0].transition_in == "fade"
+    assert norm_plan.shots[0].transition_out == "fade"
+    assert any("hallucinated_id" in w for w in warns)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "04_plan_storyline.py",
+            "--config",
+            str(config_path),
+            "--run",
+            "run-20261119-155336",
+            "--presets",
+            "teaser,highlight",
+            "--deterministic-only",
+        ],
+    )
+    storyline.main()
+
+    plans_path = run_dir / "storyline_plans.json"
+    guide_path = run_dir / "storyline_edit_guide.md"
+    assert plans_path.exists()
+    assert guide_path.exists()
+    loaded = StorylineProposalSet.model_validate_json(plans_path.read_text(encoding="utf-8"))
+    assert [p.id for p in loaded.proposals] == ["teaser", "highlight"]
+    assert loaded.provider == "deterministic"
+
+
+def test_main_ollama_json_proposals(tmp_path: Path, monkeypatch) -> None:
+    """main with provider=ollama calls TextLLMClient, validates proposals, and writes JSON + guide."""
+    import json
+    import sys
+    from unittest.mock import MagicMock, patch
+
+    from utils.models import StorylineProposalSet
+
+    output_dir = tmp_path / "outputs"
+    output_dir.mkdir()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        f"general:\n  output_dir: '{output_dir}'\nstoryline:\n  provider: 'ollama'\n"
+    )
+    detections = {
+        "total_clips": 1,
+        "total_detections": 1,
+        "detections": [
+            {
+                "clip_id": "c1",
+                "detection_id": "c1_00001.00_00006.00",
+                "file_name": "GX010778.MP4",
+                "file_path": "/GX010778.MP4",
+                "start_time": 1.0,
+                "end_time": 6.0,
+                "domain": "underwater",
+                "story_role": "hero_subject",
+                "subject": "Yellowtail Fusiliers",
+                "quality_score": 9,
+                "confidence": 0.95,
+                "description": "fusiliers school",
+            }
+        ],
+    }
+    (output_dir / "detections_refined.json").write_text(json.dumps(detections), encoding="utf-8")
+
+    fake_llm = MagicMock()
+    fake_llm.generate_json.return_value = {
+        "proposals": [
+            {
+                "id": "teaser",
+                "title": "Fast Teaser",
+                "target_duration_seconds": 55,
+                "acts": [
+                    {
+                        "act_number": 1,
+                        "title": "Act 1: Reef",
+                        "shots": [
+                            {
+                                "detection_id": "c1_00001.00_00006.00",
+                                "in_time": 1.5,
+                                "out_time": 4.5,
+                                "rationale": "Strong hero opener",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["04_plan_storyline.py", "--config", str(config_path), "--presets", "teaser"],
+    )
+    with patch.object(storyline, "create_text_llm_client", return_value=fake_llm):
+        storyline.main()
+
+    loaded = StorylineProposalSet.model_validate_json(
+        (output_dir / "storyline_plans.json").read_text(encoding="utf-8")
+    )
+    assert loaded.provider == "ollama"
+    assert len(loaded.proposals) == 1
+    assert loaded.proposals[0].shots[0].duration == 3.0
+    assert "Strong hero opener" in (output_dir / "storyline_edit_guide.md").read_text(
+        encoding="utf-8"
+    )

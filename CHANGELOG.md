@@ -6,6 +6,12 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add multi-option storyline planning (`dive-clip storyline`, `scripts/04_plan_storyline.py`) with swappable `ollama`, `openrouter`, `claude`, and `gemini` backends (`utils/text_llm.py`), machine-readable `storyline_plans.json`, and plan-driven aftermovie controls (`--plan`, `--option`, `--dry-run`, `--target-duration`, `--max-clip-duration`, `--order`, `--max-per-source-file`, `--run`) alongside chronological `creation_time` + GoPro chapter sorting and outlier/noise selection fixes (#85).
+
+### Fixed
+- Remove hardcoded `"Madagascar"` defaults from storyline prompts (`scripts/04_plan_storyline.py`), CMX 3600 EDL titles (`scripts/03_generate_edl.py`), and tracked `config*.yaml` files (#85).
+
 ## [0.34.1] - 2026-11-21
 
 - Updated `config.yaml` defaults for `prescreen.enabled`, `prescreen.gate_mode`, `scan_parameters.coarse_scale`, `ollama.num_ctx`, and `ollama.num_predict` to improve pre-screening, VLM context size, and token limits.

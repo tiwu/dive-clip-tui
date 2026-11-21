@@ -470,3 +470,73 @@ class PromptCandidateOutput(BaseModel):
     recommended_threshold: float = Field(0.65, ge=0.0, le=1.0)
     total_candidates: int = Field(..., ge=0)
     candidates: list[PromptCandidate] = Field(default_factory=list)
+
+
+TransitionType = Literal["cut", "fade"]
+
+
+class EditShot(BaseModel):
+    """A single curated or auto-selected shot inside an edit plan."""
+
+    detection_id: str
+    clip_id: str
+    file_name: str
+    file_path: str
+    creation_time: str = ""
+    act: int = Field(default=1, ge=1)
+    act_title: str = ""
+    in_time: float = Field(..., ge=0.0)
+    out_time: float = Field(..., gt=0.0)
+    duration: float = Field(default=0.0, ge=0.0)
+    subject: str = ""
+    story_role: str = "hero_subject"
+    quality_score: int = Field(default=0, ge=0, le=10)
+    transition_in: TransitionType = "cut"
+    transition_out: TransitionType = "cut"
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def validate_and_fill_duration(self) -> Self:
+        if self.out_time <= self.in_time:
+            raise ValueError(
+                f"out_time ({self.out_time}) must be greater than in_time ({self.in_time})"
+            )
+        if self.duration <= 0.0:
+            self.duration = round(self.out_time - self.in_time, 2)
+        return self
+
+
+class EditAct(BaseModel):
+    """A narrative act grouping ordered edit shots."""
+
+    act_number: int = Field(..., ge=1)
+    title: str
+    goal: str = ""
+    shots: list[EditShot] = Field(default_factory=list)
+
+
+class EditPlan(BaseModel):
+    """Complete executable edit plan for rendering an aftermovie option."""
+
+    id: str
+    title: str
+    style: str = "story_arc"
+    preset: str = "highlight"
+    target_duration_seconds: int = Field(..., gt=0)
+    estimated_duration_seconds: float = Field(default=0.0, ge=0.0)
+    clip_count: int = Field(default=0, ge=0)
+    narrative_summary: str = ""
+    acts: list[EditAct] = Field(default_factory=list)
+    shots: list[EditShot] = Field(default_factory=list)
+
+
+class StorylineProposalSet(BaseModel):
+    """Multi-option edit proposals emitted by storyline planning."""
+
+    schema_version: int = 1
+    run_id: str = ""
+    provider: str = ""
+    model: str = ""
+    source_detections: str = ""
+    max_per_source_file: int = Field(default=1, ge=1)
+    proposals: list[EditPlan] = Field(default_factory=list)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from utils.config import ConfigError, load_config
 from utils.models import DetectionsRefined
 from utils.timecode_math import Timecode
 
+DEFAULT_EDL_TITLE = "DIVE_CLIP_AI_MARKERS"
+
 COLOR_MAP = {
     "Cyan": "Cyan",
     "Yellow": "Yellow",
@@ -27,10 +30,55 @@ COLOR_MAP = {
 }
 
 
-def generate_edl(detections: DetectionsRefined, output_path: Path) -> None:
+def format_edl_title(project_name: str | None = None) -> str:
+    """Sanitize a project name to a CMX 3600 uppercase ASCII EDL title."""
+    if not project_name:
+        return DEFAULT_EDL_TITLE
+    sanitized = re.sub(r"[^A-Za-z0-9]+", "_", project_name).strip("_").upper()
+    if not sanitized or sanitized == "AI_MARKERS":
+        return DEFAULT_EDL_TITLE
+    if sanitized.endswith("_AI_MARKERS"):
+        return sanitized
+    return f"{sanitized}_AI_MARKERS"
+
+
+def _sanitize_edl_header_title(title: str | None) -> str:
+    if not title:
+        return DEFAULT_EDL_TITLE
+    cleaned = re.sub(r"[\r\n\x00-\x1f]+", " ", title).strip()
+    return cleaned or DEFAULT_EDL_TITLE
+
+
+def _resolve_edl_title(detections_path: Path, config: dict) -> str:
+    """Resolve an EDL title from sibling manifests or config project_name."""
+    for manifest_name in ("manifest.json", "manifest_raw.json"):
+        manifest_path = detections_path.parent / manifest_name
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except OSError, json.JSONDecodeError:
+            continue
+        if isinstance(manifest_data, dict):
+            project_name = str(manifest_data.get("project_name") or "").strip()
+            if project_name:
+                return format_edl_title(project_name)
+
+    cfg_project = str(config.get("general", {}).get("project_name") or "").strip()
+    if cfg_project:
+        return format_edl_title(cfg_project)
+    return DEFAULT_EDL_TITLE
+
+
+def generate_edl(
+    detections: DetectionsRefined,
+    output_path: Path,
+    title: str | None = None,
+) -> None:
     """Generate CMX 3600 EDL file from refined detections."""
+    resolved_title = _sanitize_edl_header_title(title)
     lines = [
-        "TITLE: MADAGASCAR_AI_MARKERS",
+        f"TITLE: {resolved_title}",
         "FCM: NON-DROP FRAME",
         "",
     ]
@@ -132,8 +180,9 @@ def main() -> None:
 
     edl_path = output_dir / "markers_import.edl"
     csv_path = output_dir / "markers_import.csv"
+    edl_title = _resolve_edl_title(detections_path, config)
 
-    generate_edl(detections, edl_path)
+    generate_edl(detections, edl_path, title=edl_title)
     generate_csv(detections, csv_path)
 
     print(

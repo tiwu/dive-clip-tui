@@ -18,6 +18,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+from rich.table import Table
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.config import ConfigError, load_config
@@ -28,10 +31,15 @@ from utils.encoder import (
     resolve_video_quality,
 )
 from utils.ffmpeg_streamer import concat_clips
-from utils.logging_setup import configure_logging
-from utils.run_archive import resolve_and_validate_assembly_artifacts
-from utils.selection import select_diverse_highlights
+from utils.logging_setup import configure_logging, get_console
+from utils.models import EditPlan, StorylineProposalSet
+from utils.run_archive import resolve_and_validate_assembly_artifacts, resolve_run_dir
+from utils.selection import (
+    select_diverse_highlights,
+    select_duration_budget_highlights,
+)
 from utils.signals import setup_signal_handlers
+from utils.storyline import load_clip_metadata, load_feedback_data
 
 logger = logging.getLogger(__name__)
 
@@ -444,11 +452,284 @@ def add_background_music(
     return True
 
 
+def _parse_date_range(raw: str | None) -> tuple[str, str] | None:
+    if not raw or not raw.strip():
+        return None
+    parts = [p.strip() for p in raw.split(":", 1)]
+    if len(parts) != 2:
+        raise ValueError(f"Invalid --date-range {raw!r}; expected YYYY-MM-DD:YYYY-MM-DD")
+    return parts[0], parts[1]
+
+
+def _load_plans_from_file(
+    plan_path: Path, option: str | None = None
+) -> tuple[list[EditPlan], str | None]:
+    """Load one or more ``EditPlan`` objects from a storyline_plans.json or EditPlan JSON."""
+    raw = json.loads(plan_path.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and isinstance(raw.get("proposals"), list):
+        proposal_set = StorylineProposalSet.model_validate(raw)
+        proposals = proposal_set.proposals
+        if not proposals:
+            raise ValueError(f"No proposals found in {plan_path}")
+        if option == "all":
+            return proposals, proposal_set.source_detections or None
+        if option:
+            matched = [p for p in proposals if p.id == option]
+            if not matched:
+                available = ", ".join(p.id for p in proposals)
+                raise ValueError(
+                    f"Unknown option {option!r} in {plan_path}. Available: {available}"
+                )
+            return matched, proposal_set.source_detections or None
+        preferred = next((p for p in proposals if p.id == "highlight"), proposals[0])
+        return [preferred], proposal_set.source_detections or None
+
+    plan = EditPlan.model_validate(raw)
+    return [plan], None
+
+
+def print_aftermovie_preview(
+    items: list[dict[str, Any]],
+    *,
+    title: str = "Aftermovie Shot Preview",
+    clip_meta: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Print a Rich table showing exact shots, trim windows, transitions, and runtime."""
+    console = get_console()
+    table = Table(title=title)
+    table.add_column("#", justify="right", style="bold")
+    table.add_column("Act", style="cyan")
+    table.add_column("File", style="yellow")
+    table.add_column("Recorded", style="dim")
+    table.add_column("Window", justify="right")
+    table.add_column("Dur", justify="right")
+    table.add_column("Q", justify="right")
+    table.add_column("Role", style="magenta")
+    table.add_column("Fade", style="blue")
+    table.add_column("Subject", style="green")
+
+    total_dur = 0.0
+    for idx, item in enumerate(items, start=1):
+        fname = str(item.get("file_name", ""))
+        ctime = str(
+            item.get("creation_time") or (clip_meta or {}).get(fname, {}).get("creation_time") or ""
+        )[:16].replace("T", " ")
+        start_t = float(item.get("start_time", 0.0))
+        end_t = float(item.get("end_time", start_t))
+        dur = max(0.0, end_t - start_t)
+        total_dur += dur
+        f_in = "in" if item.get("fade_in") else "-"
+        f_out = "out" if item.get("fade_out") else "-"
+        act_str = f"Act {item['act']}" if item.get("act") else "-"
+        table.add_row(
+            str(idx),
+            act_str,
+            fname,
+            ctime,
+            f"{start_t:.1f}-{end_t:.1f}s",
+            f"{dur:.1f}s",
+            str(item.get("quality_score", "")),
+            str(item.get("story_role", "")),
+            f"{f_in}/{f_out}",
+            str(item.get("subject", ""))[:46],
+        )
+
+    console.print(table)
+    summary = (
+        f"Preview: {len(items)} clips, total runtime {total_dur:.1f}s ({total_dur / 60:.2f} min)"
+    )
+    console.print(summary)
+    logger.info("%s", summary)
+
+
+def _plan_to_render_items(plan: EditPlan) -> list[dict[str, Any]]:
+    return [
+        {
+            "clip_id": shot.clip_id,
+            "file_name": shot.file_name,
+            "file_path": shot.file_path,
+            "creation_time": shot.creation_time,
+            "act": shot.act,
+            "start_time": shot.in_time,
+            "end_time": shot.out_time,
+            "subject": shot.subject,
+            "story_role": shot.story_role,
+            "quality_score": shot.quality_score,
+            "fade_in": shot.transition_in == "fade",
+            "fade_out": shot.transition_out == "fade",
+        }
+        for shot in plan.shots
+    ]
+
+
+def _render_shot_sequence(
+    items: list[dict[str, Any]],
+    *,
+    clips_dir: Path,
+    output_dir: Path,
+    output_path: Path,
+    music_path: Path | None,
+    music_volume: float,
+    aspect_ratio: str,
+    fade_duration: float,
+    video_quality: VideoQuality,
+) -> bool:
+    """Render a sequence of shot dicts into ``output_path``."""
+    tmp_dir = output_dir / ".aftermovie_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        clip_files: list[Path] = []
+        for i, det in enumerate(items):
+            fade_in = bool(det.get("fade_in", True))
+            fade_out = bool(det.get("fade_out", True))
+
+            raw_clip_id = str(det.get("clip_id", f"clip{i}"))
+            clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
+            subject = det.get("subject", "unknown")
+            quality_score = det.get("quality_score", 0)
+
+            start_time = float(det.get("start_time", 0))
+            end_time = float(det.get("end_time", start_time + 5))
+
+            # A single source file can yield several highlight windows, so the
+            # temp names must include the window index and its time range.
+            window_tag = f"{clip_id}_{i:03d}_{start_time:.1f}s-{end_time:.1f}s"
+            faded = tmp_dir / f"{window_tag}_faded.mp4"
+
+            source_path = Path(det.get("file_path", ""))
+            if source_path.is_file():
+                if not render_clip_with_fade(
+                    source_path,
+                    start_time,
+                    end_time,
+                    faded,
+                    fade_duration=fade_duration,
+                    fade_in=fade_in,
+                    fade_out=fade_out,
+                    quality=video_quality,
+                ):
+                    logger.warning("  SKIP: failed to render %s", window_tag)
+                    continue
+            else:
+                matching = list(
+                    clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_*.mp4")
+                )
+                if not matching:
+                    matching = list(clips_dir.glob(f"{clip_id}_*.mp4"))
+                if not matching:
+                    logger.warning("  SKIP: source not found for %s", clip_id)
+                    continue
+
+                prerendered = matching[0]
+                dur = _probe_duration(prerendered)
+                if not render_clip_with_fade(
+                    prerendered,
+                    0,
+                    dur,
+                    faded,
+                    fade_duration=fade_duration,
+                    fade_in=fade_in,
+                    fade_out=fade_out,
+                    quality=video_quality,
+                ):
+                    logger.warning("  SKIP: failed to apply fade to %s", prerendered.name)
+                    continue
+
+            clip_files.append(faded)
+            logger.info(
+                "  [%d/%d] %s (quality %s/10)",
+                len(clip_files),
+                len(items),
+                subject,
+                quality_score,
+            )
+
+        if not clip_files:
+            logger.error("No clip files found to assemble.")
+            return False
+
+        assembled = tmp_dir / "assembled.mp4"
+        if not concat_clips(clip_files, assembled):
+            logger.error("✗ Assembly failed.")
+            return False
+
+        logger.info("✓ Assembled %d clips with cross-dissolve transitions", len(clip_files))
+
+        aspect_converted = tmp_dir / "aspect_converted.mp4"
+        if aspect_ratio != "16:9":
+            logger.info("Converting to aspect ratio %s...", aspect_ratio)
+            if not convert_aspect_ratio(
+                assembled,
+                aspect_converted,
+                aspect_ratio,
+                quality=video_quality,
+            ):
+                logger.warning("Aspect ratio conversion failed, using original.")
+                aspect_converted = assembled
+        else:
+            aspect_converted = assembled
+
+        if add_background_music(
+            aspect_converted, music_path, output_path, music_volume, aspect_ratio
+        ):
+            if music_path:
+                logger.info("✓ Added background music (volume %s)", music_volume)
+            logger.info("✓ Aftermovie created: %s", output_path)
+        else:
+            logger.warning("Failed to add music. Outputting assembled video without music.")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(assembled, output_path)
+            logger.info("✓ Aftermovie created (no music): %s", output_path)
+        return True
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def render_edit_plan(
+    plan: EditPlan,
+    *,
+    clips_dir: Path,
+    output_dir: Path,
+    output_path: Path,
+    music_path: Path | None,
+    music_volume: float,
+    aspect_ratio: str,
+    fade_duration: float,
+    video_quality: VideoQuality,
+) -> bool:
+    """Render an ``EditPlan`` with explicit per-shot trim bounds and act transitions."""
+    items = _plan_to_render_items(plan)
+    logger.info(
+        "Rendering plan %r (%d clips, ~%.1fs) -> %s",
+        plan.id,
+        len(items),
+        plan.estimated_duration_seconds,
+        output_path,
+    )
+    return _render_shot_sequence(
+        items,
+        clips_dir=clips_dir,
+        output_dir=output_dir,
+        output_path=output_path,
+        music_path=music_path,
+        music_volume=music_volume,
+        aspect_ratio=aspect_ratio,
+        fade_duration=fade_duration,
+        video_quality=video_quality,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Create an aftermovie with music and transitions from detection clips"
     )
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    parser.add_argument(
+        "--run",
+        default=None,
+        metavar="RUN_ID_OR_PATH",
+        help="Run ID or path to resolve detections, highlights, and output from",
+    )
     parser.add_argument(
         "--input",
         default=None,
@@ -468,10 +749,69 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--plan",
+        default=None,
+        help="Path to storyline_plans.json or EditPlan JSON to render",
+    )
+    parser.add_argument(
+        "--option",
+        default=None,
+        help="Option ID inside storyline_plans.json to render (or 'all' to render all options)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        "--preview",
+        dest="dry_run",
+        action="store_true",
+        default=False,
+        help="Print the selected clips/timeline preview and exit without rendering",
+    )
+    parser.add_argument(
         "--top-n",
         type=int,
         default=None,
         help="Number of top-quality clips to include (default: 10, or config)",
+    )
+    parser.add_argument(
+        "--target-duration",
+        type=float,
+        default=None,
+        help="Target total runtime in seconds (uses duration-budget selection + trimming)",
+    )
+    parser.add_argument(
+        "--max-clip-duration",
+        type=float,
+        default=None,
+        help="Maximum duration per trimmed clip in seconds (used with --target-duration)",
+    )
+    parser.add_argument(
+        "--order",
+        choices=["chronological", "story_arc"],
+        default=None,
+        help="Sequence order in duration-budget mode: chronological or story_arc",
+    )
+    parser.add_argument(
+        "--max-per-source-file",
+        type=int,
+        default=None,
+        help="Maximum clips allowed per source video file",
+    )
+    parser.add_argument(
+        "--date-range",
+        default=None,
+        help="Inclusive recording date filter YYYY-MM-DD:YYYY-MM-DD",
+    )
+    parser.add_argument(
+        "--exclude-file",
+        action="append",
+        default=None,
+        help="Source filename to exclude (can be passed multiple times)",
+    )
+    parser.add_argument(
+        "--allow-outlier-dates",
+        action="store_true",
+        default=False,
+        help="Disable automatic exclusion of off-trip outlier dates in duration-budget mode",
     )
     parser.add_argument(
         "--music",
@@ -530,17 +870,6 @@ def main() -> None:
     output_dir = Path(general.get("output_dir", "./outputs"))
     video_quality = resolve_video_quality(config)
 
-    # Resolve detections input path and clips directory
-    try:
-        detections_path, clips_dir, latest_run = resolve_and_validate_assembly_artifacts(
-            output_dir,
-            input_detections=args.input,
-            clips_dir=args.clips_dir,
-        )
-    except FileNotFoundError as exc:
-        logger.error("%s", exc)
-        sys.exit(1)
-
     aftermovie_cfg = (
         config.get("aftermovie", {}) if isinstance(config.get("aftermovie"), dict) else {}
     )
@@ -571,6 +900,103 @@ def main() -> None:
     max_clip_duration = float(
         aftermovie_cfg.get("max_clip_duration") or scan_params.get("max_clip_duration") or 12.0
     )
+    music_path = Path(args.music) if args.music else None
+
+    # Plan-driven rendering path (--plan)
+    if args.plan:
+        plan_path = Path(args.plan)
+        latest_run: Path | None = None
+        if args.run:
+            try:
+                latest_run = resolve_run_dir(output_dir, args.run)
+            except FileNotFoundError as exc:
+                logger.error("%s", exc)
+                sys.exit(1)
+        elif (output_dir / "latest").exists():
+            latest_run = (output_dir / "latest").resolve()
+
+        if not plan_path.exists() and latest_run is not None and (latest_run / plan_path).exists():
+            plan_path = latest_run / plan_path
+        elif not plan_path.exists() and (output_dir / plan_path).exists():
+            plan_path = output_dir / plan_path
+
+        if not plan_path.exists():
+            logger.error("Plan file not found: %s", plan_path)
+            sys.exit(1)
+        try:
+            plans, _src_dets = _load_plans_from_file(plan_path, option=args.option)
+        except (OSError, ValueError, ValidationError) as exc:
+            logger.error("Invalid plan file %s: %s", plan_path, exc)
+            sys.exit(1)
+
+        if latest_run is None and (plan_path.parent / "detections_refined.json").exists():
+            latest_run = plan_path.parent
+        clips_dir = (
+            Path(args.clips_dir)
+            if args.clips_dir
+            else ((latest_run / "highlights") if latest_run else (output_dir / "highlights"))
+        )
+        clip_meta = load_clip_metadata((latest_run / "manifest.json") if latest_run else None)
+
+        if args.dry_run:
+            for plan in plans:
+                print_aftermovie_preview(
+                    _plan_to_render_items(plan),
+                    title=f"Plan Preview: {plan.id} — {plan.title}",
+                    clip_meta=clip_meta,
+                )
+            sys.exit(0)
+
+        try:
+            for plan in plans:
+                if args.output:
+                    out_p = Path(args.output)
+                    if out_p.is_dir():
+                        dest_path = out_p / (
+                            f"aftermovie_{plan.id}.mp4" if len(plans) > 1 else "aftermovie.mp4"
+                        )
+                    elif len(plans) > 1 or args.option == "all":
+                        dest_path = out_p.with_name(f"{out_p.stem}_{plan.id}{out_p.suffix}")
+                    else:
+                        dest_path = out_p
+                else:
+                    base_dir = latest_run if latest_run is not None else output_dir
+                    dest_name = (
+                        f"aftermovie_{plan.id}.mp4"
+                        if (len(plans) > 1 or args.option == "all")
+                        else "aftermovie.mp4"
+                    )
+                    dest_path = base_dir / dest_name
+
+                if not render_edit_plan(
+                    plan,
+                    clips_dir=clips_dir,
+                    output_dir=output_dir,
+                    output_path=dest_path,
+                    music_path=music_path,
+                    music_volume=music_volume,
+                    aspect_ratio=args.aspect_ratio,
+                    fade_duration=fade_duration,
+                    video_quality=video_quality,
+                ):
+                    sys.exit(1)
+        except KeyboardInterrupt:
+            logger.warning("Aftermovie creation interrupted by user (Ctrl+C). Cleaning up...")
+            sys.exit(130)
+        return
+
+    # Resolve detections input path and clips directory
+    try:
+        detections_path, clips_dir, latest_run = resolve_and_validate_assembly_artifacts(
+            output_dir,
+            input_detections=args.input,
+            clips_dir=args.clips_dir,
+            run=args.run,
+            require_clips_dir=not args.dry_run,
+        )
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
 
     with open(detections_path, encoding="utf-8") as f:
         detections_data = json.load(f)
@@ -580,7 +1006,14 @@ def main() -> None:
         logger.info("No detections found to assemble.")
         sys.exit(0)
 
-    # Select diverse highlights with MMR and chronological ordering
+    run_base = (
+        latest_run
+        if latest_run is not None and detections_path.parent.resolve() == latest_run.resolve()
+        else detections_path.parent
+    )
+    clip_meta = load_clip_metadata(run_base / "manifest.json")
+    feedback = load_feedback_data(run_base / "feedback.json")
+
     selection_cfg = config.get("selection", {}) if isinstance(config.get("selection"), dict) else {}
     lambda_quality = float(selection_cfg.get("lambda_quality", 0.65))
     max_per_clip = (
@@ -588,18 +1021,91 @@ def main() -> None:
         if selection_cfg.get("per_clip_soft_limit") is not None
         else None
     )
+
+    try:
+        date_range = _parse_date_range(args.date_range)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
+
+    # Duration-budget / story-arc mode when --target-duration or --order is requested
+    if args.target_duration is not None or args.order is not None:
+        target_dur = float(args.target_duration if args.target_duration is not None else 150.0)
+        trim_cap = float(args.max_clip_duration if args.max_clip_duration is not None else 6.5)
+        max_per_source = (
+            args.max_per_source_file
+            if args.max_per_source_file is not None
+            else int(selection_cfg.get("max_per_source_file", 1))
+        )
+        outlier_days = int(selection_cfg.get("outlier_days", 7))
+        order_mode = args.order or "story_arc"
+        plan, _filter_report = select_duration_budget_highlights(
+            detections,
+            clip_meta=clip_meta,
+            feedback=feedback,
+            target_duration=target_dur,
+            clip_duration_cap=trim_cap,
+            lambda_quality=lambda_quality,
+            max_per_clip=max_per_clip if max_per_clip is not None else 1,
+            max_per_source_file=max_per_source,
+            order=order_mode,
+            outlier_days=outlier_days,
+            allow_outlier_dates=args.allow_outlier_dates,
+            date_range=date_range,
+            exclude_files=args.exclude_file,
+        )
+        items = _plan_to_render_items(plan)
+        if args.dry_run:
+            print_aftermovie_preview(
+                items,
+                title=f"Deterministic Preview ({order_mode}, target={target_dur:.0f}s)",
+                clip_meta=clip_meta,
+            )
+            sys.exit(0)
+
+        if args.output:
+            output_path = Path(args.output)
+        elif latest_run is not None:
+            output_path = latest_run / "aftermovie.mp4"
+        else:
+            output_path = output_dir / "aftermovie.mp4"
+
+        try:
+            if not render_edit_plan(
+                plan,
+                clips_dir=clips_dir,
+                output_dir=output_dir,
+                output_path=output_path,
+                music_path=music_path,
+                music_volume=music_volume,
+                aspect_ratio=args.aspect_ratio,
+                fade_duration=fade_duration,
+                video_quality=video_quality,
+            ):
+                sys.exit(1)
+        except KeyboardInterrupt:
+            logger.warning("Aftermovie creation interrupted by user (Ctrl+C). Cleaning up...")
+            sys.exit(130)
+        return
+
+    # Classic --top-n MMR selection + chronological ordering
     trace_path = (
         (latest_run / "selection_trace.json")
         if latest_run is not None
         else (output_dir / "selection_trace.json")
     )
-    top_dets = select_diverse_highlights(
-        detections,
-        top_n=top_n,
-        lambda_quality=lambda_quality,
-        max_per_clip=max_per_clip,
-        trace_path=trace_path,
-    )
+    select_kwargs: dict[str, Any] = {
+        "top_n": top_n,
+        "lambda_quality": lambda_quality,
+        "max_per_clip": max_per_clip,
+        "trace_path": trace_path,
+    }
+    if clip_meta:
+        select_kwargs["clip_meta"] = clip_meta
+    if args.max_per_source_file is not None:
+        select_kwargs["max_per_source_file"] = args.max_per_source_file
+
+    top_dets = select_diverse_highlights(detections, **select_kwargs)
 
     top_dets = bridge_clip_gaps(
         top_dets,
@@ -610,6 +1116,18 @@ def main() -> None:
         top_dets,
         min_transition_gap=min_transition_gap,
     )
+    render_items = [
+        {**det, "fade_in": transitions[i]["fade_in"], "fade_out": transitions[i]["fade_out"]}
+        for i, det in enumerate(top_dets)
+    ]
+
+    if args.dry_run:
+        print_aftermovie_preview(
+            render_items,
+            title=f"Top-{top_n} Preview",
+            clip_meta=clip_meta,
+        )
+        sys.exit(0)
 
     logger.info(
         "Creating aftermovie from %d highlight clips (from top %d detections)",
@@ -617,134 +1135,29 @@ def main() -> None:
         min(top_n, len(detections)),
     )
 
-    # Render each clip with smart transitions (cut within same take, fade across scenes)
-    tmp_dir = output_dir / ".aftermovie_tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    if args.output:
+        output_path = Path(args.output)
+    elif latest_run is not None:
+        output_path = latest_run / "aftermovie.mp4"
+    else:
+        output_path = output_dir / "aftermovie.mp4"
 
     try:
-        clip_files: list[Path] = []
-        for i, det in enumerate(top_dets):
-            t_flags = transitions[i]
-            fade_in = t_flags["fade_in"]
-            fade_out = t_flags["fade_out"]
-
-            raw_clip_id = str(det.get("clip_id", f"clip{i}"))
-            clip_id = re.sub(r"[^a-zA-Z0-9_-]", "_", raw_clip_id)[:64]
-            subject = det.get("subject", "unknown")
-            quality_score = det.get("quality_score", 0)
-
-            start_time = float(det.get("start_time", 0))
-            end_time = float(det.get("end_time", start_time + 5))
-
-            # A single source file can yield several highlight windows, so the
-            # temp names must include the window index and its time range.
-            window_tag = f"{clip_id}_{i:03d}_{start_time:.1f}s-{end_time:.1f}s"
-            faded = tmp_dir / f"{window_tag}_faded.mp4"
-
-            source_path = Path(det.get("file_path", ""))
-            if source_path.is_file():
-                # Preferred path: cut and fade straight from the original footage in
-                # a single encode, so no generation is lost to re-encoding.
-                if not render_clip_with_fade(
-                    source_path,
-                    start_time,
-                    end_time,
-                    faded,
-                    fade_duration=fade_duration,
-                    fade_in=fade_in,
-                    fade_out=fade_out,
-                    quality=video_quality,
-                ):
-                    logger.warning("  SKIP: failed to render %s", window_tag)
-                    continue
-            else:
-                # Fallback: reuse a pre-rendered clip when the source is unavailable.
-                matching = list(
-                    clips_dir.glob(f"{clip_id}_{start_time:.1f}s-{end_time:.1f}s_*.mp4")
-                )
-                if not matching:
-                    matching = list(clips_dir.glob(f"{clip_id}_*.mp4"))
-                if not matching:
-                    logger.warning("  SKIP: source not found for %s", clip_id)
-                    continue
-
-                prerendered = matching[0]
-                dur = _probe_duration(prerendered)
-                if not render_clip_with_fade(
-                    prerendered,
-                    0,
-                    dur,
-                    faded,
-                    fade_duration=fade_duration,
-                    fade_in=fade_in,
-                    fade_out=fade_out,
-                    quality=video_quality,
-                ):
-                    logger.warning("  SKIP: failed to apply fade to %s", prerendered.name)
-                    continue
-
-            clip_files.append(faded)
-            logger.info(
-                "  [%d/%d] %s (quality %s/10)",
-                len(clip_files),
-                len(top_dets),
-                subject,
-                quality_score,
-            )
-
-        if not clip_files:
-            logger.error("No clip files found to assemble.")
-            sys.exit(1)
-
-        # Concatenate all faded clips
-        assembled = tmp_dir / "assembled.mp4"
-        if not concat_clips(clip_files, assembled):
-            logger.error("✗ Assembly failed.")
-            sys.exit(1)
-
-        logger.info("✓ Assembled %d clips with cross-dissolve transitions", len(clip_files))
-
-        # Add background music with ducking
-        music_path = Path(args.music) if args.music else None
-        if args.output:
-            output_path = Path(args.output)
-        elif latest_run is not None:
-            output_path = latest_run / "aftermovie.mp4"
-        else:
-            output_path = output_dir / "aftermovie.mp4"
-
-        # Apply aspect ratio conversion if needed
-        aspect_converted = tmp_dir / "aspect_converted.mp4"
-        if args.aspect_ratio != "16:9":
-            logger.info("Converting to aspect ratio %s...", args.aspect_ratio)
-            if not convert_aspect_ratio(
-                assembled,
-                aspect_converted,
-                args.aspect_ratio,
-                quality=video_quality,
-            ):
-                logger.warning("Aspect ratio conversion failed, using original.")
-                aspect_converted = assembled
-        else:
-            aspect_converted = assembled
-
-        if add_background_music(
-            aspect_converted, music_path, output_path, music_volume, args.aspect_ratio
+        if not _render_shot_sequence(
+            render_items,
+            clips_dir=clips_dir,
+            output_dir=output_dir,
+            output_path=output_path,
+            music_path=music_path,
+            music_volume=music_volume,
+            aspect_ratio=args.aspect_ratio,
+            fade_duration=fade_duration,
+            video_quality=video_quality,
         ):
-            if music_path:
-                logger.info("✓ Added background music (volume %s)", music_volume)
-            logger.info("✓ Aftermovie created: %s", output_path)
-        else:
-            logger.warning("Failed to add music. Outputting assembled video without music.")
-            shutil.copy2(assembled, output_path)
-            logger.info("✓ Aftermovie created (no music): %s", output_path)
-
+            sys.exit(1)
     except KeyboardInterrupt:
         logger.warning("Aftermovie creation interrupted by user (Ctrl+C). Cleaning up...")
         sys.exit(130)
-    finally:
-        # Clean up temp files
-        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
