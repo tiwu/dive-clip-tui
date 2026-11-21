@@ -55,6 +55,7 @@ interesting bits → get back a watchable highlight video.
 │   ├── release.py            # Changelog, SemVer, and release helpers
 │   └── dive_clip.py          # Single CLI entry point (ingest → scan → render)
 ├── utils/                    # Shared helpers
+│   ├── audio_music.py        # Copyright-free music atmospheres, CC0 cache/synth, & scuba audio mix
 │   ├── checkpoint.py         # Pipeline checkpoint / resume state
 │   ├── config.py             # Config validation and loading
 │   ├── ffmpeg_streamer.py    # Frame sampling helpers (/dev/shm & buffers)

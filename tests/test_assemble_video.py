@@ -310,3 +310,117 @@ def test_main_forwards_selection_config(tmp_path: Path) -> None:
 
     assert called_kwargs.get("lambda_quality") == 0.85
     assert called_kwargs.get("max_per_clip") == 2
+
+
+def test_assemble_mixes_atmosphere_music_and_skips_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """06_assemble_video.py applies music mixing for --atmosphere ocean_ambient and skips for none."""
+    import urllib.error
+
+    monkeypatch.setattr(
+        "utils.audio_music.urllib.request.urlopen",
+        lambda *a, **kw: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+    )
+
+    detections = {
+        "detections": [
+            {
+                "clip_id": "clip001",
+                "file_name": "dive1.mp4",
+                "file_path": str(tmp_path / "source1.mp4"),
+                "start_time": 10.0,
+                "end_time": 15.0,
+                "subject": "turtle",
+                "quality_score": 9,
+                "confidence": 0.9,
+            },
+        ]
+    }
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(json.dumps(detections), encoding="utf-8")
+
+    highlights_dir = tmp_path / "outputs" / "highlights"
+    highlights_dir.mkdir(parents=True)
+    (highlights_dir / "clip001_turtle_q9.mp4").write_text("clip 1")
+    (tmp_path / "source1.mp4").touch()
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'general:\n  output_dir: "./outputs"\nmusic:\n  atmosphere: "ocean_ambient"\n'
+    )
+
+    def fake_concat(clips, out):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_bytes(b"concat_mp4")
+        return True
+
+    mix_calls: list[tuple[Path, Path | None, float, float | None, bool]] = []
+
+    def fake_mix(video, music, out, **kwargs):
+        mix_calls.append((
+            video,
+            music,
+            kwargs.get("music_volume"),
+            kwargs.get("original_volume"),
+            kwargs.get("scuba_filter"),
+        ))
+        Path(out).write_bytes(b"mixed_mp4")
+        return True
+
+    original_argv = sys_module.argv
+    original_cwd = Path.cwd()
+    try:
+        os.chdir(tmp_path)
+        # Case 1: --atmosphere ocean_ambient -> mixes music + 35% original audio
+        sys_module.argv = [
+            "06_assemble_video.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "reel_ambient.mp4"),
+            "--config",
+            str(config_path),
+            "--atmosphere",
+            "ocean_ambient",
+        ]
+        with (
+            patch.object(assemble, "concat_clips", side_effect=fake_concat),
+            patch.object(assemble, "probe_duration", return_value=5.0),
+            patch.object(assemble, "mix_video_audio", side_effect=fake_mix),
+        ):
+            assemble.main()
+
+        assert len(mix_calls) == 1
+        assert mix_calls[0][1] is not None
+        assert mix_calls[0][1].name == "ocean_ambient.wav"
+        assert mix_calls[0][2] == 0.65
+        assert mix_calls[0][3] == 0.35
+        assert mix_calls[0][4] is True
+        assert (tmp_path / "reel_ambient.mp4").read_bytes() == b"mixed_mp4"
+
+        # Case 2: --atmosphere none -> skips mixing
+        mix_calls.clear()
+        sys_module.argv = [
+            "06_assemble_video.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "reel_none.mp4"),
+            "--config",
+            str(config_path),
+            "--atmosphere",
+            "none",
+        ]
+        with (
+            patch.object(assemble, "concat_clips", side_effect=fake_concat),
+            patch.object(assemble, "probe_duration", return_value=5.0),
+            patch.object(assemble, "mix_video_audio", side_effect=fake_mix),
+        ):
+            assemble.main()
+
+        assert mix_calls == []
+        assert (tmp_path / "reel_none.mp4").read_bytes() == b"concat_mp4"
+    finally:
+        sys_module.argv = original_argv
+        os.chdir(original_cwd)

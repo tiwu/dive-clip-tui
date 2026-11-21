@@ -11,13 +11,20 @@ import argparse
 import json
 import logging
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from utils.audio_music import (
+    VALID_ATMOSPHERE_CHOICES,
+    mix_video_audio,
+    resolve_atmosphere_music,
+    resolve_music_config,
+)
 from utils.config import ConfigError, load_config
-from utils.ffmpeg_streamer import concat_clips
+from utils.ffmpeg_streamer import concat_clips, probe_duration
 from utils.logging_setup import configure_logging
 from utils.run_archive import resolve_and_validate_assembly_artifacts
 from utils.selection import select_diverse_highlights
@@ -52,6 +59,42 @@ def main() -> None:
         default=None,
         help="Number of top-quality clips to include (default: 10, or config)",
     )
+    parser.add_argument(
+        "--atmosphere",
+        choices=VALID_ATMOSPHERE_CHOICES,
+        default=None,
+        help="Copyright-free music atmosphere preset (default: from config, or ocean_ambient)",
+    )
+    parser.add_argument(
+        "--music",
+        default=None,
+        help="Path to background music track (optional; overrides --atmosphere)",
+    )
+    parser.add_argument(
+        "--music-volume",
+        type=float,
+        default=None,
+        help="Background music volume in final mix (default: 0.65, or config)",
+    )
+    parser.add_argument(
+        "--original-volume",
+        type=float,
+        default=None,
+        help="Original clip audio volume relative to full scale (default: 0.35, or config)",
+    )
+    parser.add_argument(
+        "--scuba-filter",
+        dest="scuba_filter",
+        action="store_true",
+        default=None,
+        help="Apply regulator-hiss filter to attenuate scuba breathing frequencies",
+    )
+    parser.add_argument(
+        "--no-scuba-filter",
+        dest="scuba_filter",
+        action="store_false",
+        help="Disable regulator-hiss EQ filter on original clip audio",
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--trace", action="store_true", help="Enable trace logging")
     parser.add_argument(
@@ -67,6 +110,12 @@ def main() -> None:
     try:
         config = load_config(args.config)
     except ConfigError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
+
+    try:
+        music_cfg = resolve_music_config(config, args)
+    except ValueError as exc:
         logger.error("%s", exc)
         sys.exit(1)
 
@@ -160,6 +209,91 @@ def main() -> None:
     output_path = Path(args.output)
     try:
         if concat_clips(clip_files, output_path):
+            has_cli_music = any(
+                v is not None
+                for v in (
+                    args.atmosphere,
+                    args.music,
+                    args.music_volume,
+                    args.original_volume,
+                    args.scuba_filter,
+                )
+            )
+            has_cfg_music = isinstance(config.get("music"), dict) or bool(
+                aftermovie_cfg.get("atmosphere") or aftermovie_cfg.get("music_path")
+            )
+            explicit_disable = (
+                args.atmosphere == "none"
+                and not args.music
+                and args.original_volume is None
+                and args.scuba_filter is not True
+            )
+            should_mix = (
+                not explicit_disable
+                and (has_cli_music or has_cfg_music)
+                and (
+                    music_cfg.atmosphere != "none"
+                    or music_cfg.music_path is not None
+                    or args.scuba_filter is True
+                    or (args.original_volume is not None and args.original_volume != 1.0)
+                )
+            )
+
+            if should_mix and output_path.exists() and output_path.stat().st_size > 0:
+                music_path = music_cfg.music_path
+                if music_path is None and music_cfg.atmosphere != "none":
+                    music_path = resolve_atmosphere_music(
+                        music_cfg.atmosphere,
+                        cache_dir=music_cfg.cache_dir,
+                        download_enabled=music_cfg.download_enabled,
+                        atmosphere_urls=music_cfg.atmosphere_urls,
+                    )
+                has_track = music_path is not None and music_path.exists()
+                eff_orig = (
+                    music_cfg.original_volume
+                    if (has_track or args.original_volume is not None)
+                    else None
+                )
+                eff_scuba = (
+                    music_cfg.scuba_filter
+                    if (has_track or args.scuba_filter is not None)
+                    else False
+                )
+                eff_fade = (
+                    music_cfg.audio_fade_duration
+                    if (has_track or eff_orig is not None or eff_scuba)
+                    else 0.0
+                )
+                if has_track or eff_orig is not None or eff_scuba:
+                    tmp_mixed = output_path.with_name(f".tmp_mix_{output_path.name}")
+                    tmp_mixed.unlink(missing_ok=True)
+                    vid_dur = probe_duration(output_path)
+                    if (
+                        mix_video_audio(
+                            output_path,
+                            music_path if has_track else None,
+                            tmp_mixed,
+                            music_volume=music_cfg.music_volume,
+                            original_volume=eff_orig,
+                            scuba_filter=eff_scuba,
+                            fade_duration=eff_fade,
+                            video_duration=vid_dur,
+                            run_fn=subprocess.run,
+                        )
+                        and tmp_mixed.exists()
+                    ):
+                        tmp_mixed.replace(output_path)
+                        if has_track and music_path is not None:
+                            logger.info(
+                                "✓ Added background music %s (music=%s, original=%s)",
+                                music_path.name,
+                                music_cfg.music_volume,
+                                eff_orig,
+                            )
+                    else:
+                        tmp_mixed.unlink(missing_ok=True)
+                        logger.warning("Failed to mix music; keeping unmixed assembled video.")
+
             logger.info("✓ Assembled %d clips into: %s", len(clip_files), output_path)
         else:
             logger.error("✗ Assembly failed.")

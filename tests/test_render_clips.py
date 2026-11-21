@@ -788,3 +788,121 @@ def test_main_passes_configured_quality(tmp_path: Path) -> None:
         os.chdir(original_cwd)
 
     assert captured["quality"] == VideoQuality(cq=17, crf=15)
+
+
+def test_render_clip_with_music_and_scuba_filter(tmp_path: Path) -> None:
+    """render_clip mixes music_path and applies scuba filter when opt-in music is provided."""
+    source = tmp_path / "source.mp4"
+    source.touch()
+    music = tmp_path / "chill.wav"
+    music.write_bytes(b"RIFF" + b"\x00" * 100)
+    output = tmp_path / "output.mp4"
+
+    probe_audio = MagicMock(returncode=0, stdout=json.dumps({"streams": [{"codec_type": "audio"}]}))
+    ok_res = MagicMock(returncode=0, stderr="")
+    captured_cmds: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+        captured_cmds.append(cmd)
+        if cmd[0] == "ffprobe" and "-select_streams" in cmd and "a" in cmd:
+            return probe_audio
+        if cmd[0] == "ffmpeg":
+            Path(cmd[-1]).write_bytes(b"mp4")
+            return ok_res
+        return MagicMock(
+            returncode=0,
+            stdout=json.dumps({"streams": [{"codec_name": "h264"}], "format": {"duration": "5.0"}}),
+        )
+
+    with (
+        patch.object(render.subprocess, "run", side_effect=fake_run),
+        patch.object(render, "is_valid_clip", return_value=True),
+    ):
+        ok = render.render_clip(
+            source,
+            10.0,
+            15.0,
+            output,
+            music_path=music,
+            music_volume=0.65,
+            original_volume=0.35,
+            scuba_filter=True,
+        )
+
+    assert ok is True
+    ffmpeg_cmd = next(c for c in captured_cmds if c[0] == "ffmpeg")
+    assert "-stream_loop" in ffmpeg_cmd
+    assert str(music) in ffmpeg_cmd
+    fc = ffmpeg_cmd[ffmpeg_cmd.index("-filter_complex") + 1]
+    assert "highpass=f=80" in fc
+    assert "volume=0.35" in fc
+    assert "volume=0.65" in fc
+
+
+def test_render_main_opt_in_clip_music_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main resolves atmosphere music only when --clip-music is passed."""
+    import os
+    import sys as sys_module
+    import urllib.error
+
+    monkeypatch.setattr(
+        "utils.audio_music.urllib.request.urlopen",
+        lambda *a, **kw: (_ for _ in ()).throw(urllib.error.URLError("offline")),
+    )
+
+    detections_path = tmp_path / "detections_refined.json"
+    detections_path.write_text(
+        json.dumps({
+            "detections": [
+                {
+                    "clip_id": "clip001",
+                    "file_path": str(tmp_path / "source1.mp4"),
+                    "start_time": 10.0,
+                    "end_time": 15.0,
+                    "subject": "turtle",
+                    "quality_score": 8,
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+    (tmp_path / "source1.mp4").touch()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text('general:\n  output_dir: "./outputs"\n', encoding="utf-8")
+
+    captured_kwargs: dict[str, object] = {}
+
+    def fake_render_detections(detections, highlights_dir, state=None, quality=None, **kwargs):
+        captured_kwargs.update(kwargs)
+        return len(detections), 0
+
+    original_argv = sys_module.argv
+    original_cwd = Path.cwd()
+    try:
+        sys_module.argv = [
+            "05_render_clips.py",
+            "--input",
+            str(detections_path),
+            "--output",
+            str(tmp_path / "highlights"),
+            "--config",
+            str(config_path),
+            "--clip-music",
+            "--atmosphere",
+            "chill",
+            "--original-volume",
+            "0.38",
+        ]
+        os.chdir(tmp_path)
+        with patch.object(render, "render_detections", side_effect=fake_render_detections):
+            render.main()
+    finally:
+        sys_module.argv = original_argv
+        os.chdir(original_cwd)
+
+    assert "music_path" in captured_kwargs
+    assert Path(str(captured_kwargs["music_path"])).name == "chill.wav"
+    assert captured_kwargs["original_volume"] == 0.38
+    assert captured_kwargs["scuba_filter"] is True

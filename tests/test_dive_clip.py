@@ -1417,3 +1417,94 @@ def test_build_parser_storyline_and_extended_aftermovie_flags(tmp_path: Path) ->
     assert "--dry-run" in af_cmd
     assert af_cmd[af_cmd.index("--target-duration") + 1] == "120.0"
     assert af_cmd[af_cmd.index("--max-per-source-file") + 1] == "1"
+
+
+def test_build_parser_and_forwarding_music_atmosphere_flags(tmp_path: Path) -> None:
+    """scan, assemble, and aftermovie forward atmosphere, volume, scuba-filter, and clip-music flags."""
+    output_folder = tmp_path / "outputs"
+    run_dir = output_folder / "runs" / "run-20261121-100000"
+    (run_dir / "highlights").mkdir(parents=True)
+    (run_dir / "detections_refined.json").write_text('{"detections": []}', encoding="utf-8")
+    from utils.run_archive import update_latest_symlink
+
+    update_latest_symlink(output_folder, run_dir)
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f'general:\n  output_dir: "{output_folder}"\n', encoding="utf-8")
+
+    parser = build_parser()
+
+    # 1. aftermovie flags
+    af_args = parser.parse_args([
+        "aftermovie",
+        "--config",
+        str(config_file),
+        "--atmosphere",
+        "cinematic",
+        "--original-volume",
+        "0.35",
+        "--music-volume",
+        "0.65",
+        "--no-scuba-filter",
+    ])
+    with patch("scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)) as mock_af:
+        assert af_args.func(af_args) == 0
+    af_cmd = mock_af.call_args.args[0]
+    assert af_cmd[af_cmd.index("--atmosphere") + 1] == "cinematic"
+    assert af_cmd[af_cmd.index("--original-volume") + 1] == "0.35"
+    assert af_cmd[af_cmd.index("--music-volume") + 1] == "0.65"
+    assert "--no-scuba-filter" in af_cmd
+
+    # 2. assemble flags
+    asm_args = parser.parse_args([
+        "assemble",
+        "--config",
+        str(config_file),
+        "--atmosphere",
+        "upbeat",
+        "--original-volume",
+        "0.40",
+        "--scuba-filter",
+    ])
+    with patch(
+        "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+    ) as mock_asm:
+        assert asm_args.func(asm_args) == 0
+    asm_cmd = mock_asm.call_args.args[0]
+    assert asm_cmd[asm_cmd.index("--atmosphere") + 1] == "upbeat"
+    assert asm_cmd[asm_cmd.index("--original-volume") + 1] == "0.4"
+    assert "--scuba-filter" in asm_cmd
+
+    # 3. scan --clip-music forwarding to 05_render_clips.py
+    in_dir = tmp_path / "footage"
+    in_dir.mkdir()
+    scan_args = parser.parse_args([
+        "scan",
+        "--input",
+        str(in_dir),
+        "--output",
+        str(output_folder),
+        "--config",
+        str(config_file),
+        "--clip-music",
+        "--atmosphere",
+        "chill",
+        "--original-volume",
+        "0.35",
+    ])
+    with (
+        patch(
+            "scripts.dive_clip.subprocess.run", return_value=MagicMock(returncode=0)
+        ) as mock_scan,
+        patch(
+            "scripts.dive_clip.resolve_atmosphere_music",
+            return_value=tmp_path / "chill.wav",
+        ),
+    ):
+        (tmp_path / "chill.wav").write_bytes(b"RIFF")
+        assert scan_args.func(scan_args) == 0
+    render_cmd = mock_scan.call_args_list[2].args[0]
+    assert "05_render_clips.py" in render_cmd[1]
+    assert "--clip-music" in render_cmd
+    assert render_cmd[render_cmd.index("--atmosphere") + 1] == "chill"
+    assert render_cmd[render_cmd.index("--original-volume") + 1] == "0.35"

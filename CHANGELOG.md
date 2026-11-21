@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Added
+- Add selectable copyright-free background music atmospheres (`ocean_ambient`, `chill`, `cinematic`, `upbeat`, `none`) with on-demand CC0 track caching and offline procedural audio synthesis (`utils/audio_music.py`), plus scuba breathing audio attenuation (`35%` original audio, `65%` music) and regulator-hiss filtering across `aftermovie`, `assemble`, and opt-in `render-clips` (`--clip-music`) (#89).
+
 ## [0.35.1] - 2026-11-21
 
 ### Fixed
