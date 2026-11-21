@@ -356,7 +356,7 @@ wheels = [
 
 [[package]]
 name = "dive-clip-tui"
-version = "0.35.1"
+version = "0.36.0"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
