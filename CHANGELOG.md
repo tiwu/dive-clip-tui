@@ -6,6 +6,8 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-11-21
+
 ### Added
 - Add multi-option storyline planning (`dive-clip storyline`, `scripts/04_plan_storyline.py`) with swappable `ollama`, `openrouter`, `claude`, and `gemini` backends (`utils/text_llm.py`), machine-readable `storyline_plans.json`, and plan-driven aftermovie controls (`--plan`, `--option`, `--dry-run`, `--target-duration`, `--max-clip-duration`, `--order`, `--max-per-source-file`, `--run`) alongside chronological `creation_time` + GoPro chapter sorting and outlier/noise selection fixes (#85).
 
