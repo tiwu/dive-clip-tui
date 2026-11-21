@@ -376,3 +376,33 @@ def test_resolve_and_validate_assembly_artifacts_missing_clips(tmp_path: Path) -
 
     with pytest.raises(FileNotFoundError, match="Clips directory not found"):
         resolve_and_validate_assembly_artifacts(output_dir)
+
+
+def test_resolve_run_dir_latest_symlink_exfat_and_fallback(tmp_path: Path) -> None:
+    """resolve_run_dir(..., 'latest') checks latest symlink, latest.txt, then newest run dir."""
+    from utils.run_archive import resolve_assembly_artifacts, resolve_run_dir
+
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    # No runs exist -> FileNotFoundError
+    with pytest.raises(FileNotFoundError, match="Run directory not found: latest"):
+        resolve_run_dir(out_dir, "latest")
+
+    run1 = out_dir / "runs" / "run-20261101-100000"
+    run2 = out_dir / "runs" / "run-20261102-100000"
+    run1.mkdir(parents=True)
+    run2.mkdir(parents=True)
+
+    # Without latest symlink or latest.txt -> falls back to newest run dir
+    assert resolve_run_dir(out_dir, "latest") == run2.resolve()
+
+    # With exFAT latest.txt pointer (pointing to run1) -> honors latest.txt
+    (out_dir / "latest.txt").write_text("runs/run-20261101-100000\n", encoding="utf-8")
+    assert resolve_run_dir(out_dir, "latest") == run1.resolve()
+    _, _, resolved_run = resolve_assembly_artifacts(out_dir)
+    assert resolved_run == run1.resolve()
+
+    # With latest symlink (pointing to run2) -> symlink takes precedence
+    (out_dir / "latest").symlink_to("runs/run-20261102-100000")
+    assert resolve_run_dir(out_dir, "latest") == run2.resolve()

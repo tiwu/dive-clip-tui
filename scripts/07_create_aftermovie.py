@@ -9,6 +9,7 @@ This covers Phase 2 Steps 2.2-2.4 of the simple plan.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import re
@@ -902,7 +903,10 @@ def main() -> None:
     )
     music_path = Path(args.music) if args.music else None
 
-    # Plan-driven rendering path (--plan)
+    # Plan-driven rendering path (--plan, or --option defaulting to storyline_plans.json)
+    if not args.plan and args.option:
+        args.plan = "storyline_plans.json"
+
     if args.plan:
         plan_path = Path(args.plan)
         latest_run: Path | None = None
@@ -912,12 +916,16 @@ def main() -> None:
             except FileNotFoundError as exc:
                 logger.error("%s", exc)
                 sys.exit(1)
-        elif (output_dir / "latest").exists():
-            latest_run = (output_dir / "latest").resolve()
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                latest_run = resolve_run_dir(output_dir, "latest")
 
-        if not plan_path.exists() and latest_run is not None and (latest_run / plan_path).exists():
-            plan_path = latest_run / plan_path
-        elif not plan_path.exists() and (output_dir / plan_path).exists():
+        if not plan_path.exists() and latest_run is not None:
+            if (latest_run / plan_path).exists():
+                plan_path = latest_run / plan_path
+            elif plan_path.parent.name == "latest" and (latest_run / plan_path.name).exists():
+                plan_path = latest_run / plan_path.name
+        if not plan_path.exists() and (output_dir / plan_path).exists():
             plan_path = output_dir / plan_path
 
         if not plan_path.exists():

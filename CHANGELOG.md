@@ -6,6 +6,9 @@ All notable changes to this project are documented here. This changelog follows
 
 ## [Unreleased]
 
+### Fixed
+- Support `--run latest` across CLI commands (resolving `<output_dir>/latest`, exFAT `latest.txt` fallback pointers, or the newest `runs/run-*` directory) and default `--plan` to `storyline_plans.json` when `--option` is passed to `aftermovie`.
+
 ## [0.35.0] - 2026-11-21
 
 ### Added

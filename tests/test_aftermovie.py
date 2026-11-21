@@ -998,3 +998,132 @@ def test_aftermovie_plan_option_and_option_all(tmp_path: Path) -> None:
     finally:
         sys_module.argv = orig_argv
         os.chdir(orig_cwd)
+
+
+def test_aftermovie_option_without_plan_and_run_latest(tmp_path: Path, capsys) -> None:
+    """--option defaults --plan to storyline_plans.json and --run latest resolves latest.txt."""
+    from utils.models import EditAct, EditPlan, EditShot, StorylineProposalSet
+
+    source = tmp_path / "GX010778.MP4"
+    source.touch()
+    out_dir = tmp_path / "outputs"
+    run_dir = out_dir / "runs" / "run-20261119-155336"
+    (run_dir / "highlights").mkdir(parents=True)
+    (out_dir / "latest.txt").write_text("runs/run-20261119-155336\n", encoding="utf-8")
+
+    (run_dir / "detections_refined.json").write_text(
+        json.dumps({
+            "detections": [
+                {
+                    "clip_id": "c1",
+                    "detection_id": "c1_00000.00_00005.00",
+                    "file_name": "GX010778.MP4",
+                    "file_path": str(source),
+                    "start_time": 0.0,
+                    "end_time": 5.0,
+                    "subject": "Eagle Ray",
+                    "quality_score": 9,
+                    "confidence": 0.95,
+                    "description": "spotted eagle ray",
+                }
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    shot = EditShot(
+        detection_id="c1_00000.00_00005.00",
+        clip_id="c1",
+        file_name="GX010778.MP4",
+        file_path=str(source),
+        in_time=0.0,
+        out_time=4.0,
+        subject="Eagle Ray",
+        quality_score=9,
+        transition_in="fade",
+        transition_out="fade",
+    )
+    proposals = StorylineProposalSet(
+        source_detections="detections_refined.json",
+        provider="deterministic",
+        model="mmr-story-arc",
+        proposals=[
+            EditPlan(
+                id="teaser",
+                title="Teaser",
+                style="teaser",
+                target_duration_seconds=5,
+                estimated_duration_seconds=4.0,
+                clip_count=1,
+                acts=[EditAct(act_number=1, title="Flashes", shots=[shot])],
+                shots=[shot],
+            )
+        ],
+    )
+    (run_dir / "storyline_plans.json").write_text(
+        proposals.model_dump_json(indent=2), encoding="utf-8"
+    )
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(f'general:\n  output_dir: "{out_dir}"\n', encoding="utf-8")
+
+    orig_argv, orig_exit, orig_cwd = sys_module.argv, sys_module.exit, Path.cwd()
+    exit_code = None
+
+    def fake_exit(code=0):
+        nonlocal exit_code
+        exit_code = code
+        raise SystemExit(code)
+
+    try:
+        sys_module.exit = fake_exit
+        os.chdir(tmp_path)
+
+        # Case 1: --run latest --option teaser --dry-run (no --plan)
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--config",
+            str(cfg_path),
+            "--run",
+            "latest",
+            "--option",
+            "teaser",
+            "--dry-run",
+        ]
+        with (
+            patch.object(aftermovie, "render_clip_with_fade") as mock_render,
+            patch.object(aftermovie, "get_console", return_value=Console(stderr=True, width=160)),
+            contextlib.suppress(SystemExit),
+        ):
+            aftermovie.main()
+
+        assert exit_code == 0
+        mock_render.assert_not_called()
+        err1 = capsys.readouterr().err
+        assert "Plan Preview: teaser" in err1
+        assert "Eagle Ray" in err1
+
+        # Case 2: --plan outputs/latest/storyline_plans.json on exFAT (only latest.txt exists)
+        exit_code = None
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--config",
+            str(cfg_path),
+            "--plan",
+            "outputs/latest/storyline_plans.json",
+            "--option",
+            "teaser",
+            "--dry-run",
+        ]
+        with (
+            patch.object(aftermovie, "render_clip_with_fade") as mock_render,
+            patch.object(aftermovie, "get_console", return_value=Console(stderr=True, width=160)),
+            contextlib.suppress(SystemExit),
+        ):
+            aftermovie.main()
+
+        assert exit_code == 0
+        mock_render.assert_not_called()
+        assert "Eagle Ray" in capsys.readouterr().err
+    finally:
+        sys_module.argv, sys_module.exit = orig_argv, orig_exit
+        os.chdir(orig_cwd)
