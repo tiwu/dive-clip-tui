@@ -657,11 +657,16 @@ def resolve_assembly_inputs(
     else:
         output_path = None
 
-    detections_path, clips_dir, latest_run = resolve_assembly_artifacts(
-        output_dir,
-        input_detections=getattr(args, "input", None),
-        clips_dir=getattr(args, "clips_dir", None),
-    )
+    try:
+        detections_path, clips_dir, latest_run = resolve_assembly_artifacts(
+            output_dir,
+            input_detections=getattr(args, "input", None),
+            clips_dir=getattr(args, "clips_dir", None),
+            run=getattr(args, "run", None),
+        )
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        return None
 
     if output_path is None:
         # Keep each run self-contained: default the artifact into the run
@@ -745,6 +750,52 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     return rc
 
 
+def cmd_storyline(args: argparse.Namespace) -> int:
+    """Generate multi-option storyline edit plans from detections."""
+    cmd = [
+        sys.executable,
+        str(SCRIPTS_DIR / "04_plan_storyline.py"),
+        "--config",
+        args.config,
+    ]
+    if getattr(args, "run", None):
+        cmd.extend(["--run", str(args.run)])
+    if getattr(args, "input", None):
+        cmd.extend(["--input", str(args.input)])
+    if getattr(args, "output", None):
+        cmd.extend(["--output", str(args.output)])
+    if getattr(args, "plans_output", None):
+        cmd.extend(["--plans-output", str(args.plans_output)])
+    if getattr(args, "provider", None):
+        cmd.extend(["--provider", str(args.provider)])
+    if getattr(args, "model", None):
+        cmd.extend(["--model", str(args.model)])
+    if getattr(args, "presets", None):
+        cmd.extend(["--presets", str(args.presets)])
+    if getattr(args, "durations", None):
+        cmd.extend(["--durations", str(args.durations)])
+    if getattr(args, "narrative", None):
+        cmd.extend(["--narrative", str(args.narrative)])
+    if getattr(args, "max_per_source_file", None) is not None:
+        cmd.extend(["--max-per-source-file", str(args.max_per_source_file)])
+    if getattr(args, "date_range", None):
+        cmd.extend(["--date-range", str(args.date_range)])
+    for ex_file in getattr(args, "exclude_file", None) or []:
+        cmd.extend(["--exclude-file", str(ex_file)])
+    if getattr(args, "allow_outlier_dates", False):
+        cmd.append("--allow-outlier-dates")
+    if getattr(args, "deterministic_only", False):
+        cmd.append("--deterministic-only")
+    if getattr(args, "log_file", None):
+        cmd.extend(["--log-file", str(args.log_file)])
+    if getattr(args, "trace", False):
+        cmd.append("--trace")
+    elif getattr(args, "debug", False):
+        cmd.append("--debug")
+
+    return run(cmd, "Plan storyline options")
+
+
 def cmd_aftermovie(args: argparse.Namespace) -> int:
     """Create an aftermovie with cross-dissolve transitions and optional music."""
     resolved = resolve_assembly_inputs(args, "aftermovie.mp4")
@@ -777,6 +828,28 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
         "--fade-duration",
         str(fade_duration),
     ]
+    if getattr(args, "run", None):
+        cmd.extend(["--run", str(args.run)])
+    if getattr(args, "plan", None):
+        cmd.extend(["--plan", str(args.plan)])
+    if getattr(args, "option", None):
+        cmd.extend(["--option", str(args.option)])
+    if getattr(args, "dry_run", False):
+        cmd.append("--dry-run")
+    if getattr(args, "target_duration", None) is not None:
+        cmd.extend(["--target-duration", str(args.target_duration)])
+    if getattr(args, "max_clip_duration", None) is not None:
+        cmd.extend(["--max-clip-duration", str(args.max_clip_duration)])
+    if getattr(args, "order", None):
+        cmd.extend(["--order", str(args.order)])
+    if getattr(args, "max_per_source_file", None) is not None:
+        cmd.extend(["--max-per-source-file", str(args.max_per_source_file)])
+    if getattr(args, "date_range", None):
+        cmd.extend(["--date-range", str(args.date_range)])
+    for ex_file in getattr(args, "exclude_file", None) or []:
+        cmd.extend(["--exclude-file", str(ex_file)])
+    if getattr(args, "allow_outlier_dates", False):
+        cmd.append("--allow-outlier-dates")
     if getattr(args, "music", None):
         cmd.extend(["--music", str(args.music)])
     log_file = getattr(args, "log_file", None)
@@ -786,7 +859,12 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
         cmd.append("--debug")
 
     rc = run(cmd, "Create aftermovie")
-    if rc == 0 and latest_run is not None:
+    if (
+        rc == 0
+        and latest_run is not None
+        and not getattr(args, "dry_run", False)
+        and output_path.exists()
+    ):
         archive_run_artifacts(latest_run, aftermovie_path=output_path)
         _refresh_artifact_symlink(output_dir, latest_run, output_path)
     return rc
@@ -1552,6 +1630,12 @@ def build_parser() -> argparse.ArgumentParser:
         "aftermovie", help="Create an aftermovie with crossfades and background music"
     )
     aftermovie_p.add_argument(
+        "--run",
+        default=None,
+        metavar="RUN_ID_OR_PATH",
+        help="Run ID or path to resolve detections, highlights, and output from",
+    )
+    aftermovie_p.add_argument(
         "--input",
         default=None,
         help="Path to detections_refined.json (defaults to <output>/latest/detections_refined.json)",
@@ -1565,6 +1649,65 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         default=None,
         help="Path to output MP4 file (defaults to <output>/aftermovie.mp4)",
+    )
+    aftermovie_p.add_argument(
+        "--plan",
+        default=None,
+        help="Path to storyline_plans.json or EditPlan JSON to render",
+    )
+    aftermovie_p.add_argument(
+        "--option",
+        default=None,
+        help="Option ID inside storyline_plans.json to render (or 'all' to render every option)",
+    )
+    aftermovie_p.add_argument(
+        "--dry-run",
+        "--preview",
+        dest="dry_run",
+        action="store_true",
+        default=False,
+        help="Preview selected shots and total runtime without rendering",
+    )
+    aftermovie_p.add_argument(
+        "--target-duration",
+        type=float,
+        default=None,
+        help="Target total runtime in seconds (uses duration-budget selection + trimming)",
+    )
+    aftermovie_p.add_argument(
+        "--max-clip-duration",
+        type=float,
+        default=None,
+        help="Maximum duration per trimmed clip in seconds (used with --target-duration)",
+    )
+    aftermovie_p.add_argument(
+        "--order",
+        choices=["chronological", "story_arc"],
+        default=None,
+        help="Sequence order in duration-budget mode: chronological or story_arc",
+    )
+    aftermovie_p.add_argument(
+        "--max-per-source-file",
+        type=int,
+        default=None,
+        help="Maximum clips allowed per source video file",
+    )
+    aftermovie_p.add_argument(
+        "--date-range",
+        default=None,
+        help="Inclusive recording date filter YYYY-MM-DD:YYYY-MM-DD",
+    )
+    aftermovie_p.add_argument(
+        "--exclude-file",
+        action="append",
+        default=None,
+        help="Source filename to exclude (can be passed multiple times)",
+    )
+    aftermovie_p.add_argument(
+        "--allow-outlier-dates",
+        action="store_true",
+        default=False,
+        help="Disable automatic exclusion of off-trip outlier dates in duration-budget mode",
     )
     aftermovie_p.add_argument(
         "--music",
@@ -1599,6 +1742,85 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional logfile path",
     )
     aftermovie_p.set_defaults(func=cmd_aftermovie)
+
+    storyline_p = sub.add_parser(
+        "storyline", help="Generate multi-option edit plans from detected highlights"
+    )
+    storyline_p.add_argument(
+        "--run",
+        default=None,
+        metavar="RUN_ID_OR_PATH",
+        help="Run ID or path (defaults to latest run)",
+    )
+    storyline_p.add_argument("--input", default=None, help="Path to detections_refined.json")
+    storyline_p.add_argument(
+        "--output", default=None, help="Destination path for storyline_edit_guide.md"
+    )
+    storyline_p.add_argument(
+        "--plans-output", default=None, help="Destination path for storyline_plans.json"
+    )
+    storyline_p.add_argument(
+        "--provider",
+        default=None,
+        help="Text LLM provider: ollama, openrouter, claude, or gemini",
+    )
+    storyline_p.add_argument("--model", default=None, help="Model override")
+    storyline_p.add_argument(
+        "--presets",
+        default=None,
+        help="Comma-separated presets (default: teaser,highlight,aftermovie)",
+    )
+    storyline_p.add_argument(
+        "--durations",
+        default=None,
+        help="Comma-separated target durations in seconds (e.g. 60,150,240)",
+    )
+    storyline_p.add_argument(
+        "--narrative",
+        "--prompt",
+        dest="narrative",
+        default=None,
+        help="Optional narrative steering instructions",
+    )
+    storyline_p.add_argument(
+        "--max-per-source-file",
+        type=int,
+        default=None,
+        help="Maximum clips allowed per source video file within a proposal (default: 1)",
+    )
+    storyline_p.add_argument(
+        "--date-range",
+        default=None,
+        help="Inclusive recording date filter YYYY-MM-DD:YYYY-MM-DD",
+    )
+    storyline_p.add_argument(
+        "--exclude-file",
+        action="append",
+        default=None,
+        help="Source filename to exclude (can be passed multiple times)",
+    )
+    storyline_p.add_argument(
+        "--allow-outlier-dates",
+        action="store_true",
+        default=False,
+        help="Disable automatic exclusion of off-trip outlier dates",
+    )
+    storyline_p.add_argument(
+        "--deterministic-only",
+        action="store_true",
+        default=False,
+        help="Generate storyline_plans.json locally without calling any LLM",
+    )
+    storyline_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
+    storyline_p.add_argument("--debug", action="store_true", help="Enable debug logging")
+    storyline_p.add_argument("--trace", action="store_true", help="Enable trace logging")
+    storyline_p.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Optional logfile path",
+    )
+    storyline_p.set_defaults(func=cmd_storyline)
 
     review_p = sub.add_parser("review", help="Review and record feedback on rendered clips")
     review_p.add_argument(

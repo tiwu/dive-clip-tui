@@ -448,3 +448,221 @@ def test_selection_trace_telemetry_defaults_to_none(tmp_path: Path) -> None:
         data = json.load(handle)
     assert data["candidates"][0]["telemetry_score"] is None
     assert data["candidates"][0]["hsv_similarity"] is None
+
+
+def test_gopro_chapter_and_creation_time_chronological_sort() -> None:
+    """make_chronological_sort_key sorts by creation_time and GoPro chapter/file_num."""
+    from utils.selection import make_chronological_sort_key, parse_gopro_filename
+
+    assert parse_gopro_filename("GX010874.MP4") < parse_gopro_filename("GX020874.MP4")
+    assert parse_gopro_filename("GX020874.MP4") < parse_gopro_filename("GX010876.MP4")
+
+    clip_meta = {
+        "GX010897.MP4": {"creation_time": "2026-09-15T08:34:00Z"},
+        "GX020874.MP4": {"creation_time": "2026-09-15T04:29:00Z"},
+    }
+    dets = [
+        {
+            "clip_id": "c_late",
+            "file_name": "GX010897.MP4",
+            "start_time": 9.5,
+            "end_time": 21.0,
+            "subject": "starfish",
+            "quality_score": 9,
+            "confidence": 0.98,
+        },
+        {
+            "clip_id": "c_early",
+            "file_name": "GX020874.MP4",
+            "start_time": 128.5,
+            "end_time": 139.0,
+            "subject": "boat prep",
+            "quality_score": 8,
+            "confidence": 0.95,
+        },
+    ]
+    selected = select_diverse_highlights(dets, top_n=2, clip_meta=clip_meta)
+    assert [d["file_name"] for d in selected] == ["GX020874.MP4", "GX010897.MP4"]
+    assert make_chronological_sort_key(dets[1], clip_meta) < make_chronological_sort_key(
+        dets[0], clip_meta
+    )
+
+
+def test_unknown_subject_similarity_falls_back_to_description() -> None:
+    """Two 'unknown' shots with overlapping descriptions must receive a similarity penalty."""
+    d1 = {
+        "clip_id": "c1",
+        "subject": "unknown",
+        "description": "coral reef wall with small chromis fish",
+        "template": "broad_marine",
+    }
+    d2 = {
+        "clip_id": "c2",
+        "subject": "unknown",
+        "description": "coral reef wall with chromis swimming",
+        "template": "broad_marine",
+    }
+    sim = calculate_pairwise_similarity(d1, d2)
+    assert sim > 0.3
+
+
+def test_filter_selection_candidates_and_duration_budget_story_arc() -> None:
+    """filter_selection_candidates & select_duration_budget_highlights enforce hygiene, rarity, and max_per_source_file."""
+    from utils.selection import filter_selection_candidates, select_duration_budget_highlights
+
+    clip_meta = {
+        "GX010772.MP4": {"creation_time": "2026-08-22T15:18:00Z", "fps": 50.0, "has_audio": True},
+        "GX010774.MP4": {"creation_time": "2026-09-11T05:50:00Z", "fps": 50.0, "has_audio": True},
+        "GX010794.MP4": {"creation_time": "2026-09-12T05:44:00Z", "fps": 50.0, "has_audio": True},
+        "GX010803.MP4": {"creation_time": "2026-09-12T08:22:00Z", "fps": 50.0, "has_audio": True},
+        "GX010881.MP4": {"creation_time": "2026-09-15T08:09:00Z", "fps": 50.0, "has_audio": True},
+        "GX010886.MP4": {"creation_time": "2026-09-15T08:15:00Z", "fps": 25.0, "has_audio": False},
+    }
+    feedback = {
+        "feedback": {
+            "rej": {
+                "source_file": "GX010774.MP4",
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "decision": "reject",
+            }
+        }
+    }
+    dets = [
+        {
+            "detection_id": "d_outlier",
+            "clip_id": "c_out",
+            "file_name": "GX010772.MP4",
+            "file_path": "/GX010772.MP4",
+            "start_time": 6.0,
+            "end_time": 12.0,
+            "domain": "generic",
+            "story_role": "human_moment",
+            "quality_score": 8,
+            "confidence": 0.95,
+            "subject": "indoor living room",
+            "description": "outlier home clip",
+        },
+        {
+            "detection_id": "d_fb_reject",
+            "clip_id": "c_774",
+            "file_name": "GX010774.MP4",
+            "file_path": "/GX010774.MP4",
+            "start_time": 0.0,
+            "end_time": 10.0,
+            "domain": "generic",
+            "story_role": "human_moment",
+            "quality_score": 8,
+            "confidence": 0.95,
+            "subject": "boat idle",
+            "description": "rejected by human",
+        },
+        {
+            "detection_id": "d_role_none",
+            "clip_id": "c_794",
+            "file_name": "GX010794.MP4",
+            "file_path": "/GX010794.MP4",
+            "start_time": 5.0,
+            "end_time": 10.0,
+            "domain": "underwater",
+            "story_role": "none",
+            "quality_score": 8,
+            "confidence": 0.95,
+            "subject": "no diver visible",
+            "description": "empty",
+        },
+        {
+            "detection_id": "d_mismatch",
+            "clip_id": "c_886",
+            "file_name": "GX010886.MP4",
+            "file_path": "/GX010886.MP4",
+            "start_time": 0.0,
+            "end_time": 5.0,
+            "domain": "underwater",
+            "story_role": "hero_subject",
+            "quality_score": 9,
+            "confidence": 0.95,
+            "subject": "turtle",
+            "description": "25fps no audio",
+        },
+        {
+            "detection_id": "d_boat1",
+            "clip_id": "c_794",
+            "file_name": "GX010794.MP4",
+            "file_path": "/GX010794.MP4",
+            "start_time": 33.5,
+            "end_time": 45.0,
+            "domain": "generic",
+            "story_role": "entry_transition",
+            "quality_score": 8,
+            "confidence": 0.95,
+            "subject": "water splash",
+            "description": "boat bow splash",
+        },
+        {
+            "detection_id": "d_boat2",
+            "clip_id": "c_794",
+            "file_name": "GX010794.MP4",
+            "file_path": "/GX010794.MP4",
+            "start_time": 15.5,
+            "end_time": 27.0,
+            "domain": "generic",
+            "story_role": "establishing",
+            "quality_score": 8,
+            "confidence": 0.95,
+            "subject": "boat wake",
+            "description": "boat wake coastline",
+        },
+        {
+            "detection_id": "d_seahorse",
+            "clip_id": "c_881",
+            "file_name": "GX010881.MP4",
+            "file_path": "/GX010881.MP4",
+            "start_time": 30.5,
+            "end_time": 42.0,
+            "domain": "underwater",
+            "template": "macro",
+            "story_role": "hero_subject",
+            "quality_score": 8,
+            "confidence": 0.95,
+            "subject": "seahorse",
+            "description": "seahorse on gorgonian",
+        },
+        {
+            "detection_id": "d_shark",
+            "clip_id": "c_803",
+            "file_name": "GX010803.MP4",
+            "file_path": "/GX010803.MP4",
+            "start_time": 361.5,
+            "end_time": 370.0,
+            "domain": "underwater",
+            "template": "pelagics",
+            "story_role": "hero_subject",
+            "quality_score": 8,
+            "confidence": 0.95,
+            "subject": "shark",
+            "description": "shark cruising deep blue",
+        },
+    ]
+
+    filtered, report = filter_selection_candidates(dets, clip_meta=clip_meta, feedback=feedback)
+    kept_ids = {d["detection_id"] for d in filtered}
+    assert kept_ids == {"d_boat1", "d_boat2", "d_seahorse", "d_shark"}
+    assert any(k.startswith("outlier_date:GX010772.MP4") for k in report)
+    assert any(k.startswith("stream_mismatch:GX010886.MP4") for k in report)
+    assert any(k.startswith("feedback_reject:GX010774.MP4") for k in report)
+
+    plan, _ = select_duration_budget_highlights(
+        dets,
+        clip_meta=clip_meta,
+        feedback=feedback,
+        target_duration=30.0,
+        clip_duration_cap=6.0,
+        max_per_source_file=1,
+        order="story_arc",
+    )
+    files_used = [s.file_name for s in plan.shots]
+    assert len(files_used) == len(set(files_used))
+    assert all(s.duration <= 6.0 for s in plan.shots)
+    assert plan.shots[0].transition_in == "fade"
+    assert plan.shots[-1].transition_out == "fade"

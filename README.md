@@ -11,7 +11,7 @@ starts from scratch.
 ## Contents
 
 - [Requirements](#requirements) - [Installation](#installation) - [Quick start](#quick-start)
-- [Commands](#commands): [scan](#dive-clip-scan) - [classify](#dive-clip-classify) - [assemble / aftermovie](#dive-clip-assemble-and-dive-clip-aftermovie) - [review](#dive-clip-review) - [shared options](#options-shared-by-every-command)
+- [Commands](#commands): [scan](#dive-clip-scan) - [classify](#dive-clip-classify) - [storyline](#dive-clip-storyline) - [assemble / aftermovie](#dive-clip-assemble-and-dive-clip-aftermovie) - [review](#dive-clip-review) - [shared options](#options-shared-by-every-command)
 - [Configuration](#configuration): [precedence](#what-wins) - [reference](#configuration-reference) - [VLM providers](#choosing-a-vlm-provider) - [domains](#domains-and-prompt-templates)
 - [How the pipeline works](#how-the-pipeline-works)
 - [Outputs, run archives, and resuming](#outputs-run-archives-and-resuming)
@@ -82,7 +82,8 @@ uv run dive-clip review
 | --- | --- | --- |
 | [`scan`](#dive-clip-scan) | Ingest → screen → coarse/fine scan → render clips (→ optional assemble) | yes |
 | [`classify`](#dive-clip-classify) | Pass 0 only: label domains and usability, no highlight detection | yes |
-| [`assemble`](#dive-clip-assemble-and-dive-clip-aftermovie) / [`aftermovie`](#dive-clip-assemble-and-dive-clip-aftermovie) | Cut existing clips into one video, plain or with music and fades | no |
+| [`storyline`](#dive-clip-storyline) | Propose multi-option edit plans (`teaser`, `highlight`, `aftermovie`) | optional text LLM |
+| [`assemble`](#dive-clip-assemble-and-dive-clip-aftermovie) / [`aftermovie`](#dive-clip-assemble-and-dive-clip-aftermovie) | Cut existing clips or an edit plan into one video, plain or with music and fades | no |
 | [`review`](#dive-clip-review) | Play clips back and record keep/reject feedback | no |
 
 `assemble` and `aftermovie` only read existing run artifacts, so re-cutting with a
@@ -145,22 +146,59 @@ to `<output>/classifications.json`, and are written atomically after each clip, 
 Candidates are never picked up automatically — copy them into `config.yaml`
 yourself once you are happy with them.
 
+### `dive-clip storyline`
+
+Generate multiple validated edit options (`teaser`, `highlight`, `aftermovie`, or custom `--durations`) into `<run_dir>/storyline_plans.json` and `<run_dir>/storyline_edit_guide.md`:
+
+```bash
+uv run dive-clip storyline --run latest --provider ollama
+uv run dive-clip storyline --durations 60,150,240 --narrative "Focus on macro critters and end with the shark"
+uv run dive-clip storyline --deterministic-only
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--run RUN_ID_OR_PATH` | latest run | Run directory to plan |
+| `--provider NAME` | `storyline.provider` (`ollama`) | `ollama`, `openrouter`, `claude`, or `gemini` |
+| `--model MODEL` | provider/config default | Override model for storyline generation |
+| `--presets LIST` | `teaser,highlight,aftermovie` | Comma-separated preset options |
+| `--durations LIST` | none | Comma-separated target runtimes in seconds (e.g. `60,150,240`) |
+| `--narrative TEXT` | none | Creative steering instructions (also `--prompt`) |
+| `--max-per-source-file N` | `1` | Max clips allowed per source file within each proposal |
+| `--date-range START:END` | none | Inclusive `YYYY-MM-DD:YYYY-MM-DD` recording filter |
+| `--exclude-file NAME` | none | Source filename to exclude (repeatable) |
+| `--allow-outlier-dates` | off | Keep off-trip clips recorded `>7` days from the median date |
+| `--deterministic-only` | off | Build `storyline_plans.json` locally without calling an LLM |
+
 ### `dive-clip assemble` and `dive-clip aftermovie`
 
 Both cut existing clips into one video; `aftermovie` adds music, fades, and
-transitions.
+transitions, and can preview or render options from `storyline_plans.json`.
 
 ```bash
 uv run dive-clip assemble   --output ./outputs --top-n 8
-uv run dive-clip aftermovie --output ./outputs --music ./track.mp3
+uv run dive-clip aftermovie --plan storyline_plans.json --option highlight --dry-run
+uv run dive-clip aftermovie --plan storyline_plans.json --option all --music ./track.mp3
+uv run dive-clip aftermovie --target-duration 150 --order story_arc --dry-run
 ```
 
 | Option | `assemble` | `aftermovie` |
 | --- | --- | --- |
+| `--run RUN_ID_OR_PATH` | — | resolve detections, highlights, and output from run |
 | `--input PATH` | `<output>/latest/detections_refined.json` | same |
 | `--clips-dir PATH` | `<output>/latest/highlights` (or `<output>/highlights`) | same |
 | `--output PATH` | `<output>/highlight_reel.mp4` | `<output>/aftermovie.mp4` |
-| `--top-n N` | `10` or config | same |
+| `--plan PATH` | — | render from `storyline_plans.json` or an `EditPlan` |
+| `--option ID` | — | option ID inside `--plan` (or `all` for every option) |
+| `--dry-run`, `--preview` | — | print shot preview table and exit without rendering |
+| `--target-duration S` | — | duration-budget selection + centered clip trimming |
+| `--max-clip-duration S` | — | cap per trimmed clip in duration-budget mode |
+| `--order MODE` | — | `chronological` or `story_arc` (5-act grouping) |
+| `--max-per-source-file N` | — | limit clips per source file (default `1` in duration mode) |
+| `--date-range START:END` | — | `YYYY-MM-DD:YYYY-MM-DD` filter |
+| `--exclude-file NAME` | — | exclude source file (repeatable) |
+| `--allow-outlier-dates` | — | keep off-trip outlier dates in duration mode |
+| `--top-n N` | `10` or config | `10` or config (when `--plan`/`--target-duration` unset) |
 | `--music PATH` | — | music bed |
 | `--music-volume F` | — | `0.15`, or `aftermovie.music_volume` |
 | `--fade-duration S` | — | `1.0`, or `aftermovie.fade_duration` |
@@ -228,7 +266,7 @@ add them.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `project_name` | `"Madagascar_Dives_2026"` | Label recorded in the Resolve manifest; the folder CLI uses the folder name |
+| `project_name` | `""` | Optional fallback label for CMX 3600 EDL titles; folder ingest uses the input folder name and Resolve uses the open project name |
 | `input_dir` | none | Footage folder used when `--input` is omitted |
 | `output_dir` | `./outputs` | Output folder used when `--output` is omitted |
 
@@ -328,13 +366,17 @@ want the best moments even if they cluster in one file.
 Start at `gate_mode: "advisory"`, read `prescreen_trace.json`, then switch to
 `"enabled"` once you are satisfied the gates reject what you expect.
 
-**`cloud_storyline`** *(optional)* — used only by `scripts/04_plan_storyline.py`.
+**`storyline`** *(optional)* — used by `dive-clip storyline` / `scripts/04_plan_storyline.py` (legacy `cloud_storyline` remains a fallback).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `provider` | `"claude"` | `claude` or `gemini` |
-| `model` | `claude-3-5-sonnet-latest` | Model for story planning |
-| `target_edit_duration_minutes` | `4` | Target length of the planned edit |
+| `provider` | `"ollama"` | `ollama`, `openrouter`, `claude`, or `gemini` |
+| `model` | `null` | Model override (falls back to `ollama.model` or provider default) |
+| `presets` | `["teaser", "highlight", "aftermovie"]` | Default options to generate |
+| `max_per_source_file` | `1` | Max clips per source video inside each proposal |
+| `outlier_days` | `7` | Exclude off-trip clips >7 days from median recording date |
+| `temperature` | `0.4` | Sampling temperature for storyline JSON generation |
+| `max_tokens` | `4096` | Response token cap |
 
 **`aftermovie`** *(optional)* — consulted only when the matching flag is absent.
 
@@ -653,7 +695,7 @@ scripts/
   01_extract_manifest.py   # Export clip metadata from DaVinci Resolve
   02_scan_footage.py       # Scan footage with Ollama (Pass 0, 1, and 2)
   03_generate_edl.py       # Create EDL and CSV timeline markers
-  04_plan_storyline.py     # Optional story plan generation
+  04_plan_storyline.py     # Multi-option storyline planner (Ollama/OpenRouter/Claude/Gemini)
   05_render_clips.py       # Render detection windows as MP4 clips
   06_assemble_video.py     # Assemble rendered clips
   07_create_aftermovie.py  # Create an aftermovie with music/transitions
@@ -675,10 +717,12 @@ utils/
   prescreen.py             # Pre-VLM screening funnel: gates, metrics, trace records
   prompt_templates.py      # Domain prompts and subject-routed templates
   run_archive.py           # Self-contained run snapshots and latest symlink
-  selection.py             # Maximal Marginal Relevance (MMR) highlight selection
+  selection.py             # MMR highlight selection, chronological sort, & duration-budget planner
   signals.py               # Graceful Ctrl-C / SIGTERM shutdown handling
   stats.py                 # Scan throughput, phase metrics, and summary tables
+  storyline.py             # Storyline catalog prompts, EditPlan validation, & guide rendering
   telemetry.py             # GoPro GPMF / DJI / Insta360 telemetry decoding and scoring
+  text_llm.py              # Pluggable text-LLM client (Ollama/OpenRouter/Claude/Gemini)
   timecode_math.py         # Frame-rate and SMPTE timecode helpers
   version.py               # Dynamic package version helper
   vlm_client.py            # VLM client protocol, OpenRouter backend, provider factory

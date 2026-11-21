@@ -166,20 +166,28 @@ def resolve_assembly_artifacts(
     output_dir: Path | str,
     input_detections: Path | str | None = None,
     clips_dir: Path | str | None = None,
+    run: Path | str | None = None,
 ) -> tuple[Path, Path, Path | None]:
     """Resolve detections JSON path, clips directory, and latest run dir for assembly.
 
-    Searches explicit paths, the latest symlink, recent timestamped runs, and output_dir.
+    Searches an explicit ``run`` target, explicit paths, the latest symlink,
+    recent timestamped runs, and output_dir.
     Returns (detections_path, clips_dir, latest_run).
     """
     out_path = Path(output_dir)
-    latest_link = out_path / "latest"
-    latest_run: Path | None = (
-        latest_link.resolve() if latest_link.exists() else find_latest_run_dir(out_path)
-    )
+    if run is not None:
+        latest_run: Path | None = resolve_run_dir(out_path, run)
+        latest_link = out_path / "latest"
+    else:
+        latest_link = out_path / "latest"
+        latest_run = (
+            latest_link.resolve() if latest_link.exists() else find_latest_run_dir(out_path)
+        )
 
     if input_detections:
         detections_path = Path(input_detections)
+    elif run is not None and latest_run is not None:
+        detections_path = latest_run / "detections_refined.json"
     elif (latest_link / "detections_refined.json").exists():
         detections_path = (latest_link / "detections_refined.json").resolve()
     elif latest_run and (latest_run / "detections_refined.json").exists():
@@ -189,6 +197,8 @@ def resolve_assembly_artifacts(
 
     if clips_dir:
         resolved_clips_dir = Path(clips_dir)
+    elif run is not None and latest_run is not None:
+        resolved_clips_dir = latest_run / "highlights"
     elif (detections_path.parent / "highlights").exists():
         resolved_clips_dir = detections_path.parent / "highlights"
     elif (latest_link / "highlights").exists():
@@ -204,6 +214,8 @@ def resolve_assembly_artifacts(
 def validate_assembly_inputs(
     detections_path: Path,
     clips_dir: Path,
+    *,
+    require_clips_dir: bool = True,
 ) -> Path:
     """Validate that detections JSON and clips directory exist, falling back to repo outputs.
 
@@ -218,7 +230,7 @@ def validate_assembly_inputs(
                 f"detections_refined.json not found at {detections_path}. Run 02_scan_footage.py first."
             )
 
-    if not clips_dir.exists():
+    if require_clips_dir and not clips_dir.exists():
         raise FileNotFoundError(
             f"Clips directory not found: {clips_dir}. Run 05_render_clips.py first to render detection clips."
         )
@@ -230,6 +242,9 @@ def resolve_and_validate_assembly_artifacts(
     output_dir: Path | str,
     input_detections: Path | str | None = None,
     clips_dir: Path | str | None = None,
+    run: Path | str | None = None,
+    *,
+    require_clips_dir: bool = True,
 ) -> tuple[Path, Path, Path | None]:
     """Resolve and validate detections path and clips directory for video assembly.
 
@@ -237,9 +252,11 @@ def resolve_and_validate_assembly_artifacts(
     Raises FileNotFoundError if artifacts are missing.
     """
     detections_path, resolved_clips_dir, latest_run = resolve_assembly_artifacts(
-        output_dir, input_detections=input_detections, clips_dir=clips_dir
+        output_dir, input_detections=input_detections, clips_dir=clips_dir, run=run
     )
-    detections_path = validate_assembly_inputs(detections_path, resolved_clips_dir)
+    detections_path = validate_assembly_inputs(
+        detections_path, resolved_clips_dir, require_clips_dir=require_clips_dir
+    )
     return detections_path, resolved_clips_dir, latest_run
 
 
@@ -277,6 +294,8 @@ def archive_run_artifacts(
     pass2_fine_trace_path: Path | str | None = None,
     selection_trace_path: Path | str | None = None,
     prescreen_trace_path: Path | str | None = None,
+    storyline_plans_path: Path | str | None = None,
+    storyline_guide_path: Path | str | None = None,
     config_path: Path | str | None = None,
 ) -> dict[str, Path]:
     """Archive available pipeline artifacts into `run_dir`.
@@ -327,6 +346,18 @@ def archive_run_artifacts(
         dest = archive_file(src_ps, target_dir, "prescreen_trace.json")
         if dest:
             archived["prescreen_trace"] = dest
+
+    if storyline_plans_path is not None:
+        src_plans = Path(storyline_plans_path)
+        dest = archive_file(src_plans, target_dir, "storyline_plans.json")
+        if dest:
+            archived["storyline_plans"] = dest
+
+    if storyline_guide_path is not None:
+        src_guide = Path(storyline_guide_path)
+        dest = archive_file(src_guide, target_dir, "storyline_edit_guide.md")
+        if dest:
+            archived["storyline_guide"] = dest
 
     if stats_path is not None:
         dest = archive_file(stats_path, target_dir, "run_stats.json")

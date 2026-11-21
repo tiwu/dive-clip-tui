@@ -474,3 +474,54 @@ def test_traceability_models() -> None:
         candidates=[cand_trace],
     )
     assert sel_out.selected_count == 1
+
+
+def test_edit_plan_and_storyline_proposal_set_models() -> None:
+    """EditShot validates out_time > in_time and StorylineProposalSet round-trips cleanly."""
+    from utils.models import EditAct, EditPlan, EditShot, StorylineProposalSet
+
+    with pytest.raises(ValidationError, match="out_time"):
+        EditShot(
+            detection_id="c1_00000.00_00005.00",
+            clip_id="c1",
+            file_name="GX010778.MP4",
+            file_path="/GX010778.MP4",
+            in_time=5.0,
+            out_time=5.0,
+        )
+
+    shot = EditShot(
+        detection_id="c1_00000.00_00007.00",
+        clip_id="c1",
+        file_name="GX010778.MP4",
+        file_path="/GX010778.MP4",
+        act=1,
+        act_title="Act 1: Reef",
+        in_time=1.0,
+        out_time=5.5,
+        subject="Yellowtail Fusiliers",
+        story_role="hero_subject",
+        quality_score=9,
+        transition_in="fade",
+        transition_out="fade",
+    )
+    assert shot.duration == 4.5
+
+    plan = EditPlan(
+        id="teaser",
+        title="Fast Teaser",
+        target_duration_seconds=55,
+        estimated_duration_seconds=4.5,
+        clip_count=1,
+        acts=[EditAct(act_number=1, title="Act 1: Reef", shots=[shot])],
+        shots=[shot],
+    )
+    proposal_set = StorylineProposalSet(
+        run_id="run-20261119-155336",
+        provider="ollama",
+        model="qwen3-vl:8b-instruct",
+        proposals=[plan],
+    )
+    reloaded = StorylineProposalSet.model_validate_json(proposal_set.model_dump_json())
+    assert reloaded.proposals[0].id == "teaser"
+    assert reloaded.proposals[0].shots[0].duration == 4.5

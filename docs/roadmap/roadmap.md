@@ -25,8 +25,10 @@ meaning.
 - Runs are archived and resumable. CLI commands can assemble clips into an
 aftermovie.
 - Highlight selection applies Maximal Marginal Relevance (MMR) for diversity with
-  chronological assembly sort order, contiguous shot merging, and per-stage decision
-  traceability artifacts.
+  true `creation_time`/GoPro-chapter chronological ordering, duration-budget &
+  5-act story-arc sequencing, multi-option storyline planning (`dive-clip storyline`
+  across Ollama, OpenRouter, Claude, and Gemini), and plan-driven previewable
+  aftermovie assembly (`--plan`, `--dry-run`, `--target-duration`).
 - Scan-time rendering is race-safe: one writer owns each output, and interrupted
   renders are retried instead of appearing as completed clips.
 - Pass 0 runs on its own, and a human review loop records clip feedback per run.

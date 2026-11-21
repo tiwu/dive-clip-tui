@@ -1,7 +1,7 @@
 # Configuration for Dive Clip TUI
 
 general:
-  project_name: "Madagascar_Dives_2026"
+  project_name: ""  # Optional fallback label for EDL titles (folder ingest uses folder name)
   # Footage folder used when `dive-clip scan` is run without --input.
   # Keep input_dir and output_dir as separate folders that do not nest: ingest
   # walks the input tree recursively and would also pick up its own output.
@@ -67,14 +67,25 @@ scan_parameters:
   # Automatically falls back to system temp on OSes without /dev/shm (e.g. macOS).
   use_ramdisk: true                 # Use /dev/shm on Linux for fast I/O
 
+storyline:
+  provider: "ollama"                # "ollama", "openrouter", "claude", or "gemini"
+  model: null                       # Optional model override (defaults to ollama.model or provider default)
+  presets: ["teaser", "highlight", "aftermovie"]
+  max_per_source_file: 1            # Avoid repeating the same source file across acts
+  outlier_days: 7                   # Exclude off-trip clips >7 days from median recording date
+  temperature: 0.4
+  max_tokens: 4096
+
 cloud_storyline:
-  provider: "claude"                # "claude" or "gemini"
+  provider: "claude"                # Legacy fallback when storyline: is omitted
   model: "claude-3-5-sonnet-latest"
   target_edit_duration_minutes: 4
 
 selection:
   lambda_quality: 0.65              # MMR trade-off: 0.0 = pure diversity, 1.0 = pure quality
   per_clip_soft_limit: 1            # Soft quota per source clip before applying exponential penalty
+  max_per_source_file: 1            # Strict per-file limit in duration-budget mode
+  outlier_days: 7                   # Exclude clips recorded >N days from median trip date
 
 # Pre-VLM screening funnel (Stage C/D). A cheap FFmpeg + telemetry pass runs before
 # any VLM call and can reject or defer candidate windows so the model only sees

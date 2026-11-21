@@ -48,7 +48,7 @@ interesting bits → get back a watchable highlight video.
 │   ├── 01_extract_manifest.py# DaVinci Resolve metadata export
 │   ├── 02_scan_footage.py    # Worker pipeline (FFmpeg + Ollama coarse-to-fine)
 │   ├── 03_generate_edl.py    # AI detections → CMX 3600 EDL & CSV
-│   ├── 04_plan_storyline.py  # Cloud API story architect (Claude / Gemini)
+│   ├── 04_plan_storyline.py  # Multi-option storyline planner (Ollama/OpenRouter/Claude/Gemini)
 │   ├── 05_render_clips.py    # Render each detection window as MP4
 │   ├── 06_assemble_video.py  # Assemble clips into a highlight video
 │   ├── 07_create_aftermovie.py# Create aftermovie with music/transitions
@@ -64,9 +64,11 @@ interesting bits → get back a watchable highlight video.
 │   ├── prescreen.py          # Pre-VLM screening funnel (gates, metrics, trace)
 │   ├── prompt_templates.py   # Domain prompts and subject-routed templates
 │   ├── run_archive.py        # Run directory snapshots and latest symlink
-│   ├── selection.py          # Maximal Marginal Relevance (MMR) highlight selection
+│   ├── selection.py          # MMR highlight selection, chronological sort, & duration-budget planner
 │   ├── stats.py              # Scan throughput and pipeline metrics
+│   ├── storyline.py          # Storyline catalog prompts, EditPlan validation, & guide rendering
 │   ├── telemetry.py          # GoPro GPMF / DJI / Insta360 sensor decoding + scoring
+│   ├── text_llm.py           # Pluggable text-LLM client (Ollama/OpenRouter/Claude/Gemini)
 │   ├── timecode_math.py      # Frame/FPS → SMPTE timecode conversion
 │   └── version.py            # Dynamic package version helper
 ├── tui/                      # Legacy Textual UI prototype; future UI is a rebuild
