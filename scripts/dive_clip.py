@@ -31,6 +31,11 @@ from rich.table import Table
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils.audio_music import (  # noqa: E402
+    VALID_ATMOSPHERE_CHOICES,
+    resolve_atmosphere_music,
+    resolve_music_config,
+)
 from utils.checkpoint import PipelineState  # noqa: E402
 from utils.config import ConfigError, load_config, load_general_config  # noqa: E402
 from utils.encoder import resolve_video_quality  # noqa: E402
@@ -120,6 +125,7 @@ def _run_background_render_worker(
     highlights_dir: Path,
     stop_event: threading.Event,
     quality: Any = None,
+    music_kwargs: dict[str, Any] | None = None,
 ) -> None:
     """Periodically inspect detections_refined.json and render newly detected clips."""
     try:
@@ -140,6 +146,7 @@ def _run_background_render_worker(
         return
 
     rendered_cache: set[str] = set()
+    extra_music = music_kwargs or {}
 
     while not stop_event.is_set():
         if detections_path.exists():
@@ -155,10 +162,37 @@ def _run_background_render_worker(
                         stop_event=stop_event,
                         rendered_cache=rendered_cache,
                         quality=quality,
+                        **extra_music,
                     )
             except Exception as exc:
                 logger.debug("Background render check: %s", exc)
         stop_event.wait(1.0)
+
+
+def _append_music_cli_args(
+    cmd: list[str],
+    args: argparse.Namespace,
+    *,
+    include_music_path: bool = True,
+    include_music_volume: bool = True,
+    include_clip_music: bool = False,
+) -> None:
+    """Forward optional music and scuba audio-mix CLI flags to child scripts."""
+    if include_clip_music and getattr(args, "clip_music", False):
+        cmd.append("--clip-music")
+    if getattr(args, "atmosphere", None):
+        cmd.extend(["--atmosphere", str(args.atmosphere)])
+    if include_music_path and getattr(args, "music", None):
+        cmd.extend(["--music", str(args.music)])
+    if include_music_volume and getattr(args, "music_volume", None) is not None:
+        cmd.extend(["--music-volume", str(args.music_volume)])
+    if getattr(args, "original_volume", None) is not None:
+        cmd.extend(["--original-volume", str(args.original_volume)])
+    scuba_filter = getattr(args, "scuba_filter", None)
+    if scuba_filter is True:
+        cmd.append("--scuba-filter")
+    elif scuba_filter is False:
+        cmd.append("--no-scuba-filter")
 
 
 def resolve_paths(args: argparse.Namespace) -> tuple[Path, Path] | None:
@@ -374,13 +408,44 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if not state.is_step_done("scan") or not detections_path.exists():
         state.mark_step_started("scan")
         stop_render_event = threading.Event()
+        bg_music_kwargs: dict[str, Any] | None = None
         try:
-            render_quality = resolve_video_quality(load_config(config, default_to_empty=True))
-        except ConfigError:
+            loaded_cfg = load_config(config, default_to_empty=True)
+            render_quality = resolve_video_quality(loaded_cfg)
+            music_cfg = resolve_music_config(loaded_cfg, args)
+            if music_cfg.clip_music:
+                resolved_track = music_cfg.music_path
+                if resolved_track is None and music_cfg.atmosphere != "none":
+                    resolved_track = resolve_atmosphere_music(
+                        music_cfg.atmosphere,
+                        cache_dir=music_cfg.cache_dir,
+                        download_enabled=music_cfg.download_enabled,
+                        atmosphere_urls=music_cfg.atmosphere_urls,
+                    )
+                if resolved_track is not None and resolved_track.exists():
+                    bg_music_kwargs = {
+                        "music_path": resolved_track,
+                        "music_volume": music_cfg.music_volume,
+                        "original_volume": music_cfg.original_volume,
+                        "scuba_filter": music_cfg.scuba_filter,
+                        "audio_fade_duration": min(music_cfg.audio_fade_duration, 0.5),
+                    }
+        except ConfigError, ValueError:
             render_quality = None
+        worker_args: tuple[Any, ...] = (
+            (
+                detections_path,
+                highlights_dir,
+                stop_render_event,
+                render_quality,
+                bg_music_kwargs,
+            )
+            if bg_music_kwargs is not None
+            else (detections_path, highlights_dir, stop_render_event, render_quality)
+        )
         render_thread = threading.Thread(
             target=_run_background_render_worker,
-            args=(detections_path, highlights_dir, stop_render_event, render_quality),
+            args=worker_args,
             daemon=True,
         )
         render_thread.start()
@@ -422,6 +487,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
         render_cmd.append("--trace")
     elif debug_mode:
         render_cmd.append("--debug")
+    if getattr(args, "clip_music", False):
+        _append_music_cli_args(
+            render_cmd,
+            args,
+            include_music_path=True,
+            include_music_volume=True,
+            include_clip_music=True,
+        )
 
     if not state.is_step_done("render"):
         state.mark_step_started("render")
@@ -474,9 +547,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
             "--log-file",
             str(log_path),
         ]
-        music_arg = getattr(args, "music", None)
-        if assemble_mode != "simple" and music_arg:
-            assemble_cmd.extend(["--music", str(music_arg)])
+        _append_music_cli_args(
+            assemble_cmd,
+            args,
+            include_music_path=True,
+            include_music_volume=True,
+            include_clip_music=False,
+        )
         if trace_mode:
             assemble_cmd.append("--trace")
         elif debug_mode:
@@ -693,6 +770,9 @@ def _resolve_aftermovie_setting(
         aftermovie_cfg = full_cfg.get("aftermovie")
         if isinstance(aftermovie_cfg, dict) and aftermovie_cfg.get(config_key) is not None:
             return float(aftermovie_cfg[config_key])
+        music_cfg = full_cfg.get("music")
+        if isinstance(music_cfg, dict) and music_cfg.get(config_key) is not None:
+            return float(music_cfg[config_key])
     except ConfigError:
         pass
     return default_val
@@ -738,6 +818,13 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     log_file = getattr(args, "log_file", None)
     if log_file:
         cmd.extend(["--log-file", str(log_file)])
+    _append_music_cli_args(
+        cmd,
+        args,
+        include_music_path=True,
+        include_music_volume=True,
+        include_clip_music=False,
+    )
     if getattr(args, "debug", False):
         cmd.append("--debug")
 
@@ -805,7 +892,7 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
 
     top_n = _resolve_top_n(args, args.config)
     music_volume = _resolve_aftermovie_setting(
-        args, args.config, "music_volume", "music_volume", 0.15
+        args, args.config, "music_volume", "music_volume", 0.65
     )
     fade_duration = _resolve_aftermovie_setting(
         args, args.config, "fade_duration", "fade_duration", 1.0
@@ -850,11 +937,23 @@ def cmd_aftermovie(args: argparse.Namespace) -> int:
         cmd.extend(["--exclude-file", str(ex_file)])
     if getattr(args, "allow_outlier_dates", False):
         cmd.append("--allow-outlier-dates")
-    if getattr(args, "music", None):
-        cmd.extend(["--music", str(args.music)])
+    _append_music_cli_args(
+        cmd,
+        args,
+        include_music_path=True,
+        include_music_volume=False,
+        include_clip_music=False,
+    )
     log_file = getattr(args, "log_file", None)
     if log_file:
         cmd.extend(["--log-file", str(log_file)])
+    _append_music_cli_args(
+        cmd,
+        args,
+        include_music_path=True,
+        include_music_volume=True,
+        include_clip_music=False,
+    )
     if getattr(args, "debug", False):
         cmd.append("--debug")
 
@@ -1527,9 +1626,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="Assemble rendered clips into a highlight video or aftermovie after scanning",
     )
     scan_p.add_argument(
+        "--atmosphere",
+        choices=VALID_ATMOSPHERE_CHOICES,
+        default=None,
+        help="Copyright-free music atmosphere preset (default: from config, or ocean_ambient)",
+    )
+    scan_p.add_argument(
         "--music",
         default=None,
-        help="Path to background music track for aftermovie assembly",
+        help="Path to background music track for assembly (or clips with --clip-music)",
+    )
+    scan_p.add_argument(
+        "--music-volume",
+        type=float,
+        default=None,
+        help="Background music volume in audio mix (default: 0.65, or config)",
+    )
+    scan_p.add_argument(
+        "--original-volume",
+        type=float,
+        default=None,
+        help="Original clip audio volume relative to full scale (default: 0.35, or config)",
+    )
+    scan_p.add_argument(
+        "--scuba-filter",
+        dest="scuba_filter",
+        action="store_true",
+        default=None,
+        help="Apply regulator-hiss filter to attenuate scuba breathing frequencies",
+    )
+    scan_p.add_argument(
+        "--no-scuba-filter",
+        dest="scuba_filter",
+        action="store_false",
+        help="Disable regulator-hiss EQ filter on original clip audio",
+    )
+    scan_p.add_argument(
+        "--clip-music",
+        action="store_true",
+        default=False,
+        help="Opt-in: mix background music and attenuate scuba audio on individual rendered clips",
     )
     scan_p.add_argument(
         "--top-n",
@@ -1614,6 +1750,42 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Number of top-quality clips to assemble (default: 10, or config)",
+    )
+    assemble_p.add_argument(
+        "--atmosphere",
+        choices=VALID_ATMOSPHERE_CHOICES,
+        default=None,
+        help="Copyright-free music atmosphere preset (default: from config, or ocean_ambient)",
+    )
+    assemble_p.add_argument(
+        "--music",
+        default=None,
+        help="Path to background music track (optional; overrides --atmosphere)",
+    )
+    assemble_p.add_argument(
+        "--music-volume",
+        type=float,
+        default=None,
+        help="Background music volume in final mix (default: 0.65, or config)",
+    )
+    assemble_p.add_argument(
+        "--original-volume",
+        type=float,
+        default=None,
+        help="Original clip audio volume relative to full scale (default: 0.35, or config)",
+    )
+    assemble_p.add_argument(
+        "--scuba-filter",
+        dest="scuba_filter",
+        action="store_true",
+        default=None,
+        help="Apply regulator-hiss filter to attenuate scuba breathing frequencies",
+    )
+    assemble_p.add_argument(
+        "--no-scuba-filter",
+        dest="scuba_filter",
+        action="store_false",
+        help="Disable regulator-hiss EQ filter on original clip audio",
     )
     assemble_p.add_argument("--config", default="config.yaml", help="Path to config.yaml")
     assemble_p.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -1710,15 +1882,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable automatic exclusion of off-trip outlier dates in duration-budget mode",
     )
     aftermovie_p.add_argument(
+        "--atmosphere",
+        choices=VALID_ATMOSPHERE_CHOICES,
+        default=None,
+        help="Copyright-free music atmosphere preset (default: from config, or ocean_ambient)",
+    )
+    aftermovie_p.add_argument(
         "--music",
         default=None,
-        help="Path to background music track (optional)",
+        help="Path to background music track (optional; overrides --atmosphere)",
     )
     aftermovie_p.add_argument(
         "--music-volume",
         type=float,
         default=None,
-        help="Music ducking level (default: 0.15, or config)",
+        help="Background music volume in final mix (default: 0.65, or config)",
+    )
+    aftermovie_p.add_argument(
+        "--original-volume",
+        type=float,
+        default=None,
+        help="Original clip audio volume relative to full scale (default: 0.35, or config)",
+    )
+    aftermovie_p.add_argument(
+        "--scuba-filter",
+        dest="scuba_filter",
+        action="store_true",
+        default=None,
+        help="Apply regulator-hiss filter to attenuate scuba breathing frequencies",
+    )
+    aftermovie_p.add_argument(
+        "--no-scuba-filter",
+        dest="scuba_filter",
+        action="store_false",
+        help="Disable regulator-hiss EQ filter on original clip audio",
     )
     aftermovie_p.add_argument(
         "--fade-duration",

@@ -20,6 +20,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from utils.audio_music import (
+    VALID_ATMOSPHERE_CHOICES,
+    build_audio_filter_complex,
+    probe_has_audio,
+    resolve_atmosphere_music,
+    resolve_music_config,
+)
 from utils.checkpoint import PipelineState
 from utils.config import ConfigError, load_config
 from utils.encoder import (
@@ -81,11 +88,18 @@ def render_clip(
     encoder_name: str | None = None,
     encoder_args: list[str] | None = None,
     quality: VideoQuality | None = None,
+    music_path: Path | None = None,
+    music_volume: float = 0.65,
+    original_volume: float = 0.35,
+    scuba_filter: bool = True,
+    audio_fade_duration: float = 0.5,
 ) -> bool:
     """Extract a time window from a video file as an MP4 clip.
 
     Renders to a temporary file using fast input seeking and hardware acceleration,
     validates output with ffprobe, and atomically publishes to output_path.
+    When ``music_path`` is provided, mixes the background music track while
+    attenuating and optionally filtering original scuba audio.
     Returns True on success, False on failure.
     """
     extra = {"no_console": True} if not log_to_console else {}
@@ -108,6 +122,21 @@ def render_clip(
         enc_name = encoder_name or "custom"
         enc_args = encoder_args
 
+    has_music = music_path is not None and music_path.exists()
+    filter_complex: str | None = None
+    if has_music:
+        has_audio = probe_has_audio(source_path, run_fn=subprocess.run)
+        filter_complex = build_audio_filter_complex(
+            has_source_audio=has_audio,
+            has_music=True,
+            original_volume=original_volume,
+            music_volume=music_volume,
+            scuba_filter=scuba_filter,
+            fade_duration=min(audio_fade_duration, duration / 2.0),
+            video_duration=duration,
+            normalize_amix=True,
+        )
+
     # Input seeking: place -ss and -to before -i for fast keyframe seeking
     cmd = [
         "ffmpeg",
@@ -120,14 +149,38 @@ def render_clip(
         str(end_time),
         "-i",
         str(source_path),
-        *enc_args,
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        "-y",
-        str(temp_path),
     ]
+    if has_music and music_path is not None and filter_complex:
+        cmd.extend([
+            "-stream_loop",
+            "-1",
+            "-i",
+            str(music_path),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "0:v",
+            "-map",
+            "[aout]",
+            *enc_args,
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(temp_path),
+        ])
+    else:
+        cmd.extend([
+            *enc_args,
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-y",
+            str(temp_path),
+        ])
 
     try:
         if logger.isEnabledFor(logging.DEBUG):
@@ -160,15 +213,26 @@ def render_clip(
                 result.stderr.strip()[:200],
                 extra=extra,
             )
+            fb_kwargs: dict[str, Any] = {
+                "log_to_console": log_to_console,
+                "encoder_name": fb_name,
+                "encoder_args": fb_args,
+                "quality": quality,
+            }
+            if music_path is not None:
+                fb_kwargs.update({
+                    "music_path": music_path,
+                    "music_volume": music_volume,
+                    "original_volume": original_volume,
+                    "scuba_filter": scuba_filter,
+                    "audio_fade_duration": audio_fade_duration,
+                })
             return render_clip(
                 source_path,
                 start_time,
                 end_time,
                 output_path,
-                log_to_console=log_to_console,
-                encoder_name=fb_name,
-                encoder_args=fb_args,
-                quality=quality,
+                **fb_kwargs,
             )
         logger.warning(
             "FFmpeg failed for %s: %s",
@@ -202,6 +266,11 @@ def render_detections(
     rendered_cache: set[str] | None = None,
     encoder_name: str | None = None,
     quality: VideoQuality | None = None,
+    music_path: Path | None = None,
+    music_volume: float = 0.65,
+    original_volume: float = 0.35,
+    scuba_filter: bool = True,
+    audio_fade_duration: float = 0.5,
 ) -> tuple[int, int]:
     """Render detection windows into standalone MP4 clips.
 
@@ -298,6 +367,12 @@ def render_detections(
             kwargs["encoder_name"] = encoder_name
         if quality is not None:
             kwargs["quality"] = quality
+        if music_path is not None:
+            kwargs["music_path"] = music_path
+            kwargs["music_volume"] = music_volume
+            kwargs["original_volume"] = original_volume
+            kwargs["scuba_filter"] = scuba_filter
+            kwargs["audio_fade_duration"] = audio_fade_duration
         ok = render_clip(source_path, start_time, end_time, output_path, **kwargs)
 
         if ok:
@@ -347,6 +422,55 @@ def main() -> None:
         default=None,
         help="Append this run's log lines to the given file",
     )
+    parser.add_argument(
+        "--clip-music",
+        dest="clip_music",
+        action="store_true",
+        default=None,
+        help="Opt-in: mix background music and attenuate scuba breathing on each rendered clip",
+    )
+    parser.add_argument(
+        "--no-clip-music",
+        dest="clip_music",
+        action="store_false",
+        help="Disable background music on individual rendered clips",
+    )
+    parser.add_argument(
+        "--atmosphere",
+        choices=VALID_ATMOSPHERE_CHOICES,
+        default=None,
+        help="Copyright-free music atmosphere preset when --clip-music is enabled",
+    )
+    parser.add_argument(
+        "--music",
+        default=None,
+        help="Path to background music track when --clip-music is enabled",
+    )
+    parser.add_argument(
+        "--music-volume",
+        type=float,
+        default=None,
+        help="Background music volume when --clip-music is enabled (default: 0.65)",
+    )
+    parser.add_argument(
+        "--original-volume",
+        type=float,
+        default=None,
+        help="Original clip audio volume when --clip-music is enabled (default: 0.35)",
+    )
+    parser.add_argument(
+        "--scuba-filter",
+        dest="scuba_filter",
+        action="store_true",
+        default=None,
+        help="Apply regulator-hiss filter to attenuate scuba breathing frequencies",
+    )
+    parser.add_argument(
+        "--no-scuba-filter",
+        dest="scuba_filter",
+        action="store_false",
+        help="Disable regulator-hiss EQ filter on original clip audio",
+    )
     args = parser.parse_args()
 
     configure_logging(debug=args.debug, trace=args.trace, log_file=args.log_file)
@@ -387,6 +511,37 @@ def main() -> None:
     logger.info("Rendering %d detection clips to %s", len(detections), highlights_dir)
 
     quality = resolve_video_quality(config)
+    try:
+        music_cfg = resolve_music_config(config, args)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
+
+    render_kwargs: dict[str, Any] = {}
+    if music_cfg.clip_music:
+        resolved_music = music_cfg.music_path
+        if resolved_music is None and music_cfg.atmosphere != "none":
+            resolved_music = resolve_atmosphere_music(
+                music_cfg.atmosphere,
+                cache_dir=music_cfg.cache_dir,
+                download_enabled=music_cfg.download_enabled,
+                atmosphere_urls=music_cfg.atmosphere_urls,
+            )
+        if resolved_music is not None and resolved_music.exists():
+            logger.info(
+                "Clip music enabled: %s (music=%s, original=%s, scuba_filter=%s)",
+                resolved_music.name,
+                music_cfg.music_volume,
+                music_cfg.original_volume,
+                music_cfg.scuba_filter,
+            )
+            render_kwargs.update({
+                "music_path": resolved_music,
+                "music_volume": music_cfg.music_volume,
+                "original_volume": music_cfg.original_volume,
+                "scuba_filter": music_cfg.scuba_filter,
+                "audio_fade_duration": min(music_cfg.audio_fade_duration, 0.5),
+            })
 
     state: PipelineState | None = None
     if args.state_path is not None:
@@ -395,7 +550,7 @@ def main() -> None:
 
     try:
         rendered, failed = render_detections(
-            detections, highlights_dir, state=state, quality=quality
+            detections, highlights_dir, state=state, quality=quality, **render_kwargs
         )
     except KeyboardInterrupt:
         logger.warning("\nRender interrupted by user (Ctrl+C).")

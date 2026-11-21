@@ -122,13 +122,26 @@ prescreen:
     min_confidence: 0.80
     min_coverage: 0.80
 
+music:
+  atmosphere: "ocean_ambient"       # Preset atmosphere: "ocean_ambient", "chill", "cinematic", "upbeat", or "none"
+  music_volume: 0.65                # Background music volume in the mix (0.0 to 1.0)
+  original_audio_volume: 0.35       # Keep original clip audio (scuba breathing) at 35% (0.0 to 1.0)
+  scuba_filter: true                # Soft high-cut / notch filter to tame harsh regulator breathing hiss
+  audio_fade_duration: 1.0          # Audio fade-in / fade-out duration in seconds
+  clip_music: false                 # Opt-in: also mix background music into standalone clips in highlights/
+  download_enabled: true            # Attempt on-demand download of curated CC0 tracks (falls back to offline synth)
+  cache_dir: "assets/music"         # Local directory for custom or cached CC0 music tracks per atmosphere
+
 aftermovie:
   top_n_clips: 10                   # Number of top highlights to include in highlight movie
   fade_duration: 1.0                # Duration in seconds of cross-dissolve fade (dip-to-black)
   min_transition_gap: 3.0           # Minimum gap (s) between same-source clips before fading out/in
   bridge_gap_seconds: 1.5           # Max gap (s) between same-source clips to bridge into a single take
   max_clip_duration: 12.0           # Maximum duration (s) of a bridged clip take
-  music_volume: 0.15                # Background music volume relative to video audio
+  atmosphere: "ocean_ambient"       # Background music preset ("ocean_ambient", "chill", "cinematic", "upbeat", "none")
+  music_volume: 0.65                # Background music volume relative to full scale
+  original_audio_volume: 0.35       # Original clip audio level in the mix (30-40% scuba ambience)
+  scuba_filter: true                # Soft high-cut / notch filter on original scuba breathing audio
 
 # Custom domains and prompt templates (optional):
 # prompts:

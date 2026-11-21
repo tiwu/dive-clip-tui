@@ -105,8 +105,13 @@ interrupted run resumes rather than restarting.
 | `--resume [RUN_ID_OR_PATH]` | latest run | Resume a run; bare flag resumes the newest |
 | `--reset` | off | Clear saved pipeline state and start fresh |
 | `--assemble` | off | Add an assembly step after rendering |
-| `--assemble-mode {aftermovie,simple}` | `aftermovie` | `aftermovie` = music/fades (`07`), `simple` = plain concat (`06`) |
-| `--music PATH` | none | Music bed; ignored by `--assemble-mode simple` |
+| `--assemble-mode {aftermovie,simple}` | `aftermovie` | `aftermovie` = fades/transitions (`07`), `simple` = concat (`06`) |
+| `--atmosphere PRESET` | `ocean_ambient` | Copyright-free music preset (`ocean_ambient`, `chill`, `cinematic`, `upbeat`, `none`) |
+| `--music PATH` | none | Custom music track (overrides `--atmosphere`) |
+| `--music-volume F` | `0.65` | Background music level in final mix |
+| `--original-volume F` | `0.35` | Original camera/scuba audio level (30–40% target) |
+| `--scuba-filter` / `--no-scuba-filter` | on | Attenuate harsh scuba regulator breathing frequencies |
+| `--clip-music` | off | Opt-in: mix background music onto individual clips in `highlights/` |
 | `--top-n N` | `aftermovie.top_n_clips`, else `10` | Clips to include when assembling |
 | `--classifications PATH` | none | Reuse confident domain labels from a previous `classify` run |
 | `--config`, `--debug`, `--log-file` | — | [Shared options](#options-shared-by-every-command) |
@@ -172,11 +177,14 @@ uv run dive-clip storyline --deterministic-only
 
 ### `dive-clip assemble` and `dive-clip aftermovie`
 
-Both cut existing clips into one video; `aftermovie` adds music, fades, and
-transitions, and can preview or render options from `storyline_plans.json`.
+Both cut existing clips into one video and mix copyright-free background music
+with attenuated scuba breathing audio (`35%` original audio + regulator-hiss
+filter by default; disable with `--atmosphere none`); `aftermovie` also adds
+cross-dissolve fades, transitions, and storyline plan rendering.
 
 ```bash
 uv run dive-clip assemble   --output ./outputs --top-n 8
+uv run dive-clip aftermovie --atmosphere chill --original-volume 0.35
 uv run dive-clip aftermovie --plan storyline_plans.json --option highlight --dry-run
 uv run dive-clip aftermovie --plan storyline_plans.json --option all --music ./track.mp3
 uv run dive-clip aftermovie --target-duration 150 --order story_arc --dry-run
@@ -199,8 +207,11 @@ uv run dive-clip aftermovie --target-duration 150 --order story_arc --dry-run
 | `--exclude-file NAME` | — | exclude source file (repeatable) |
 | `--allow-outlier-dates` | — | keep off-trip outlier dates in duration mode |
 | `--top-n N` | `10` or config | `10` or config (when `--plan`/`--target-duration` unset) |
-| `--music PATH` | — | music bed |
-| `--music-volume F` | — | `0.15`, or `aftermovie.music_volume` |
+| `--atmosphere PRESET` | `ocean_ambient` | `ocean_ambient`, `chill`, `cinematic`, `upbeat`, `none` (also `ambient`, `calm`, `action`) |
+| `--music PATH` | auto-resolved | custom music file (overrides `--atmosphere`) |
+| `--music-volume F` | `0.65`, or config | `0.65`, or `music.music_volume` / `aftermovie.music_volume` |
+| `--original-volume F` | `0.35`, or config | original camera/scuba audio level (`0.35`, i.e. 35%) |
+| `--scuba-filter` / `--no-scuba-filter` | on | toggle scuba regulator-hiss EQ filter |
 | `--fade-duration S` | — | `1.0`, or `aftermovie.fade_duration` |
 | `--config`, `--debug`, `--log-file` | [shared](#options-shared-by-every-command) | [shared](#options-shared-by-every-command) |
 
@@ -242,7 +253,9 @@ multiple layers, the following precedence applies:
 | Ollama server | `OLLAMA_HOST` | `ollama.host` | `http://localhost:11434` |
 | API keys | shell environment | `.env` file | — |
 | Clip count | `--top-n` | `aftermovie.top_n_clips` | `10` |
-| Music level | `--music-volume` | `aftermovie.music_volume` | `0.15` |
+| Music atmosphere | `--atmosphere` | `music.atmosphere` | `ocean_ambient` |
+| Music level | `--music-volume` | `music.music_volume` / `aftermovie.music_volume` | `0.65` |
+| Original audio level | `--original-volume` | `music.original_audio_volume` | `0.35` |
 | Fade length | `--fade-duration` | `aftermovie.fade_duration` | `1.0` |
 | Everything else | the config file | built-in default | — |
 
@@ -378,12 +391,28 @@ Start at `gate_mode: "advisory"`, read `prescreen_trace.json`, then switch to
 | `temperature` | `0.4` | Sampling temperature for storyline JSON generation |
 | `max_tokens` | `4096` | Response token cap |
 
+**`music`** *(optional)* — controls background music atmospheres and scuba-breathing audio mixing across `aftermovie`, `assemble`, and opt-in `render-clips --clip-music`.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `atmosphere` | `"ocean_ambient"` | Preset mood (`ocean_ambient`/`ambient`, `chill`/`calm`, `cinematic`, `upbeat`/`action`, or `none`) |
+| `music_volume` | `0.65` | Background music volume in final mix |
+| `original_audio_volume` | `0.35` | Original camera/scuba audio level in the mix (30–40% range) |
+| `scuba_filter` | `true` | Soft high-cut / notch filter (`highpass 80Hz`, `eq 2800Hz -8dB`, `lowpass 4500Hz`) to tame regulator hiss |
+| `audio_fade_duration` | `1.0` | Audio fade-in / fade-out duration (seconds) |
+| `clip_music` | `false` | Opt-in: mix background music onto individual highlight clips in `highlights/` |
+| `download_enabled` | `true` | Allow on-demand download & caching of CC0 tracks (falls back to offline synthesis) |
+| `cache_dir` | `"assets/music"` | Local directory for user tracks (`assets/music/<atmosphere>/`), CC0 cache, and synth WAVs |
+
 **`aftermovie`** *(optional)* — consulted only when the matching flag is absent.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `top_n_clips` | `10` | Default clip count |
-| `music_volume` | `0.15` | Default music mix level |
+| `atmosphere` | `"ocean_ambient"` | Default music atmosphere preset |
+| `music_volume` | `0.65` | Default music mix level |
+| `original_audio_volume` | `0.35` | Original clip audio level when mixing music |
+| `scuba_filter` | `true` | Apply regulator-hiss EQ filter on original clip audio |
 | `fade_duration` | `1.0` | Default fade/transition length |
 | `min_transition_gap` | `3.0` | Minimum gap in seconds between same-source clips before fading out/in (dip-to-black) |
 | `bridge_gap_seconds` | `1.5` | Max gap in seconds between same-source clips to bridge into a single take |

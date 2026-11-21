@@ -54,3 +54,7 @@ outputs/*.md
 # Local Ollama Modelfiles
 Modelfile*
 
+# Generated / cached music assets
+assets/music/cache/
+assets/music/synth/
+

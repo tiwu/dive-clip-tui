@@ -24,6 +24,13 @@ from rich.table import Table
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from utils.audio_music import (
+    VALID_ATMOSPHERE_CHOICES,
+    MusicConfig,
+    mix_video_audio,
+    resolve_atmosphere_music,
+    resolve_music_config,
+)
 from utils.config import ConfigError, load_config
 from utils.encoder import (
     VideoQuality,
@@ -386,71 +393,28 @@ def add_background_music(
     output_path: Path,
     music_volume: float = 0.15,
     aspect_ratio: str = "16:9",
+    original_volume: float | None = None,
+    scuba_filter: bool = False,
+    fade_duration: float = 0.0,
+    video_duration: float | None = None,
 ) -> bool:
-    """Mix a background music track under the video audio (basic ducking).
+    """Mix a background music track under the video audio with optional scuba filtering.
 
-    The music is mixed at a reduced volume so it sits under the video's
-    original audio rather than overpowering it. Optionally converts the
-    video to the target aspect ratio first.
+    When ``original_volume`` and ``scuba_filter`` are left at their defaults
+    (``None`` and ``False``), preserves legacy direct ``amix`` / copy behavior.
     """
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if music_path is None or not music_path.exists():
-        # No music — just copy the video
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(video_path),
-            "-c",
-            "copy",
-            "-y",
-            str(output_path),
-        ]
-    else:
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(video_path),
-            "-i",
-            str(music_path),
-            "-filter_complex",
-            (
-                f"[1:a]aloop=loop=-1:size=2^{16},volume={music_volume}[music];"
-                f"[0:a][music]amix=inputs=2:duration=first[aout]"
-            ),
-            "-map",
-            "0:v",
-            "-map",
-            "[aout]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-shortest",
-            "-y",
-            str(output_path),
-        ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        logger.warning("FFmpeg timeout adding music to %s", output_path.name)
-        return False
-    except Exception as exc:
-        logger.warning("FFmpeg error: %s", exc)
-        return False
-
-    if result.returncode != 0:
-        logger.warning("FFmpeg music mix failed: %s", result.stderr.strip()[:200])
-        return False
-
-    return True
+    _ = aspect_ratio
+    return mix_video_audio(
+        video_path,
+        music_path,
+        output_path,
+        music_volume=music_volume,
+        original_volume=original_volume,
+        scuba_filter=scuba_filter,
+        fade_duration=fade_duration,
+        video_duration=video_duration,
+        run_fn=subprocess.run,
+    )
 
 
 def _parse_date_range(raw: str | None) -> tuple[str, str] | None:
@@ -574,6 +538,9 @@ def _render_shot_sequence(
     aspect_ratio: str,
     fade_duration: float,
     video_quality: VideoQuality,
+    original_volume: float | None = 0.35,
+    scuba_filter: bool = True,
+    audio_fade_duration: float = 1.0,
 ) -> bool:
     """Render a sequence of shot dicts into ``output_path``."""
     tmp_dir = output_dir / ".aftermovie_tmp"
@@ -670,11 +637,26 @@ def _render_shot_sequence(
         else:
             aspect_converted = assembled
 
+        vid_dur = _probe_duration(aspect_converted, default=0.0)
         if add_background_music(
-            aspect_converted, music_path, output_path, music_volume, aspect_ratio
+            aspect_converted,
+            music_path,
+            output_path,
+            music_volume,
+            aspect_ratio,
+            original_volume,
+            scuba_filter,
+            audio_fade_duration,
+            vid_dur if vid_dur > 0 else None,
         ):
             if music_path:
-                logger.info("✓ Added background music (volume %s)", music_volume)
+                logger.info(
+                    "✓ Added background music %s (music=%s, original=%s, scuba_filter=%s)",
+                    music_path.name,
+                    music_volume,
+                    original_volume,
+                    scuba_filter,
+                )
             logger.info("✓ Aftermovie created: %s", output_path)
         else:
             logger.warning("Failed to add music. Outputting assembled video without music.")
@@ -697,6 +679,9 @@ def render_edit_plan(
     aspect_ratio: str,
     fade_duration: float,
     video_quality: VideoQuality,
+    original_volume: float | None = 0.35,
+    scuba_filter: bool = True,
+    audio_fade_duration: float = 1.0,
 ) -> bool:
     """Render an ``EditPlan`` with explicit per-shot trim bounds and act transitions."""
     items = _plan_to_render_items(plan)
@@ -717,7 +702,37 @@ def render_edit_plan(
         aspect_ratio=aspect_ratio,
         fade_duration=fade_duration,
         video_quality=video_quality,
+        original_volume=original_volume,
+        scuba_filter=scuba_filter,
+        audio_fade_duration=audio_fade_duration,
     )
+
+
+def _resolve_aftermovie_music_mix(
+    music_cfg: MusicConfig, args: argparse.Namespace
+) -> tuple[Path | None, float | None, bool, float]:
+    """Resolve background music path and effective scuba-audio mix settings."""
+    music_path = music_cfg.music_path
+    if music_path is None and music_cfg.atmosphere != "none":
+        music_path = resolve_atmosphere_music(
+            music_cfg.atmosphere,
+            cache_dir=music_cfg.cache_dir,
+            download_enabled=music_cfg.download_enabled,
+            atmosphere_urls=music_cfg.atmosphere_urls,
+        )
+    if music_path is not None and music_path.exists():
+        return (
+            music_path,
+            music_cfg.original_volume,
+            music_cfg.scuba_filter,
+            music_cfg.audio_fade_duration,
+        )
+    explicit_orig = getattr(args, "original_volume", None)
+    explicit_scuba = getattr(args, "scuba_filter", None)
+    orig_vol = float(explicit_orig) if explicit_orig is not None else None
+    scuba_on = bool(explicit_scuba) if explicit_scuba is not None else False
+    fade = music_cfg.audio_fade_duration if (orig_vol is not None or scuba_on) else 0.0
+    return None, orig_vol, scuba_on, fade
 
 
 def main() -> None:
@@ -815,15 +830,40 @@ def main() -> None:
         help="Disable automatic exclusion of off-trip outlier dates in duration-budget mode",
     )
     parser.add_argument(
+        "--atmosphere",
+        choices=VALID_ATMOSPHERE_CHOICES,
+        default=None,
+        help="Copyright-free music atmosphere preset (default: from config, or ocean_ambient)",
+    )
+    parser.add_argument(
         "--music",
         default=None,
-        help="Path to background music track (optional)",
+        help="Path to background music track (optional; overrides --atmosphere)",
     )
     parser.add_argument(
         "--music-volume",
         type=float,
         default=None,
-        help="Background music volume relative to video audio (default: 0.15, or config)",
+        help="Background music volume in final mix (default: 0.65, or config)",
+    )
+    parser.add_argument(
+        "--original-volume",
+        type=float,
+        default=None,
+        help="Original clip audio volume relative to full scale (default: 0.35, or config)",
+    )
+    parser.add_argument(
+        "--scuba-filter",
+        dest="scuba_filter",
+        action="store_true",
+        default=None,
+        help="Apply regulator-hiss filter to attenuate scuba breathing frequencies",
+    )
+    parser.add_argument(
+        "--no-scuba-filter",
+        dest="scuba_filter",
+        action="store_false",
+        help="Disable regulator-hiss EQ filter on original clip audio",
     )
     parser.add_argument(
         "--aspect-ratio",
@@ -875,11 +915,12 @@ def main() -> None:
         config.get("aftermovie", {}) if isinstance(config.get("aftermovie"), dict) else {}
     )
     top_n = args.top_n if args.top_n is not None else int(aftermovie_cfg.get("top_n_clips", 10))
-    music_volume = (
-        args.music_volume
-        if args.music_volume is not None
-        else float(aftermovie_cfg.get("music_volume", 0.15))
-    )
+    try:
+        music_cfg = resolve_music_config(config, args)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
+    music_volume = music_cfg.music_volume
     fade_duration = (
         args.fade_duration
         if args.fade_duration is not None
@@ -901,7 +942,6 @@ def main() -> None:
     max_clip_duration = float(
         aftermovie_cfg.get("max_clip_duration") or scan_params.get("max_clip_duration") or 12.0
     )
-    music_path = Path(args.music) if args.music else None
 
     # Plan-driven rendering path (--plan, or --option defaulting to storyline_plans.json)
     if not args.plan and args.option:
@@ -955,6 +995,8 @@ def main() -> None:
                 )
             sys.exit(0)
 
+        music_path, orig_vol, scuba_on, audio_fade = _resolve_aftermovie_music_mix(music_cfg, args)
+
         try:
             for plan in plans:
                 if args.output:
@@ -986,6 +1028,9 @@ def main() -> None:
                     aspect_ratio=args.aspect_ratio,
                     fade_duration=fade_duration,
                     video_quality=video_quality,
+                    original_volume=orig_vol,
+                    scuba_filter=scuba_on,
+                    audio_fade_duration=audio_fade,
                 ):
                     sys.exit(1)
         except KeyboardInterrupt:
@@ -1078,6 +1123,8 @@ def main() -> None:
         else:
             output_path = output_dir / "aftermovie.mp4"
 
+        music_path, orig_vol, scuba_on, audio_fade = _resolve_aftermovie_music_mix(music_cfg, args)
+
         try:
             if not render_edit_plan(
                 plan,
@@ -1089,6 +1136,9 @@ def main() -> None:
                 aspect_ratio=args.aspect_ratio,
                 fade_duration=fade_duration,
                 video_quality=video_quality,
+                original_volume=orig_vol,
+                scuba_filter=scuba_on,
+                audio_fade_duration=audio_fade,
             ):
                 sys.exit(1)
         except KeyboardInterrupt:
@@ -1150,6 +1200,8 @@ def main() -> None:
     else:
         output_path = output_dir / "aftermovie.mp4"
 
+    music_path, orig_vol, scuba_on, audio_fade = _resolve_aftermovie_music_mix(music_cfg, args)
+
     try:
         if not _render_shot_sequence(
             render_items,
@@ -1161,6 +1213,9 @@ def main() -> None:
             aspect_ratio=args.aspect_ratio,
             fade_duration=fade_duration,
             video_quality=video_quality,
+            original_volume=orig_vol,
+            scuba_filter=scuba_on,
+            audio_fade_duration=audio_fade,
         ):
             sys.exit(1)
     except KeyboardInterrupt:

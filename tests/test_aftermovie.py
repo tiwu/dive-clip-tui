@@ -7,10 +7,23 @@ import importlib.util
 import json
 import os
 import sys as sys_module
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from rich.console import Console
+
+
+@pytest.fixture(autouse=True)
+def _offline_music_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep aftermovie unit tests offline so atmosphere fallback synthesizes locally."""
+
+    def _no_network(*_args: object, **_kwargs: object) -> None:
+        raise urllib.error.URLError("offline in unit tests")
+
+    monkeypatch.setattr("utils.audio_music.urllib.request.urlopen", _no_network)
+
 
 # Load scripts/07_create_aftermovie.py directly (name starts with a digit)
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
@@ -1127,3 +1140,149 @@ def test_aftermovie_option_without_plan_and_run_latest(tmp_path: Path, capsys) -
     finally:
         sys_module.argv, sys_module.exit = orig_argv, orig_exit
         os.chdir(orig_cwd)
+
+
+def test_add_background_music_with_scuba_filter_and_original_volume(tmp_path: Path) -> None:
+    """add_background_music applies scuba EQ, 35% original audio, and 65% music mix."""
+    video = tmp_path / "video.mp4"
+    video.touch()
+    music = tmp_path / "ocean.wav"
+    music.write_bytes(b"RIFF" + b"\x00" * 100)
+    output = tmp_path / "output.mp4"
+
+    probe_res = MagicMock(returncode=0, stdout=json.dumps({"streams": [{"codec_type": "audio"}]}))
+    ok_res = MagicMock(returncode=0, stderr="")
+
+    with patch.object(aftermovie.subprocess, "run", side_effect=[probe_res, ok_res]) as mock_run:
+        ok = aftermovie.add_background_music(
+            video,
+            music,
+            output,
+            music_volume=0.65,
+            original_volume=0.35,
+            scuba_filter=True,
+            fade_duration=1.0,
+            video_duration=10.0,
+        )
+
+    assert ok is True
+    ffmpeg_cmd = mock_run.call_args_list[1][0][0]
+    assert "-stream_loop" in ffmpeg_cmd
+    fc = ffmpeg_cmd[ffmpeg_cmd.index("-filter_complex") + 1]
+    assert "highpass=f=80" in fc
+    assert "equalizer=f=2800" in fc
+    assert "lowpass=f=4500" in fc
+    assert "volume=0.35" in fc
+    assert "volume=0.65" in fc
+    assert "amix=inputs=2" in fc
+
+
+def test_add_background_music_silent_video_fallback(tmp_path: Path) -> None:
+    """Silent source clips without an audio stream should still receive background music."""
+    video = tmp_path / "silent.mp4"
+    video.touch()
+    music = tmp_path / "chill.wav"
+    music.write_bytes(b"RIFF" + b"\x00" * 100)
+    output = tmp_path / "output.mp4"
+
+    probe_silent = MagicMock(returncode=0, stdout=json.dumps({"streams": []}))
+    ok_res = MagicMock(returncode=0, stderr="")
+
+    with patch.object(aftermovie.subprocess, "run", side_effect=[probe_silent, ok_res]) as mock_run:
+        ok = aftermovie.add_background_music(
+            video,
+            music,
+            output,
+            music_volume=0.65,
+            original_volume=0.35,
+            scuba_filter=True,
+            fade_duration=1.0,
+            video_duration=6.0,
+        )
+
+    assert ok is True
+    ffmpeg_cmd = mock_run.call_args_list[1][0][0]
+    fc = ffmpeg_cmd[ffmpeg_cmd.index("-filter_complex") + 1]
+    assert "[0:a]" not in fc
+    assert "atrim=0:6" in fc
+    assert "volume=0.65" in fc
+
+
+def test_aftermovie_cli_atmosphere_and_original_volume(tmp_path: Path) -> None:
+    """CLI --atmosphere chill --original-volume 0.35 --scuba-filter drives mix settings."""
+    source = tmp_path / "dive1.mp4"
+    source.touch()
+    detections = {
+        "detections": [
+            {
+                "clip_id": "clip001",
+                "file_name": "dive1.mp4",
+                "file_path": str(source),
+                "start_time": 0.0,
+                "end_time": 5.0,
+                "subject": "turtle",
+                "quality_score": 9,
+                "confidence": 0.9,
+            }
+        ]
+    }
+    det_path = tmp_path / "detections_refined.json"
+    det_path.write_text(json.dumps(detections), encoding="utf-8")
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text('general:\n  output_dir: "./outputs"\n', encoding="utf-8")
+    (tmp_path / "outputs" / "highlights").mkdir(parents=True)
+
+    captured: list[tuple] = []
+
+    def mock_music(video, music, out, *args):
+        captured.append((music, *args))
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).touch()
+        return True
+
+    def mock_render(source, start, end, output, **kwargs):
+        Path(output).touch()
+        return True
+
+    def mock_concat(clips, out):
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).touch()
+        return True
+
+    orig_argv, orig_cwd = sys_module.argv, Path.cwd()
+    try:
+        sys_module.argv = [
+            "07_create_aftermovie.py",
+            "--config",
+            str(cfg_path),
+            "--input",
+            str(det_path),
+            "--output",
+            str(tmp_path / "out.mp4"),
+            "--atmosphere",
+            "chill",
+            "--original-volume",
+            "0.35",
+            "--music-volume",
+            "0.65",
+            "--scuba-filter",
+        ]
+        os.chdir(tmp_path)
+        with (
+            patch.object(aftermovie, "render_clip_with_fade", side_effect=mock_render),
+            patch.object(aftermovie, "concat_clips", side_effect=mock_concat),
+            patch.object(aftermovie, "add_background_music", side_effect=mock_music),
+            patch.object(aftermovie, "_probe_duration", return_value=5.0),
+        ):
+            aftermovie.main()
+    finally:
+        sys_module.argv = orig_argv
+        os.chdir(orig_cwd)
+
+    assert len(captured) == 1
+    music_file, m_vol, _ar, orig_vol, scuba_on, *_rest = captured[0]
+    assert music_file is not None
+    assert Path(music_file).name == "chill.wav"
+    assert m_vol == 0.65
+    assert orig_vol == 0.35
+    assert scuba_on is True
